@@ -287,7 +287,7 @@ pub fn element_drawings(model: &Model, element: &Element, named: &dyn Fn(&str) -
 }
 
 /// The overview of a frame made of several prefab units, at 1 : 50, seen as its units are: each
-/// unit as its outline with its mark in it, the frame's members thin inside it, its openings
+/// unit as its outline with its number under it, the frame's members thin inside it, its openings
 /// crossed; the units' lengths, the frame's length and its height dimensioned, and the list of
 /// the units with their sizes. The site puts the units up from it.
 fn overview(element: &Element, units: &[f64], members: &[Member], openings: &[bim_core::Opening], start: f64, height: f64) -> Drawing2d {
@@ -309,7 +309,7 @@ fn overview(element: &Element, units: &[f64], members: &[Member], openings: &[bi
     }
     let total: f64 = units.iter().sum();
     let mut lo = 0.0;
-    let mut y = -(off * 3.5 + text);
+    let mut y = -(off * 5.0 + text);
     let title = format!("{} · {} × {} mm · 1:{}", element.name, mm(total), mm(height), PLAN_SCALE as i64);
     d.texts.push(Text2d { pen: Pen::Text, at: [0.0, y], height: text * 1.4, text: title, align: Align::Left, angle: 0.0 });
     y -= text * 1.4 * 1.8;
@@ -317,13 +317,14 @@ fn overview(element: &Element, units: &[f64], members: &[Member], openings: &[bi
         let mark = bim_core::system::mark(element, k + 1);
         rectangle(&mut d, Pen::Cut, (lo, lo + length), (0.0, height));
         d.dimensions.push(Dim2d { from: [lo, height], to: [lo + length, height], value: *length, offset: off, text_height: text });
-        // its number large in its middle, its whole mark in the list
-        d.texts.push(Text2d { pen: Pen::Text, at: [lo + length / 2.0, height / 2.0], height: text * 2.0, text: (k + 1).to_string(), align: Align::Center, angle: 0.0 });
+        // its number large under it, clear of its members and openings; its whole mark in the list
+        d.texts.push(Text2d { pen: Pen::Text, at: [lo + length / 2.0, -text * 2.4], height: text * 2.0, text: (k + 1).to_string(), align: Align::Center, angle: 0.0 });
         d.texts.push(Text2d { pen: Pen::Text, at: [0.0, y], height: text, text: format!("{}  {mark} · {} × {} mm", k + 1, mm(*length), mm(height)), align: Align::Left, angle: 0.0 });
         y -= text * 1.8;
         lo += length;
     }
-    d.dimensions.push(Dim2d { from: [total, 0.0], to: [0.0, 0.0], value: total, offset: off, text_height: text });
+    // the whole length under the numbers
+    d.dimensions.push(Dim2d { from: [total, 0.0], to: [0.0, 0.0], value: total, offset: off * 2.5, text_height: text });
     d.dimensions.push(Dim2d { from: [0.0, 0.0], to: [0.0, height], value: height, offset: off, text_height: text });
     d
 }
