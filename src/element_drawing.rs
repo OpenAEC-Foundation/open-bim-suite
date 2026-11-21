@@ -401,14 +401,14 @@ const MOST: usize = 4000;
 /// The elevation of a standing system on a grid (a curtain wall, a frame, a wall of elements,
 /// cladding), seen from its interior at 1 : 50: every panel and every member as its outline, the
 /// seams between the panels dimensioned along it and up it, its length and its height, each
-/// panel with its number, and the lists of the panels and of the members. None for a system of
-/// more than [`MOST`] parts (brickwork), which is not made from a list of its bricks.
+/// panel with its number, its openings crossed, and the lists of the panels and of the members.
+/// A system of more than [`MOST`] parts (brickwork) is drawn as its outline and its openings,
+/// with its courses counted in the title and its bricks in the list.
 fn elevation(model: &Model, element: &Element, s: &bim_core::SystemDef, t: &bim_core::SystemTypeDef, named: &dyn Fn(&str) -> String) -> Option<Drawing2d> {
     let dir = (s.end - s.start).try_normalize()?;
     let parts = model.evaluate(element.id).ok()?;
-    if parts.len() > MOST {
-        return None;
-    }
+    // a wall of bricks: its outline, its courses counted and its bricks listed, not drawn
+    let many = parts.len() > MOST;
     let (text, off) = (TEXT * PLAN_SCALE, OFFSET * PLAN_SCALE);
     let mut d = Drawing2d { name: format!("{} {}", element.name, element.id.0), space: Space::Model { scale: PLAN_SCALE }, paper: None, lines: Vec::new(), texts: Vec::new(), dimensions: Vec::new() };
     let faced = |p: &bim_core::Part| {
@@ -433,15 +433,27 @@ fn elevation(model: &Model, element: &Element, s: &bim_core::SystemDef, t: &bim_
     // members thinner than [`JOINT`] (a joint of mortar or glue, a seam) are the lines between
     // the panels: not drawn twice
     let drawn = |m: &&Member| m.section().0 >= JOINT - 1e-9;
-    for m in members.iter().filter(drawn) {
-        outline(Pen::Cut, m);
-    }
-    for p in &panels {
-        outline(if members.iter().any(|m| drawn(&m)) { Pen::Beyond } else { Pen::Cut }, p);
-    }
     let all = || panels.iter().chain(&members);
     let (u0, u1) = all().fold((f64::INFINITY, f64::NEG_INFINITY), |acc, m| (acc.0.min(m.u.0), acc.1.max(m.u.1)));
     let (v0, v1) = all().fold((f64::INFINITY, f64::NEG_INFINITY), |acc, m| (acc.0.min(m.v.0), acc.1.max(m.v.1)));
+    if many {
+        outline(Pen::Cut, &Member { u: (u0, u1), v: (v0, v1) });
+    } else {
+        for m in members.iter().filter(drawn) {
+            outline(Pen::Cut, m);
+        }
+        for p in &panels {
+            outline(if members.iter().any(|m| drawn(&m)) { Pen::Beyond } else { Pen::Cut }, p);
+        }
+    }
+    // its openings and those of the doors and windows standing in it: an outline and a cross
+    let openings = model.openings_of(element.id);
+    for o in &openings {
+        let (a, b, foot, head) = (o.along, o.along + o.width, o.sill, o.sill + o.height);
+        for (p, q) in [([a, foot], [b, foot]), ([b, foot], [b, head]), ([b, head], [a, head]), ([a, head], [a, foot]), ([a, foot], [b, head]), ([a, head], [b, foot])] {
+            d.lines.push(Line2d::new(Pen::Detail, p, q));
+        }
+    }
     let dim = |d: &mut Drawing2d, from: [f64; 2], to: [f64; 2], rows: f64| {
         let value = (to[0] - from[0]).hypot(to[1] - from[1]);
         if value > LINEAR_TOLERANCE {
@@ -474,6 +486,13 @@ fn elevation(model: &Model, element: &Element, s: &bim_core::SystemDef, t: &bim_
         for pair in along.windows(2) {
             dim(&mut d, [pair[0], v1], [pair[1], v1], 1.0);
         }
+    } else if !openings.is_empty() {
+        // too many seams to read: where its openings are along it
+        let mut at: Vec<f64> = once(u0).chain(openings.iter().flat_map(|o| [o.along, o.along + o.width])).chain(once(u1)).collect();
+        at.sort_by(f64::total_cmp);
+        for pair in at.windows(2) {
+            dim(&mut d, [pair[0], v1], [pair[1], v1], 1.0);
+        }
     }
     if up.len() > 2 && up.len() <= SEAMS {
         for pair in up.windows(2) {
@@ -484,14 +503,16 @@ fn elevation(model: &Model, element: &Element, s: &bim_core::SystemDef, t: &bim_
     dim(&mut d, [u0, v0], [u0, v1], 1.0);
     // its name, the panels numbered, and the members
     let thick = bim_library::millimetres(s.panel, bim_library::Lang::En);
-    let title = format!("{} · {} {thick} · {} × {} mm · 1:{}", element.name, named(&t.panel_material), mm(u1 - u0), mm(v1 - v0), PLAN_SCALE as i64);
+    // courses too many to dimension one by one are counted: how many, and how high each is
+    let courses = if up.len() - 1 > SEAMS { format!(" · {} × {}", up.len() - 1, bim_library::millimetres(s.spacing.y, bim_library::Lang::En)) } else { String::new() };
+    let title = format!("{} · {} {thick} · {} × {} mm{courses} · 1:{}", element.name, named(&t.panel_material), mm(u1 - u0), mm(v1 - v0), PLAN_SCALE as i64);
     let mut y = v0 - (off * 2.5 + text);
     let before = d.texts.len();
     let counted: Vec<(i64, i64)> = panels.iter().map(|p| (mm(p.section().0), mm(p.section().1))).collect();
     let numbers = write_list(&mut d, y, text, title, &counted, &|width, long| format!("{thick} × {width} × {long}"));
     let listed = d.texts[before..].iter().filter(|t| t.at[0] == 0.0).count();
     // a number in every panel, where there is room for them
-    if panels.len() <= 400 {
+    if panels.len() <= 400 && !many {
         number(&mut d, &panels, &numbers, 0.0, text);
     }
     y -= text * 1.8 * (1.4 + listed as f64 - 1.0) + text * 0.9;
@@ -842,9 +863,18 @@ mod tests {
         let listed: usize = texts.iter().filter(|t| t.contains(" × ") && !t.contains("L=") && !t.contains("1:50")).map(|t| t.split(' ').next().unwrap().parse::<usize>().unwrap()).sum();
         assert_eq!(listed, panes, "{texts:?}");
         assert!(texts.iter().any(|t| t.contains("aluminium 50×150 L=")), "{texts:?}");
-        // brickwork is not drawn brick by brick
+        // brickwork is not drawn brick by brick: its outline, its courses and its bricks counted
         let (m, id) = typed(16.0, Vec::new(), "system.masonry-waal-stretcher");
-        assert!(element_drawings(&m, m.get(id).unwrap(), &|key| key.to_string()).is_empty());
+        let all = element_drawings(&m, m.get(id).unwrap(), &|key| key.to_string());
+        assert_eq!(all.len(), 1);
+        let d = &all[0];
+        assert_eq!(d.lines.iter().filter(|l| l.pen == Pen::Cut).count(), 4);
+        let texts: Vec<&str> = d.texts.iter().map(|t| t.text.as_str()).collect();
+        assert!(texts[0].contains(" · 43 × 62.5 · 1:50"), "{texts:?}");
+        let bricks: usize = texts.iter().filter(|t| t.contains(" × 100 × ")).map(|t| t.split(' ').next().unwrap().parse::<usize>().unwrap()).sum();
+        assert!(bricks > 2500, "{bricks}");
+        let values: Vec<i64> = d.dimensions.iter().map(|x| mm(x.value)).collect();
+        assert!(values.iter().any(|v| *v >= 16000) && values.iter().any(|v| (2690..=2710).contains(v)), "{values:?}");
     }
 
     #[test]
