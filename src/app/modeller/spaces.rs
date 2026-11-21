@@ -416,6 +416,7 @@ impl App {
         let registered: Vec<_> = self.document.plans().iter().filter(|p| p.drawing.as_deref() != Some("pile-schedule") && super::structure::is_pile_legend(p))
             .flat_map(|p| p.presentation["legend"]["elementIds"].as_array().into_iter().flatten())
             .filter_map(|id| id.as_u64().map(bim_core::ElementId)).collect();
+        let library = &self.library;
         self.document.set_plan_tags(|plan| {
             if office_style && !registered.is_empty() && !plan.pile_symbols && plan.kind.looks_up() && plan.drawing.as_deref() == Some("pile-plan") {
                 super::pile_symbols::adopt_registered_symbols(model, &registered, plan);
@@ -430,7 +431,7 @@ impl App {
                         plan.hidden.contains(&crate::units::UnitKey::Element(crate::model::ElementKey { model, source: e.id.0 }))
                     })
                 };
-                let mut tags = super::structure::member_tags(model, &plan.level, elevation, plan.scale, top_word, !plan.pile_symbols, visible);
+                let mut tags = super::structure::member_tags(model, library, &plan.level, elevation, plan.scale, top_word, !plan.pile_symbols, visible);
                 let mut symbols = Vec::new();
                 if let Some(source) = source.filter(|_| plan.pile_symbols && plan.layers.get("IfcPile") != Some(&false)) {
                     super::pile_symbols::draw(model, plan, elevation, source, office_style, &mut tags, &mut symbols);
