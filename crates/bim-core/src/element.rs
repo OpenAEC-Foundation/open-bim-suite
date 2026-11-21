@@ -80,6 +80,136 @@ pub struct LinearDef {
     pub profile: ProfileDef,
     #[serde(default)]
     pub roll: f64,
+    /// What it is: a member of the structure, or a run of a building service.
+    #[serde(default, skip_serializing_if = "LinearRole::is_member")]
+    pub role: LinearRole,
+}
+
+/// What a linear element is. The element is the same in every role (a profile along a line); the
+/// role says which IFC class it has and which fittings join it to another of its kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinearRole {
+    /// A column, a beam or another member: its class follows from the way it runs.
+    #[default]
+    Member,
+    /// A run of air duct.
+    Duct,
+    /// A run of pipe.
+    Pipe,
+    /// A run of cable tray.
+    CableTray,
+}
+
+impl LinearRole {
+    pub fn is_member(&self) -> bool {
+        *self == LinearRole::Member
+    }
+
+    /// Whether it is a run of a building service.
+    pub fn is_service(self) -> bool {
+        self != LinearRole::Member
+    }
+
+    /// The IFC class of a run in this role; none for a member, whose class follows from its axis.
+    pub fn segment_class(self) -> Option<&'static str> {
+        match self {
+            LinearRole::Member => None,
+            LinearRole::Duct => Some("IfcDuctSegment"),
+            LinearRole::Pipe => Some("IfcPipeSegment"),
+            LinearRole::CableTray => Some("IfcCableCarrierSegment"),
+        }
+    }
+
+    /// The IFC class of a fitting between two runs in this role.
+    pub fn fitting_class(self) -> &'static str {
+        match self {
+            LinearRole::Member => "IfcElementAssembly",
+            LinearRole::Duct => "IfcDuctFitting",
+            LinearRole::Pipe => "IfcPipeFitting",
+            LinearRole::CableTray => "IfcCableCarrierFitting",
+        }
+    }
+}
+
+/// The service an element of a building's installations belongs to: what flows through a run, a
+/// fitting, a terminal or an appliance. Elements joined to each other in one service are one
+/// system (IfcDistributionSystem); two runs of different services are never joined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Service {
+    SupplyAir,
+    ReturnAir,
+    ExhaustAir,
+    HeatingSupply,
+    HeatingReturn,
+    ColdWater,
+    HotWater,
+    Waste,
+    RainWater,
+    Gas,
+    Power,
+    Data,
+}
+
+impl Service {
+    pub const ALL: [Service; 12] = [
+        Service::SupplyAir,
+        Service::ReturnAir,
+        Service::ExhaustAir,
+        Service::HeatingSupply,
+        Service::HeatingReturn,
+        Service::ColdWater,
+        Service::HotWater,
+        Service::Waste,
+        Service::RainWater,
+        Service::Gas,
+        Service::Power,
+        Service::Data,
+    ];
+
+    /// The role of the runs that carry it.
+    pub fn role(self) -> LinearRole {
+        match self {
+            Service::SupplyAir | Service::ReturnAir | Service::ExhaustAir => LinearRole::Duct,
+            Service::Power | Service::Data => LinearRole::CableTray,
+            _ => LinearRole::Pipe,
+        }
+    }
+
+    /// Its name (English).
+    pub fn name(self) -> &'static str {
+        match self {
+            Service::SupplyAir => "Supply air",
+            Service::ReturnAir => "Return air",
+            Service::ExhaustAir => "Exhaust air",
+            Service::HeatingSupply => "Heating supply",
+            Service::HeatingReturn => "Heating return",
+            Service::ColdWater => "Cold water",
+            Service::HotWater => "Hot water",
+            Service::Waste => "Waste water",
+            Service::RainWater => "Rain water",
+            Service::Gas => "Gas",
+            Service::Power => "Power",
+            Service::Data => "Data",
+        }
+    }
+
+    /// The predefined type of its IfcDistributionSystem (IFC4).
+    pub fn ifc_system(self) -> &'static str {
+        match self {
+            Service::SupplyAir | Service::ReturnAir => "VENTILATION",
+            Service::ExhaustAir => "EXHAUST",
+            Service::HeatingSupply | Service::HeatingReturn => "HEATING",
+            Service::ColdWater => "DOMESTICCOLDWATER",
+            Service::HotWater => "DOMESTICHOTWATER",
+            Service::Waste => "WASTEWATER",
+            Service::RainWater => "RAINWATER",
+            Service::Gas => "GAS",
+            Service::Power => "ELECTRICAL",
+            Service::Data => "DATA",
+        }
+    }
 }
 
 /// A rectangular opening in a wall: `along` the axis from its start to the opening's near side,
@@ -353,6 +483,15 @@ pub enum ConnectionKind {
     /// A steel base plate: the secondary (a column) stands on the primary on a plate, a bed of
     /// grout and four anchors (see [`crate::join::BasePlate`]).
     BasePlate(crate::join::BasePlate),
+    /// A bend between two runs of a building service that meet end to end: both stop short of the
+    /// corner and a fitting turns from the one into the other (see [`crate::join::Bend`]).
+    Bend(crate::join::Bend),
+    /// A tee: a run of a building service that ends on the side of another, which runs through; a
+    /// fitting takes its end (see [`crate::join::Tee`]).
+    Tee(crate::join::Tee),
+    /// Two runs of a building service in one line with different profiles: a fitting goes from
+    /// the one into the other (see [`crate::join::Transition`]).
+    Transition(crate::join::Transition),
     /// The two are not joined where they meet: two building systems that would meet at a corner
     /// or a T junction are each made as they are alone, and two linear members get no join.
     Apart,
@@ -368,6 +507,12 @@ pub enum Fixity {
 }
 
 impl ConnectionKind {
+    /// Whether it is a fitting between service runs (a bend, a tee, a transition): a body of its
+    /// own in the run, where a butt or a mitre is only the way two members are cut.
+    pub fn is_fitting(&self) -> bool {
+        matches!(self, ConnectionKind::Bend(_) | ConnectionKind::Tee(_) | ConnectionKind::Transition(_))
+    }
+
     /// What a steel connection is to the analysis model: a fin plate is a hinge, an end plate
     /// and a splice pass moments on, and a base plate with its four anchors is taken as a hinge. `None` for a join that is no connection of its own (a butt, a mitre,
     /// a cut).
@@ -442,6 +587,9 @@ pub struct Element {
     /// The reinforcement of a concrete member with a rectangular section, when it is given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reinforcement: Option<crate::reinforcement::Reinforcement>,
+    /// The service it belongs to, when it is part of an installation (see [`Service`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<Service>,
     pub shape: Shape,
 }
 
@@ -452,12 +600,12 @@ impl Element {
     pub fn in_project(grid: &TileGrid, name: impl Into<String>, level: Option<String>, mut shape: Shape) -> Self {
         let tile = shape.placement().map_or(TileKey::default(), |p| grid.tile_of(p));
         shape.translate(-grid.origin(tile));
-        Self { id: ElementId(0), name: name.into(), tile, level, top: None, grade: None, reinforcement: None, pile_number: None, pile_mark: None, reinforcing_bar: false, reinforcement_areas: Vec::new(), hairpin_leg: None, shape }
+        Self { id: ElementId(0), name: name.into(), tile, level, top: None, grade: None, service: None, reinforcement: None, pile_number: None, pile_mark: None, reinforcing_bar: false, reinforcement_areas: Vec::new(), hairpin_leg: None, shape }
     }
 
-    /// The same element (its id, name, level, top and grade) with `shape`, given in project coordinates.
+    /// The same element (its id, name, level, top, grade and service) with `shape`, given in project coordinates.
     pub fn reshaped(&self, grid: &TileGrid, shape: Shape) -> Self {
-        Self { id: self.id, pile_number: self.pile_number, pile_mark: self.pile_mark.clone(), hairpin_leg: self.hairpin_leg, reinforcement_areas: self.reinforcement_areas.clone(), reinforcing_bar: self.reinforcing_bar, top: self.top.clone(), grade: self.grade.clone(), reinforcement: self.reinforcement, ..Self::in_project(grid, self.name.clone(), self.level.clone(), shape) }
+        Self { id: self.id, pile_number: self.pile_number, pile_mark: self.pile_mark.clone(), hairpin_leg: self.hairpin_leg, reinforcement_areas: self.reinforcement_areas.clone(), reinforcing_bar: self.reinforcing_bar, top: self.top.clone(), grade: self.grade.clone(), service: self.service, reinforcement: self.reinforcement, ..Self::in_project(grid, self.name.clone(), self.level.clone(), shape) }
     }
 
     /// Its definition in project coordinates.
@@ -480,7 +628,7 @@ impl Element {
             Shape::Point(_) => "IfcBuildingElementProxy",
             Shape::Linear(_) if self.pile_number.is_some() => "IfcPile",
             Shape::Linear(_) if self.reinforcing_bar => "IfcReinforcingBar",
-            Shape::Linear(l) => linear_class(l.end - l.start),
+            Shape::Linear(l) => l.role.segment_class().unwrap_or_else(|| linear_class(l.end - l.start)),
             Shape::Planar(PlanarDef { form: PlanarForm::Wall { .. }, .. }) => "IfcWall",
             Shape::Planar(PlanarDef { form: PlanarForm::Slab { role: SlabRole::Roof, .. }, .. }) => "IfcRoof",
             Shape::Planar(PlanarDef { form: PlanarForm::Slab { role: SlabRole::Ceiling, .. }, .. }) => "IfcCovering",
@@ -488,6 +636,10 @@ impl Element {
             Shape::System(_) => "IfcCurtainWall",
             // a join with parts of its own is an assembly of them; one without is a relation only
             Shape::Connection(ConnectionDef { kind: ConnectionKind::EndPlate(_) | ConnectionKind::FinPlate(_) | ConnectionKind::Splice(_) | ConnectionKind::BasePlate(_), .. }) => "IfcElementAssembly",
+            // a fitting of a building service: the bend or the tee itself
+            Shape::Connection(ConnectionDef { kind: ConnectionKind::Bend(b), .. }) => b.role.fitting_class(),
+            Shape::Connection(ConnectionDef { kind: ConnectionKind::Tee(t), .. }) => t.role.fitting_class(),
+            Shape::Connection(ConnectionDef { kind: ConnectionKind::Transition(t), .. }) => t.role.fitting_class(),
             Shape::Connection(_) => "IfcRelConnectsElements",
         }
     }
@@ -1146,11 +1298,11 @@ mod tests {
 
     #[test]
     fn a_beam_has_its_profile_upright() {
-        let l = LinearDef { start: DVec3::ZERO, end: DVec3::new(6.0, 0.0, 0.0), profile: ProfileDef::Rectangle { width: 0.2, height: 0.4 }, roll: 0.0 };
+        let l = LinearDef { start: DVec3::ZERO, end: DVec3::new(6.0, 0.0, 0.0), profile: ProfileDef::Rectangle { width: 0.2, height: 0.4 }, roll: 0.0, role: Default::default() };
         let s = linear_solid(&l, None, None).unwrap();
         let (lo, hi) = s.bounds();
         assert!((hi - lo - DVec3::new(6.0, 0.2, 0.4)).length() < 1e-12, "{}", hi - lo);
-        let column = LinearDef { start: DVec3::ZERO, end: DVec3::new(0.0, 0.0, 3.0), profile: ProfileDef::Rectangle { width: 0.3, height: 0.5 }, roll: 0.0 };
+        let column = LinearDef { start: DVec3::ZERO, end: DVec3::new(0.0, 0.0, 3.0), profile: ProfileDef::Rectangle { width: 0.3, height: 0.5 }, roll: 0.0, role: Default::default() };
         let (lo, hi) = linear_solid(&column, None, None).unwrap().bounds();
         assert!((hi - lo - DVec3::new(0.3, 0.5, 3.0)).length() < 1e-12, "{}", hi - lo);
     }
@@ -1219,7 +1371,7 @@ mod tests {
     #[test]
     fn an_element_keeps_its_grade_when_reshaped_and_reads_without_one() {
         let grid = TileGrid::default();
-        let beam = |x: f64| Shape::Linear(LinearDef { start: DVec3::new(x, 0.0, 3.0), end: DVec3::new(x + 4.0, 0.0, 3.0), profile: ProfileDef::Rectangle { width: 0.2, height: 0.4 }, roll: 0.0 });
+        let beam = |x: f64| Shape::Linear(LinearDef { start: DVec3::new(x, 0.0, 3.0), end: DVec3::new(x + 4.0, 0.0, 3.0), profile: ProfileDef::Rectangle { width: 0.2, height: 0.4 }, roll: 0.0, role: Default::default() });
         let mut e = Element::in_project(&grid, "Beam 1", None, beam(0.0));
         let old = serde_json::to_string(&e).unwrap();
         assert!(!old.contains("grade"), "{old}");
