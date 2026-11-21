@@ -29,6 +29,7 @@ mod reports;
 mod layers;
 #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
 pub mod collab;
+pub mod work_packages;
 mod docs;
 mod drawing_kinds;
 mod solid_view;
@@ -181,6 +182,7 @@ pub struct App {
     /// The files still to add after the one loading, when several are added at once: each is
     /// read, and the scene is built once, after the last.
     add_queue: Vec<loaders::Source>,
+    work_packages: work_packages::Register,
     /// The project whose files are loading: its set-up is put back when the last is in.
     project_opening: Option<project_file::Opening>,
     /// Models read from the queue that the scene does not show yet.
@@ -1071,6 +1073,7 @@ impl Default for App {
             models: Vec::new(),
             adding_model: false,
             add_queue: Vec::new(),
+            work_packages: Default::default(),
             project_opening: None,
             scene_stale: false,
             aligned: Vec::new(),
@@ -1854,6 +1857,9 @@ impl App {
     }
 
     pub fn set_model(&mut self, model: Arc<Model>) {
+        self.work_packages = Default::default();
+        #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
+        { self.collab.packages = Default::default(); }
         // a point marked to orbit about belonged to the model before
         self.nav.marked = None;
         self.picked_model = None;
@@ -1993,7 +1999,10 @@ impl App {
         self.document.recognise(&model);
         self.model = Some(model);
         #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
-        self.collab.model_changed();
+        {
+            self.collab.model_changed();
+            self.refresh_package_index();
+        }
         self.section = None;
         self.section_on = false;
         self.plane = None;
@@ -3562,6 +3571,10 @@ impl App {
                     *f |= UNIT_HIDDEN;
                 }
             }
+        }
+        #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
+        for &id in &self.collab.packages.hidden {
+            if let Some(flag) = index.element_unit(id).and_then(|unit| flags.get_mut(unit)) { *flag |= UNIT_HIDDEN; }
         }
         // a structural plan leaves out what carries nothing
         if self.is_structural_plan(self.active_plan.as_deref()) {

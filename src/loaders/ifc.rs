@@ -100,7 +100,7 @@ impl IfcLoader {
         let mut spatial_volume_ids = BTreeSet::new();
         let mut opening_ids = BTreeSet::new();
         // the layers of the elements with a material layer set, to show among their properties
-        let layered = material_layers(header, result.metadata.length_unit_scale.unwrap_or(1.0));
+        let materials = element_materials(header, result.metadata.length_unit_scale.unwrap_or(1.0));
         for mesh in result.meshes {
             if mesh.indices.is_empty() || mesh.positions.is_empty() {
                 continue;
@@ -152,10 +152,10 @@ impl IfcLoader {
             if let Some(global_id) = mesh.global_id {
                 props.insert("GlobalId".into(), global_id);
             }
-            if let Some(material) = mesh.material_name {
+            if let Some(material) = materials.names.get(&mesh.express_id).cloned().or(mesh.material_name) {
                 props.insert("Material".into(), material);
             }
-            if let Some((name, layers)) = layered.get(&mesh.express_id) {
+            if let Some((name, layers)) = materials.layers.get(&mesh.express_id) {
                 // as a modelled element says them: each material and its thickness in millimetres
                 let said: Vec<String> = layers.iter().map(|(material, thickness)| format!("{material} {}", bim_library::millimetres(*thickness, bim_library::Lang::En))).collect();
                 props.insert("Layers".into(), said.join(", "));
@@ -548,21 +548,56 @@ fn curve_ends(decoder: &mut ifc_lite_core::EntityDecoder, curve: u32) -> Option<
     }
 }
 
-/// The layers of the elements that have a material layer set (`IfcRelAssociatesMaterial` to an
-/// `IfcMaterialLayerSetUsage` or an `IfcMaterialLayerSet`), by the element's id: the set's name,
-/// and each layer's material name and thickness in metres, in the set's order. A layer set an
-/// element has only through its type is not looked up.
-fn material_layers(content: &[u8], scale: f64) -> std::collections::HashMap<u32, (Option<String>, Vec<(String, f64)>)> {
+#[derive(Default)]
+struct ElementMaterials {
+    names: std::collections::HashMap<u32, String>,
+    layers: std::collections::HashMap<u32, (Option<String>, Vec<(String, f64)>)>,
+}
+
+/// Direct materials and the profiles of a steel section, in IFC attribute order.
+fn assigned_names(decoder: &mut ifc_lite_core::EntityDecoder, id: u32) -> Option<String> {
+    use ifc_lite_core::{decode_ifc_string, IfcType};
+    let material = decoder.decode_by_id(id).ok()?;
+    let ids = match material.ifc_type {
+        IfcType::IfcMaterial => return material.get_string(0).map(|s| decode_ifc_string(s).trim().to_owned()),
+        IfcType::IfcMaterialList => material.get_refs(0)?,
+        IfcType::IfcMaterialProfileSet | IfcType::IfcMaterialProfileSetUsage | IfcType::IfcMaterialProfileSetUsageTapering => {
+            let set = if material.ifc_type == IfcType::IfcMaterialProfileSet { material } else { decoder.decode_by_id(material.get_ref(0)?).ok()? };
+            set.get_refs(2)?.into_iter().filter_map(|id| decoder.decode_by_id(id).ok()?.get_ref(2)).collect()
+        }
+        _ => return None,
+    };
+    let names: std::collections::BTreeSet<_> = ids.into_iter().filter_map(|id| {
+        let material = decoder.decode_by_id(id).ok()?;
+        material.get_string(0).map(|s| decode_ifc_string(s).trim().to_owned()).filter(|s| !s.is_empty())
+    }).collect();
+    (!names.is_empty()).then(|| names.into_iter().collect::<Vec<_>>().join(", "))
+}
+
+fn element_materials(content: &[u8], scale: f64) -> ElementMaterials {
     use ifc_lite_core::{decode_ifc_string, EntityDecoder, EntityScanner};
     let mut scanner = EntityScanner::new(content);
     let mut decoder = EntityDecoder::new(content);
-    let mut out = std::collections::HashMap::new();
+    let mut out = ElementMaterials::default();
+    let mut types = Vec::new();
     while let Some((_, keyword, start, end)) = scanner.next_entity() {
+        if keyword.eq_ignore_ascii_case("IFCRELDEFINESBYTYPE") {
+            if let Ok(rel) = decoder.decode_at(start, end) {
+                if let (Some(ty), Some(ids)) = (rel.get_ref(5), rel.get_refs(4)) {
+                    types.extend(ids.into_iter().map(|id| (id, ty)));
+                }
+            }
+            continue;
+        }
         if !keyword.eq_ignore_ascii_case("IFCRELASSOCIATESMATERIAL") {
             continue;
         }
         let Ok(relation) = decoder.decode_at(start, end) else { continue };
         let Some(material) = relation.get_ref(5) else { continue };
+        if let Some(name) = assigned_names(&mut decoder, material).filter(|s| !s.is_empty()) {
+            for id in relation.get_refs(4).unwrap_or_default() { out.names.insert(id, name.clone()); }
+            continue;
+        }
         let Some(set) = layer_set(&mut decoder, material) else { continue };
         let name = set.get_string(1).map(|s| decode_ifc_string(s).trim().to_string()).filter(|s| !s.is_empty());
         let mut layers = Vec::new();
@@ -576,8 +611,11 @@ fn material_layers(content: &[u8], scale: f64) -> std::collections::HashMap<u32,
             continue;
         }
         for element in relation.get_refs(4).unwrap_or_default() {
-            out.insert(element, (name.clone(), layers.clone()));
+            out.layers.insert(element, (name.clone(), layers.clone()));
         }
+    }
+    for (id, ty) in types {
+        if let Some(name) = out.names.get(&ty).cloned() { out.names.entry(id).or_insert(name); }
     }
     out
 }
@@ -615,6 +653,25 @@ mod tests {
         let layer = Layer { name: "Box".into(), color: [0.8, 0.2, 0.1], positions, indices, ..Layer::default() };
         let model = Model::new("box.skp".into(), "SketchUp", vec![layer]);
         crate::export::to_bytes(&model, &crate::document::Document::from_model(&model), "box.ifc").unwrap()
+    }
+
+    #[test]
+    fn steel_materials_follow_the_profile_type_and_allow_an_occurrence_override() {
+        let step = b"ISO-10303-21;
+DATA;
+#1=IFCMATERIAL('S355J2',$,$);
+#2=IFCMATERIALPROFILE($,$,#1,$,$,$);
+#3=IFCMATERIALPROFILESET($,$,(#2),$);
+#4=IFCMATERIALPROFILESETUSAGE(#3,$,$);
+#5=IFCRELASSOCIATESMATERIAL('a',$,$,$,(#80),#4);
+#6=IFCRELDEFINESBYTYPE('b',$,$,$,(#70,#71),#80);
+#7=IFCMATERIAL('S235',$,$);
+#8=IFCRELASSOCIATESMATERIAL('c',$,$,$,(#71),#7);
+ENDSEC;
+END-ISO-10303-21;";
+        let materials = element_materials(step, 1.0);
+        assert_eq!(materials.names[&70], "S355J2");
+        assert_eq!(materials.names[&71], "S235");
     }
 
     #[test]

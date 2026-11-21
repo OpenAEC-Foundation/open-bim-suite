@@ -7,6 +7,7 @@
 //! writes its coordinates in metres in the model's own place, so they pass through the model's
 //! origin on the way in and out.
 
+pub mod packages;
 use super::{App, Message};
 use crate::collab::clash::{self, Kind, Solid};
 use crate::collab::rules::{ClashKind, ClashRule, RuleSet, Selector};
@@ -47,6 +48,7 @@ pub enum Tab {
     Colours,
     /// Takeoffs of the elements' information and quantities.
     Takeoff,
+    Packages,
 }
 
 /// What a person decided on a clash.
@@ -350,6 +352,7 @@ pub struct Checked {
 
 /// The Validator's state of a project.
 pub struct State {
+    pub packages: packages::Panel,
     pub tab: Tab,
     pub issues: Issues,
     /// The pictures of the viewpoints, read once: by the viewpoint's guid and the picture's size
@@ -487,6 +490,7 @@ impl Default for State {
         let kept = user_file().and_then(|f| std::fs::read_to_string(f).ok()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
         let author = kept.unwrap_or_else(|| std::env::var("USERNAME").or_else(|_| std::env::var("USER")).unwrap_or_else(|_| "user".into()));
         State {
+            packages: Default::default(),
             pictures: HashMap::new(),
             tab: Tab::default(),
             issues: Issues::new(),
@@ -791,6 +795,7 @@ pub struct ReportJob {
 
 #[derive(Debug, Clone)]
 pub enum Event {
+    Package(packages::Action),
     Tab(Tab),
     Open(File),
     Opened(File, Option<PathBuf>),
@@ -2345,6 +2350,9 @@ impl App {
     }
 
     pub(super) fn collab_update(&mut self, event: Event) -> Task<Message> {
+        if let Event::Package(action) = event {
+            return self.package_action(action);
+        }
         let looked = matches!(event, Event::Tab(Tab::Issues | Tab::Clashes));
         self.collab.refresh();
         if let Event::ClashAmount(k, typed) = &event {
@@ -2400,7 +2408,11 @@ impl App {
     fn collab_dispatch(&mut self, event: Event) -> Task<Message> {
         let l = self.collab.language;
         match event {
-            Event::Tab(tab) => self.collab.tab = tab,
+            Event::Package(action) => return self.package_action(action),
+            Event::Tab(tab) => {
+                self.collab.tab = tab;
+                if tab == Tab::Packages { self.refresh_package_index(); }
+            }
             Event::Dismiss => self.collab.notice = None,
             Event::Cancel => {
                 self.collab.cancel.store(true, Ordering::Relaxed);
@@ -3513,6 +3525,7 @@ impl App {
             tab(Tab::Issues, format!("{}{}", l.text("Issues", "Issues"), count(state.open_issues()))),
             tab(Tab::Checks, format!("{}{}", l.text("Controles", "Checks"), count(failed))),
             tab(Tab::Clashes, format!("{}{}", l.text("Clashes", "Clashes"), count(state.clashes.iter().filter(|c| c.decision != Decision::Accepted).count()))),
+            tab(Tab::Packages, l.text("Werkpakketten", "Work packages").to_string()),
             tab(Tab::Compare, l.text("Vergelijken", "Compare").to_string()),
             tab(Tab::Colours, l.text("Kleuren", "Colours").to_string()),
             tab(Tab::Takeoff, l.text("Staat", "Takeoff").to_string()),
@@ -3574,6 +3587,7 @@ impl App {
         }
         let content: Element<'_, Message> = match state.tab {
             Tab::Issues => self.collab_issues(look, l),
+            Tab::Packages => self.package_panel(look, l),
             Tab::Checks => self.collab_checks(look, l),
             Tab::Clashes => self.collab_clashes(look, l),
             Tab::Compare => column![self.collab_compare(look, l), w::divider(look), self.cloud_view(look, l)].spacing(8).into(),
@@ -4959,7 +4973,7 @@ mod tests {
     use crate::model::Layer;
 
     /// Two boxes as elements 1 and 2 of one layer, the second sunk into the first.
-    fn two_blocks() -> Model {
+    pub(super) fn two_blocks() -> Model {
         let mut layer = Layer { name: "Walls".into(), color: [0.8; 3], positions: Vec::new(), normals: Vec::new(), colors: None, indices: Vec::new(), elements: Vec::new(), props: Vec::new(), hidden: false, points: false, lines: Vec::new(), line_elements: Vec::new(), splats: None, texturing: None };
         for (id, lo, hi) in [(1u64, [0.0f32, 0.0, 0.0], [4.0f32, 0.2, 3.0]), (2, [1.0, -1.0, 1.0], [1.3, 1.0, 1.3])] {
             let first = layer.indices.len() as u32;
