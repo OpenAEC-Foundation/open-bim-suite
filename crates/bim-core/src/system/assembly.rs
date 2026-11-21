@@ -1,7 +1,9 @@
 //! Assemblies: the prefab units of a framed system, each with the parts it is made of.
 //!
-//! A framed system (a timber frame, a steel frame, a metal stud wall) is made in the workshop as
-//! prefab units ([`super::joined_units`]): each is one assembly, lifted and placed as a whole. A
+//! A framed system whose framing has a longest unit (a timber frame, a steel frame) is made in
+//! the workshop as prefab units ([`super::joined_units`]): each is one assembly, lifted and
+//! placed as a whole. A frame without one (a metal stud wall) is put up on site, member by
+//! member, and has no assemblies. A
 //! part belongs to the unit that holds its middle along the system's line, so what a layer does
 //! not cut at the units' joints (a plate that runs on) is of the unit most of it lies in. A system
 //! that is not framed (a curtain wall, a floor of slabs, a ceiling) is put together on site from
@@ -47,7 +49,8 @@ pub fn mark(element: &Element, number: usize) -> String {
 /// in the element's own tile is of exactly one of them.
 pub fn assemblies(model: &Model, element: &Element, parts: &[Part]) -> Result<Vec<Assembly>, Refusal> {
     let Shape::System(s) = &element.shape else { return Ok(Vec::new()) };
-    if s.system_type.as_ref().is_none_or(|t| t.framing.is_none()) {
+    // made as prefab units: its framing says how long a unit may be
+    if s.system_type.as_ref().is_none_or(|t| t.framing.is_none_or(|f| f.unit.is_none())) {
         return Ok(Vec::new());
     }
     let Some(dir) = (s.end - s.start).try_normalize() else { return Ok(Vec::new()) };
@@ -116,9 +119,12 @@ mod tests {
     }
 
     #[test]
-    fn what_is_not_framed_has_no_assemblies() {
-        let (m, id) = frame(7.2, "system.curtain-wall-aluminium-1500");
-        let parts = m.evaluate(id).unwrap();
-        assert!(assemblies(&m, m.get(id).unwrap(), &parts).unwrap().is_empty());
+    fn what_is_not_made_as_prefab_units_has_no_assemblies() {
+        // a curtain wall is not framed; a metal stud wall is framed on site
+        for of in ["system.curtain-wall-aluminium-1500", "system.metal-stud-75-1"] {
+            let (m, id) = frame(7.2, of);
+            let parts = m.evaluate(id).unwrap();
+            assert!(assemblies(&m, m.get(id).unwrap(), &parts).unwrap().is_empty(), "{of}");
+        }
     }
 }

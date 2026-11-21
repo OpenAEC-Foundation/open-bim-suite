@@ -66,14 +66,18 @@ fn mm(metres: f64) -> i64 {
 
 /// The drawings of `element` of `model`: for every prefab unit it is made of, in order from its
 /// start, the drawing of its frame and then one of every layer with boards or battens. `named`
-/// gives a material's name for its key. None for an element that is not a framed standing
-/// system, or that the kernel refuses.
+/// gives a material's name for its key. A standing system that is not framed gets its
+/// [`elevation`], a lying one its [`laying_plan`]. None for an element that is not a system with
+/// a type, or that the kernel refuses.
 pub fn element_drawings(model: &Model, element: &Element, named: &dyn Fn(&str) -> String) -> Vec<Drawing2d> {
     let Shape::System(s) = &element.shape else { return Vec::new() };
     if s.lies() {
         return laying_plan(model, element, s, named).into_iter().collect();
     }
-    let Some(t) = s.system_type.as_ref().filter(|t| t.framing.is_some() && !t.lying) else { return Vec::new() };
+    let Some(t) = s.system_type.as_ref().filter(|t| !t.lying) else { return Vec::new() };
+    if t.framing.is_none() {
+        return elevation(model, element, s, t, named).into_iter().collect();
+    }
     let Some(dir) = (s.end - s.start).try_normalize() else { return Vec::new() };
     let (Ok(parts), Ok(units)) = (model.evaluate(element.id), bim_core::system::joined_units(model, element)) else { return Vec::new() };
     // its own openings and those of the doors and windows standing in it
@@ -389,6 +393,125 @@ fn laying_plan(model: &Model, element: &Element, s: &bim_core::SystemDef, named:
     Some(d)
 }
 
+/// A member narrower than this (metres) is a joint between panels, not a profile.
+const JOINT: f64 = 0.015;
+/// More parts than this are not drawn one by one (a wall of bricks).
+const MOST: usize = 4000;
+
+/// The elevation of a standing system on a grid (a curtain wall, a frame, a wall of elements,
+/// cladding), seen from its interior at 1 : 50: every panel and every member as its outline, the
+/// seams between the panels dimensioned along it and up it, its length and its height, each
+/// panel with its number, and the lists of the panels and of the members. None for a system of
+/// more than [`MOST`] parts (brickwork), which is not made from a list of its bricks.
+fn elevation(model: &Model, element: &Element, s: &bim_core::SystemDef, t: &bim_core::SystemTypeDef, named: &dyn Fn(&str) -> String) -> Option<Drawing2d> {
+    let dir = (s.end - s.start).try_normalize()?;
+    let parts = model.evaluate(element.id).ok()?;
+    if parts.len() > MOST {
+        return None;
+    }
+    let (text, off) = (TEXT * PLAN_SCALE, OFFSET * PLAN_SCALE);
+    let mut d = Drawing2d { name: format!("{} {}", element.name, element.id.0), space: Space::Model { scale: PLAN_SCALE }, paper: None, lines: Vec::new(), texts: Vec::new(), dimensions: Vec::new() };
+    let faced = |p: &bim_core::Part| {
+        let (mut u, mut v) = ((f64::INFINITY, f64::NEG_INFINITY), (f64::INFINITY, f64::NEG_INFINITY));
+        for q in &p.solid.positions {
+            let (a, b) = ((DVec2::new(q.x, q.y) - s.start).dot(dir), q.z - s.base);
+            (u, v) = ((u.0.min(a), u.1.max(a)), (v.0.min(b), v.1.max(b)));
+        }
+        Member { u, v }
+    };
+    let own = || parts.iter().filter(|p| p.tile == element.tile);
+    let panels: Vec<Member> = own().filter(|p| p.class == "IfcPlate" && p.material.as_deref() == Some(t.panel_material.as_str())).map(faced).collect();
+    let members: Vec<Member> = own().filter(|p| p.class == "IfcMember" && p.material.as_deref() == Some(t.member_material.as_str())).map(faced).collect();
+    if panels.is_empty() && members.is_empty() {
+        return None;
+    }
+    let mut outline = |pen: Pen, m: &Member| {
+        for (a, b) in [([m.u.0, m.v.0], [m.u.1, m.v.0]), ([m.u.1, m.v.0], [m.u.1, m.v.1]), ([m.u.1, m.v.1], [m.u.0, m.v.1]), ([m.u.0, m.v.1], [m.u.0, m.v.0])] {
+            d.lines.push(Line2d::new(pen, a, b));
+        }
+    };
+    // members thinner than [`JOINT`] (a joint of mortar or glue, a seam) are the lines between
+    // the panels: not drawn twice
+    let drawn = |m: &&Member| m.section().0 >= JOINT - 1e-9;
+    for m in members.iter().filter(drawn) {
+        outline(Pen::Cut, m);
+    }
+    for p in &panels {
+        outline(if members.iter().any(|m| drawn(&m)) { Pen::Beyond } else { Pen::Cut }, p);
+    }
+    let all = || panels.iter().chain(&members);
+    let (u0, u1) = all().fold((f64::INFINITY, f64::NEG_INFINITY), |acc, m| (acc.0.min(m.u.0), acc.1.max(m.u.1)));
+    let (v0, v1) = all().fold((f64::INFINITY, f64::NEG_INFINITY), |acc, m| (acc.0.min(m.v.0), acc.1.max(m.v.1)));
+    let dim = |d: &mut Drawing2d, from: [f64; 2], to: [f64; 2], rows: f64| {
+        let value = (to[0] - from[0]).hypot(to[1] - from[1]);
+        if value > LINEAR_TOLERANCE {
+            d.dimensions.push(Dim2d { from, to, value, offset: off * rows, text_height: text });
+        }
+    };
+    // the grid: the middles of the joints between the panels, from edge to edge
+    let lines = |at: &dyn Fn(&Member) -> (f64, f64), lo: f64, hi: f64| {
+        let mut edges: Vec<f64> = panels.iter().flat_map(|p| [at(p).0, at(p).1]).collect();
+        edges.sort_by(f64::total_cmp);
+        let mut grid = vec![lo];
+        let mut k = 0;
+        while k < edges.len() {
+            // edges within a joint of one another are one line, at their middle
+            let mut j = k;
+            while j + 1 < edges.len() && edges[j + 1] - edges[k] < s.member.x.max(0.02) + 1e-6 {
+                j += 1;
+            }
+            let middle = (edges[k] + edges[j]) / 2.0;
+            if middle - lo > 0.05 && hi - middle > 0.05 {
+                grid.push(middle);
+            }
+            k = j + 1;
+        }
+        grid.push(hi);
+        grid
+    };
+    let (along, up) = (lines(&|m| m.u, u0, u1), lines(&|m| m.v, v0, v1));
+    if along.len() > 2 && along.len() <= SEAMS + 16 {
+        for pair in along.windows(2) {
+            dim(&mut d, [pair[0], v1], [pair[1], v1], 1.0);
+        }
+    }
+    if up.len() > 2 && up.len() <= SEAMS {
+        for pair in up.windows(2) {
+            dim(&mut d, [u1, pair[1]], [u1, pair[0]], 1.0);
+        }
+    }
+    dim(&mut d, [u1, v0], [u0, v0], 1.0);
+    dim(&mut d, [u0, v0], [u0, v1], 1.0);
+    // its name, the panels numbered, and the members
+    let thick = bim_library::millimetres(s.panel, bim_library::Lang::En);
+    let title = format!("{} · {} {thick} · {} × {} mm · 1:{}", element.name, named(&t.panel_material), mm(u1 - u0), mm(v1 - v0), PLAN_SCALE as i64);
+    let mut y = v0 - (off * 2.5 + text);
+    let before = d.texts.len();
+    let counted: Vec<(i64, i64)> = panels.iter().map(|p| (mm(p.section().0), mm(p.section().1))).collect();
+    let numbers = write_list(&mut d, y, text, title, &counted, &|width, long| format!("{thick} × {width} × {long}"));
+    let listed = d.texts[before..].iter().filter(|t| t.at[0] == 0.0).count();
+    // a number in every panel, where there is room for them
+    if panels.len() <= 400 {
+        number(&mut d, &panels, &numbers, 0.0, text);
+    }
+    y -= text * 1.8 * (1.4 + listed as f64 - 1.0) + text * 0.9;
+    let (width, depth) = (mm(s.member.x), mm(s.member.y));
+    let mut list: Vec<(i64, usize)> = Vec::new();
+    for m in members.iter().filter(drawn) {
+        let long = mm(m.section().1);
+        match list.iter_mut().find(|(l, _)| *l == long) {
+            Some((_, n)) => *n += 1,
+            None => list.push((long, 1)),
+        }
+    }
+    list.sort_by(|a, b| b.0.cmp(&a.0));
+    for (long, n) in list {
+        d.texts.push(Text2d { pen: Pen::Text, at: [0.0, y], height: text, text: format!("{n} × {} {width}×{depth} L={long}", named(&t.member_material)), align: Align::Left, angle: 0.0 });
+        y -= text * 1.8;
+    }
+    Some(d)
+}
+
 /// The laying plan of a lying system with nothing between its members (see [`laying_plan`]).
 fn open_plan(model: &Model, element: &Element, s: &bim_core::SystemDef, t: &bim_core::SystemTypeDef, named: &dyn Fn(&str) -> String) -> Option<Drawing2d> {
     let dir = (s.end - s.start).try_normalize()?;
@@ -700,6 +823,30 @@ mod tests {
             assert!(lo > -0.3 && hi < units[unit] + 0.3, "{}: {lo} to {hi} in a unit of {}", d.name, units[unit]);
         }
     }
+    #[test]
+    fn a_system_on_a_grid_gets_an_elevation_with_its_panels_and_members() {
+        // a curtain wall of 6 m, bays of 1500: four panes over one another in rows of 1800
+        let (m, id) = typed(6.0, Vec::new(), "system.curtain-wall-aluminium-1500");
+        let all = element_drawings(&m, m.get(id).unwrap(), &|key| key.to_string());
+        assert_eq!(all.len(), 1);
+        let d = &all[0];
+        let texts: Vec<&str> = d.texts.iter().map(|t| t.text.as_str()).collect();
+        assert!(texts[0].starts_with("Frame · glass ") && texts[0].ends_with("1:50"), "{texts:?}");
+        let values: Vec<i64> = d.dimensions.iter().map(|x| mm(x.value)).collect();
+        assert!(values.iter().filter(|v| **v == 1500).count() >= 2 && values.iter().any(|v| *v >= 6000), "{values:?}");
+        // panes thin, mullions and transoms bold; every pane numbered and listed, the members listed
+        let panes = d.lines.iter().filter(|l| l.pen == Pen::Beyond).count() / 4;
+        assert_eq!(panes, 8);
+        // five mullions, and three transoms in each of four bays
+        assert!(d.lines.iter().filter(|l| l.pen == Pen::Cut).count() >= (5 + 12) * 4);
+        let listed: usize = texts.iter().filter(|t| t.contains(" × ") && !t.contains("L=") && !t.contains("1:50")).map(|t| t.split(' ').next().unwrap().parse::<usize>().unwrap()).sum();
+        assert_eq!(listed, panes, "{texts:?}");
+        assert!(texts.iter().any(|t| t.contains("aluminium 50×150 L=")), "{texts:?}");
+        // brickwork is not drawn brick by brick
+        let (m, id) = typed(16.0, Vec::new(), "system.masonry-waal-stretcher");
+        assert!(element_drawings(&m, m.get(id).unwrap(), &|key| key.to_string()).is_empty());
+    }
+
     #[test]
     fn a_ceiling_on_channels_gets_a_laying_plan_of_its_boards_and_channels() {
         let ceiling = |id: &str| {
