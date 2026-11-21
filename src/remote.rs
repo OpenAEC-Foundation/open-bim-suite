@@ -375,6 +375,12 @@ impl App {
                 call.answer(answer);
                 return task;
             }
+            #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
+            "collab_clashes" if matches!(call.args.get("action").and_then(|v| v.as_str()), None | Some("run" | "")) && call.args.get("selection").and_then(|v| v.as_bool()) == Some(true) => {
+                let (answer, task) = self.collab_selection_run();
+                call.answer(answer);
+                return task;
+            }
             // an issue made of clashes takes its picture after the answer
             #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
             "collab_clashes" if matches!(call.args.get("action").and_then(|v| v.as_str()), Some("issue" | "issues")) => {

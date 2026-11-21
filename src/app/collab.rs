@@ -1589,11 +1589,29 @@ impl App {
             let marks = view.marks.iter().filter_map(|(kind, points)| Some(crate::measure::Measurement::Mark { kind: crate::measure::MarkKind::parse(kind)?, points: points.iter().map(|p| self.collab_to_display(*p)).collect() }));
             self.measure.results = lines.chain(notes).chain(marks).collect();
         }
-        // the first plane cuts; the side its direction points to is left out
-        self.plane = view.clipping_planes.first().and_then(|plane| {
-            let normal = Vec3::new(plane.direction[0] as f32, plane.direction[1] as f32, plane.direction[2] as f32).try_normalize()?;
-            Some(SectionPlane { normal, offset: normal.dot(self.collab_to_display(plane.location)) })
-        });
+        // A clash viewpoint carries six outward-facing planes around its local section.
+        let mut lo = Vec3::splat(f32::NEG_INFINITY);
+        let mut hi = Vec3::splat(f32::INFINITY);
+        if view.clipping_planes.len() == 6 {
+            for plane in &view.clipping_planes {
+                let n = Vec3::from_array(plane.direction.map(|v| v as f32)).normalize_or_zero();
+                let p = self.collab_to_display(plane.location);
+                for k in 0..3 {
+                    if n[k] > 0.999999 { hi[k] = p[k]; }
+                    if n[k] < -0.999999 { lo[k] = p[k]; }
+                }
+            }
+        }
+        self.section_on = lo.is_finite() && hi.is_finite() && lo.cmplt(hi).all();
+        if self.section_on {
+            self.section = Some(crate::section::SectionBox { min: lo, max: hi, turn: 0.0, pivot: (lo + hi) * 0.5 });
+            self.plane = None;
+        } else {
+            self.plane = view.clipping_planes.first().and_then(|plane| {
+                let normal = Vec3::from_array(plane.direction.map(|v| v as f32)).try_normalize()?;
+                Some(SectionPlane { normal, offset: normal.dot(self.collab_to_display(plane.location)) })
+            });
+        }
         match view.camera {
             Some(camera) => {
                 let Some(f) = Vec3::new(camera.direction[0] as f32, camera.direction[1] as f32, camera.direction[2] as f32).try_normalize() else { return };
@@ -2017,46 +2035,43 @@ impl App {
     pub(super) fn collab_clash_cut(&self, row: &ClashRow) -> Option<(crate::section::SectionBox, f32, f32)> {
         let model = self.model.as_ref()?;
         let focus = self.collab_clash_focus(row)?;
-        let mut cut = crate::section::SectionBox::around(&focus);
+        let matrix = self.model_matrix();
+        let mut cut = crate::section::SectionBox::around(&super::transform_bounds(&focus, &matrix));
+        let at = matrix.transform_point3(Vec3::from_array(row.at));
         let small = [row.a, row.b].iter().filter_map(|&id| model.element_bounds(id)).min_by(|x, y| x.radius().total_cmp(&y.radius()))?;
+        let small = super::transform_bounds(&small, &matrix);
         let size = Vec3::from_array(small.max) - Vec3::from_array(small.min);
-        let k = if size.x <= size.y { 0 } else { 1 };
+        let k = if size.z < size.x.min(size.y) { 2 } else if size.x <= size.y { 0 } else { 1 };
         // the side the camera is on: towards it the box is cut away
         let looks = self.camera.target - self.camera.eye();
         let side = if looks[k] >= 0.0 { 1.0 } else { -1.0 };
         // what stands behind it (steel behind a facade) and beside it comes along
-        let other = 1 - k;
+        let other = if k == 0 { 1 } else { 0 };
         cut.min[other] -= 0.3;
         cut.max[other] += 0.3;
         if side > 0.0 {
-            cut.min[k] = row.at[k];
+            cut.min[k] = at[k];
             cut.max[k] += 0.8;
         } else {
-            cut.max[k] = row.at[k];
+            cut.max[k] = at[k];
             cut.min[k] -= 0.8;
         }
         // the eye on that side, a little along the element
         let mut from = Vec3::ZERO;
         from[k] = -side;
-        from[1 - k] = if looks[1 - k] > 0.0 { -0.4 } else { 0.4 };
-        Some((cut, from.y.atan2(from.x), 22f32.to_radians()))
+        from[other] = if looks[other] > 0.0 { -0.4 } else { 0.4 };
+        let pitch = if k == 2 { -side * 65f32.to_radians() } else { 22f32.to_radians() };
+        Some((cut, from.y.atan2(from.x), pitch))
     }
 
-    /// The camera on where a clash is; a section box that is on moves to it.
+    /// Open the local section directly, even when the previous view had clipping switched off.
     fn collab_look_at_clash(&mut self, row: &ClashRow) {
-        let Some(focus) = self.collab_clash_focus(row) else { return };
-        if self.section_on && self.section.is_some() {
-            if let Some((cut, yaw, pitch)) = self.collab_clash_cut(row) {
-                self.section = Some(cut);
-                let mut to = self.camera;
-                (to.yaw, to.pitch) = (yaw, pitch);
-                to.fit(&focus, self.aspect());
-                self.anim = Some((self.camera, to, Instant::now()));
-                return;
-            }
-        }
+        let Some((cut, yaw, pitch)) = self.collab_clash_cut(row) else { return };
+        self.section = Some(cut);
+        self.section_on = true;
         let mut to = self.camera;
-        to.fit(&focus, self.aspect());
+        to.fit(&crate::model::Bounds { min: cut.min.to_array(), max: cut.max.to_array() }, self.aspect());
+        (to.yaw, to.pitch) = (yaw, pitch);
         self.anim = Some((self.camera, to, Instant::now()));
     }
 
@@ -2200,7 +2215,7 @@ impl App {
         self.collab.clash_shown = Some((rows.iter().map(|c| c.a).collect(), rows.iter().map(|c| c.b).collect()));
         self.update_units();
         let mut to = self.camera;
-        to.fit(&bounds, self.aspect());
+        to.fit(&super::transform_bounds(&bounds, &self.model_matrix()), self.aspect());
         self.camera = to;
         self.anim = None;
     }
@@ -2224,10 +2239,17 @@ impl App {
         )
     }
 
-    /// The remote's PDF report: it begins, and the answer says so; the pictures and the file
-    /// follow, while `collab_state` says `report: true`.
-    /// An issue made of a clash, or one of each group, over the remote control: the answer, and
-    /// the pictures of the clashes still to take.
+    /// Run the same background selection check as the Clashes pane.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn collab_selection_run(&mut self) -> (Result<serde_json::Value, String>, Task<Message>) {
+        if !self.sel.items().iter().any(|item| matches!(item, Pickable::Element(_))) {
+            return (Err("Select at least one element".into()), Task::none());
+        }
+        let task = self.collab_handle(Event::ClashSelection);
+        (Ok(serde_json::json!({ "started": true })), task)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn collab_clash_issue_remote(&mut self, a: &serde_json::Value) -> (Result<serde_json::Value, String>, Task<Message>) {
         use serde_json::json;
         self.collab.refresh();
@@ -2529,12 +2551,21 @@ impl App {
                 if self.collab.clash_shots.is_empty() {
                     return Task::none();
                 }
-                let (guid, _) = self.collab.clash_shots.remove(0);
+                let (guid, rows) = self.collab.clash_shots.remove(0);
                 let png = self.viewport_png(&shot);
-                let now = self.collab_viewpoint_now();
+                let mut now = self.collab_viewpoint_now();
+                if let Some(cut) = self.section.filter(|_| self.section_on && rows.len() == 1) {
+                    now.clipping_planes.clear();
+                    for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+                        for (point, direction) in [(cut.min, -axis), (cut.max, axis)] {
+                            now.clipping_planes.push(ClippingPlane { location: self.collab_to_world(point), direction: direction.as_dvec3().to_array() });
+                        }
+                    }
+                }
                 if let Some(view) = self.collab.issues.topics.iter_mut().find(|t| t.guid == guid).and_then(|t| t.viewpoints.first_mut()) {
                     // the viewpoint looks as the picture does
                     view.camera = now.camera;
+                    view.clipping_planes = now.clipping_planes;
                     if let Some(png) = png {
                         view.snapshot = Some(("snapshot.png".into(), png));
                     }
@@ -2623,9 +2654,7 @@ impl App {
             Event::ShowAccepted(on) => self.collab.show_accepted = on,
             // a clash picked: the box around where it clashes, not around its two whole elements
             Event::SectionAround => match self.collab.clash.and_then(|k| self.collab.clashes.get(k).cloned()) {
-                Some(row) if self.collab_clash_cut(&row).is_some() => {
-                    self.section_on = true;
-                    self.section = Some(crate::section::SectionBox::around(&self.collab_clash_focus(&row).unwrap_or_else(crate::model::Bounds::empty)));
+                Some(row) => {
                     self.collab_look_at_clash(&row);
                 }
                 _ => return self.update(Message::SectionToSelection),
@@ -3016,16 +3045,21 @@ impl App {
                     self.collab.show_tests = rows.is_empty();
                     self.collab.clashes = rows;
                     self.collab.open_group = None;
+                    if !self.collab.clashes.is_empty() && !self.collab.cancel.load(Ordering::Relaxed) {
+                        return self.collab_handle(Event::PickClash(0));
+                    }
                     self.refresh_overlay();
                 }
             }
             Event::PickClash(k) => {
                 let Some(row) = self.collab.clashes.get(k).cloned() else { return Task::none() };
+                let view = self.select_tab(0);
                 self.collab.clash = Some(k);
                 self.collab.open_group = Some(row.group);
                 self.collab_go_to([row.a, row.b]);
                 self.collab_look_at_clash(&row);
                 self.refresh_overlay();
+                return view;
             }
             Event::IssueFromClash(k) => {
                 let Some(row) = self.collab.clashes.get(k).cloned() else { return Task::none() };
@@ -4741,11 +4775,6 @@ impl App {
             "collab_clashes" => match action.as_str() {
                 "run" | "" => {
                     let started = Instant::now();
-                    if a.get("selection").and_then(|v| v.as_bool()).unwrap_or(false) {
-                        let _ = self.collab_handle(Event::ClashSelection);
-                        // the clash test runs on a thread in the window; here it is waited for
-                        return Ok(json!({ "started": true, "note": "the selection's clash test runs in the background; ask again with action list" }));
-                    }
                     self.collab_now(None, None, Some("clash"))?;
                     let mut by_rule = std::collections::BTreeMap::<&str, usize>::new();
                     for c in &self.collab.clashes {
@@ -5089,9 +5118,9 @@ mod tests {
         app.set_model(Arc::new(two_blocks()));
         let _ = app.collab_update(Event::Tab(Tab::Clashes));
         // the small block through the 4 m wall
-        app.collab.clashes = vec![row("t", 1, 2, [1.15, 0.1, 1.15])];
-        let _ = app.collab_update(Event::PickClash(0));
-        let _ = app.collab_update(Event::SectionAround);
+        assert!(!app.section_on);
+        let _ = app.collab_update(Event::Clashed(app.collab.run, vec![row("t", 1, 2, [1.15, 0.1, 1.15])]));
+        assert_eq!(app.collab.clash, Some(0));
         let section = app.section.expect("a section box");
         assert!(section.max.x - section.min.x < 2.0, "around the block, not along the 4 m wall: {section:?}");
         assert!([section.min.x, section.max.x].contains(&1.15) || [section.min.y, section.max.y].contains(&0.1), "its side towards the camera through the clash: {section:?}");
@@ -5110,6 +5139,27 @@ mod tests {
         assert!(view.snapshot.as_ref().is_some_and(|(name, png)| name == "snapshot.png" && png.get(1..4) == Some(&b"PNG"[..])));
         assert!(app.collab.clash_shown.is_none() && app.collab.clash_shots.is_empty());
         assert_eq!(app.sel.items().to_vec(), selected);
+        assert_eq!(view.clipping_planes.len(), 6);
+        let saved = view.clone();
+        app.section_on = false;
+        app.section = None;
+        app.collab_show_viewpoint(&saved);
+        let restored = app.section.unwrap();
+        assert!(app.section_on && restored.min.abs_diff_eq(section.min, 0.0001) && restored.max.abs_diff_eq(section.max, 0.0001));
+    }
+
+    #[test]
+    fn a_horizontal_clash_cuts_at_the_contact_elevation() {
+        let mut layers = two_blocks().layers;
+        for vertex in layers[0].positions.chunks_exact_mut(3) {
+            vertex[2] *= 0.1;
+        }
+        let mut app = App::default();
+        app.set_model(Arc::new(Model::new(PathBuf::from("floor.ifc"), "IFC", layers)));
+        let contact = [1.15, 0.1, 0.115];
+        let (cut, _, pitch) = app.collab_clash_cut(&row("t", 1, 2, contact)).unwrap();
+        assert!([cut.min.z, cut.max.z].contains(&contact[2]));
+        assert!(pitch.abs().to_degrees() > 60.0);
     }
 
     #[test]
