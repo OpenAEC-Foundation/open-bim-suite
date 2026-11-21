@@ -172,7 +172,7 @@ impl PlacingOverlay {
                     b.close();
                 }),
             ),
-            Snap::Ortho | Snap::Round => (Color::from_rgb8(240, 140, 0), Path::circle(p, MARK - 1.0)),
+            Snap::Ortho | Snap::Polar | Snap::Round => (Color::from_rgb8(240, 140, 0), Path::circle(p, MARK - 1.0)),
         };
         frame.stroke(&shape, canvas::Stroke::default().with_color(Color::from_rgba8(0, 0, 0, 0.75)).with_width(4.0));
         frame.stroke(&shape, canvas::Stroke::default().with_color(color).with_width(2.0));

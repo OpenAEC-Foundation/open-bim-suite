@@ -2508,7 +2508,8 @@ impl Studio {
                     ..Default::default()
                 })
                 .on_press(Msg::App(Message::SnapToggle(snap)));
-            line = line.push(w::with_tooltip(look, switch.into(), snap.tip(l), None));
+            let switch = openaec_ui::design::a11y::node(switch, openaec_ui::design::a11y::Node::new(openaec_ui::design::a11y::Role::CheckBox, snap.label(l)).checked(on));
+            line = line.push(w::with_tooltip(look, switch, snap.tip(l), None));
         }
         let cell = column![
             w::divider(look),

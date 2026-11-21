@@ -410,7 +410,7 @@ fn elevation(model: &Model, element: &Element, s: &bim_core::SystemDef, t: &bim_
         return None;
     }
     let (text, off) = (TEXT * PLAN_SCALE, OFFSET * PLAN_SCALE);
-    let mut d = Drawing2d { name: format!("{} {}", element.name, element.id.0), space: Space::Model { scale: PLAN_SCALE }, paper: None, lines: Vec::new(), texts: Vec::new(), dimensions: Vec::new() };
+    let mut d = Drawing2d { polygons: Vec::new(), images: Vec::new(), name: format!("{} {}", element.name, element.id.0), space: Space::Model { scale: PLAN_SCALE }, paper: None, lines: Vec::new(), texts: Vec::new(), dimensions: Vec::new() };
     let faced = |p: &bim_core::Part| {
         let (mut u, mut v) = ((f64::INFINITY, f64::NEG_INFINITY), (f64::INFINITY, f64::NEG_INFINITY));
         for q in &p.solid.positions {
@@ -445,7 +445,7 @@ fn elevation(model: &Model, element: &Element, s: &bim_core::SystemDef, t: &bim_
     let dim = |d: &mut Drawing2d, from: [f64; 2], to: [f64; 2], rows: f64| {
         let value = (to[0] - from[0]).hypot(to[1] - from[1]);
         if value > LINEAR_TOLERANCE {
-            d.dimensions.push(Dim2d { from, to, value, offset: off * rows, text_height: text });
+            d.dimensions.push(Dim2d { first_witness: true, units_per_paper_metre: off / OFFSET, witnesses: [from, to], from, to, value, offset: off * rows, text_height: text, style: crate::document::DimensionStyle::standard() });
         }
     };
     // the grid: the middles of the joints between the panels, from edge to edge
@@ -506,7 +506,7 @@ fn elevation(model: &Model, element: &Element, s: &bim_core::SystemDef, t: &bim_
     }
     list.sort_by(|a, b| b.0.cmp(&a.0));
     for (long, n) in list {
-        d.texts.push(Text2d { pen: Pen::Text, at: [0.0, y], height: text, text: format!("{n} × {} {width}×{depth} L={long}", named(&t.member_material)), align: Align::Left, angle: 0.0 });
+        d.texts.push(Text2d { family: None, bold: false, color: None, pen: Pen::Text, at: [0.0, y], height: text, text: format!("{n} × {} {width}×{depth} L={long}", named(&t.member_material)), align: Align::Left, angle: 0.0 });
         y -= text * 1.8;
     }
     Some(d)
@@ -518,7 +518,7 @@ fn open_plan(model: &Model, element: &Element, s: &bim_core::SystemDef, t: &bim_
     let left = dir.perp();
     let parts = model.evaluate(element.id).ok()?;
     let (text, off) = (TEXT * PLAN_SCALE, OFFSET * PLAN_SCALE);
-    let mut d = Drawing2d { name: format!("{} {}", element.name, element.id.0), space: Space::Model { scale: PLAN_SCALE }, paper: None, lines: Vec::new(), texts: Vec::new(), dimensions: Vec::new() };
+    let mut d = Drawing2d { polygons: Vec::new(), images: Vec::new(), name: format!("{} {}", element.name, element.id.0), space: Space::Model { scale: PLAN_SCALE }, paper: None, lines: Vec::new(), texts: Vec::new(), dimensions: Vec::new() };
     // every part as the rectangle it covers, with where its underside is
     let boxed = |p: &bim_core::Part| {
         let (mut a, mut b, mut under) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2], f64::INFINITY);
@@ -556,7 +556,7 @@ fn open_plan(model: &Model, element: &Element, s: &bim_core::SystemDef, t: &bim_
     let dim = |d: &mut Drawing2d, from: [f64; 2], to: [f64; 2], rows: f64| {
         let value = (to[0] - from[0]).hypot(to[1] - from[1]);
         if value > LINEAR_TOLERANCE {
-            d.dimensions.push(Dim2d { from, to, value, offset: off * rows, text_height: text });
+            d.dimensions.push(Dim2d { first_witness: true, units_per_paper_metre: off / OFFSET, witnesses: [from, to], from, to, value, offset: off * rows, text_height: text, style: crate::document::DimensionStyle::standard() });
         }
     };
     // over it the seams between its boards along it, to its right those across it; without
@@ -602,7 +602,7 @@ fn open_plan(model: &Model, element: &Element, s: &bim_core::SystemDef, t: &bim_
         let counted: Vec<(i64, i64)> = boards.iter().flat_map(|b| std::iter::repeat_n(size(b), layers.max(1))).collect();
         write_list(&mut d, y, text, title, &counted, &|width, long| format!("{thick} × {width} × {long}"));
     } else {
-        d.texts.push(Text2d { pen: Pen::Text, at: [0.0, y], height: text * 1.4, text: title, align: Align::Left, angle: 0.0 });
+        d.texts.push(Text2d { family: None, bold: false, color: None, pen: Pen::Text, at: [0.0, y], height: text * 1.4, text: title, align: Align::Left, angle: 0.0 });
     }
     // the members under one another after the boards, alike ones counted together, the longest first
     let lines = d.texts[before..].iter().filter(|t| t.at[0] == 0.0).count();
@@ -617,7 +617,7 @@ fn open_plan(model: &Model, element: &Element, s: &bim_core::SystemDef, t: &bim_
     }
     list.sort_by(|a, b| b.0.cmp(&a.0));
     for (long, n) in list {
-        d.texts.push(Text2d { pen: Pen::Text, at: [0.0, y], height: text, text: format!("{n} × {} {width}×{depth} L={long}", named(&t.member_material)), align: Align::Left, angle: 0.0 });
+        d.texts.push(Text2d { family: None, bold: false, color: None, pen: Pen::Text, at: [0.0, y], height: text, text: format!("{n} × {} {width}×{depth} L={long}", named(&t.member_material)), align: Align::Left, angle: 0.0 });
         y -= text * 1.8;
     }
     Some(d)
@@ -678,7 +678,7 @@ fn number(d: &mut Drawing2d, parts: &[Member], numbers: &[(i64, i64)], lo: f64, 
         } else {
             [mid_u, m.v.1 + 0.4 * text]
         };
-        d.texts.push(Text2d { pen: Pen::Text, at, height: text, text: (n + 1).to_string(), align: Align::Left, angle: 0.0 });
+        d.texts.push(Text2d { family: None, bold: false, color: None, pen: Pen::Text, at, height: text, text: (n + 1).to_string(), align: Align::Left, angle: 0.0 });
     }
 }
 

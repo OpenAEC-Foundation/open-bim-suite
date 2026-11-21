@@ -352,7 +352,7 @@ impl App {
     /// Runs a remote command. Most answer at once; `open_file` answers when the model is in and
     /// `screenshot` when the window is captured.
     pub fn remote(&mut self, call: RemoteCall) -> Task<Message> {
-        if !self.annotates && (matches!(call.cmd.as_str(), "save_file" | "drag_handle" | "tool_type" | "click_drawing" | "element_drawings") || call.cmd.starts_with("collab_")) {
+        if !self.annotates && (matches!(call.cmd.as_str(), "save_file" | "place_model_point" | "drag_handle" | "tool_type" | "click_drawing" | "element_drawings") || call.cmd.starts_with("collab_")) {
             call.answer(Err("The Viewer is read-only.".into()));
             return Task::none();
         }
@@ -455,6 +455,7 @@ impl App {
                 let _ = self.update(Message::Redo);
                 Ok(self.visibility_json())
             }
+            "place_model_point" => self.place_model_point(a.get("x").and_then(Value::as_f64).ok_or("x in metres required")?, a.get("y").and_then(Value::as_f64).ok_or("y in metres required")?),
             "pick" => self.remote_pick(a),
             "place_cursor" => {
                 let (x, y) = (num(a, "x").ok_or("x is required")?, num(a, "y").ok_or("y is required")?);

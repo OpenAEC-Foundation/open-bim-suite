@@ -527,7 +527,7 @@ impl App {
             let mut host = next.get(wall).cloned().ok_or("De wand ontbreekt.")?;
             let mut ids = Vec::with_capacity(bars.len());
             for (i, (start, end, diameter)) in bars.into_iter().enumerate() {
-                let shape = Shape::Linear(LinearDef {
+                let shape = Shape::Linear(LinearDef { role: Default::default(),
                     start,
                     end,
                     profile: ProfileDef::Circle { diameter },
@@ -855,7 +855,7 @@ mod tests {
         assert!(!bars.is_empty());
         for (s, e, diameter) in bars {
             assert!((e - s).distance((f.axis.perp() * 0.2).extend(0.)) < 1e-8);
-            let l = LinearDef {
+            let l = LinearDef { role: Default::default(),
                 start: s,
                 end: e,
                 profile: ProfileDef::Circle { diameter },

@@ -845,7 +845,7 @@ mod tests {
 
     #[test]
     fn a_base_plate_lifts_the_column_onto_grout_and_anchors_it() {
-        let column = |from: f64| Member::of(&LinearDef { start: DVec3::new(2.0, 0.0, from), end: DVec3::new(2.0, 0.0, 3.0), profile: ProfileDef::Rectangle { width: 0.2, height: 0.2 }, roll: 0.0 }).unwrap();
+        let column = |from: f64| Member::of(&LinearDef { role: Default::default(), start: DVec3::new(2.0, 0.0, from), end: DVec3::new(2.0, 0.0, 3.0), profile: ProfileDef::Rectangle { width: 0.2, height: 0.2 }, roll: 0.0 }).unwrap();
         let plate = BasePlate::default();
         let check = |r: &JoinResult, top: f64| {
             let (k, end, trim) = r.trims[0];
@@ -862,7 +862,7 @@ mod tests {
             assert!(r.removals.is_empty() && r.additions.is_empty());
         };
         // on a pile in one line with it
-        let pile = Member::of(&LinearDef { start: DVec3::new(2.0, 0.0, -8.0), end: DVec3::new(2.0, 0.0, 0.0), profile: ProfileDef::Rectangle { width: 0.4, height: 0.4 }, roll: 0.0 }).unwrap();
+        let pile = Member::of(&LinearDef { role: Default::default(), start: DVec3::new(2.0, 0.0, -8.0), end: DVec3::new(2.0, 0.0, 0.0), profile: ProfileDef::Rectangle { width: 0.4, height: 0.4 }, roll: 0.0 }).unwrap();
         check(&cuts(JoinKind::BasePlate(plate), &[pile, column(0.0)]).unwrap(), 0.0);
         // on a foundation beam, whose top lies 0.2 over its axis
         let beam = member(DVec3::ZERO, DVec3::new(5.0, 0.0, 0.0));

@@ -155,7 +155,7 @@ pub(super) fn member_tags(model: &Model, library: &bim_library::Library, level: 
     let piles = piles(model, level, elevation);
     let mut notes = Vec::new();
     // a precast floor's planks: each its mark and its length, along the way it spans
-    for plank in planks(model, library, level) {
+    for plank in planks(model, library, level).into_iter().filter(|p| model.get(p.floor).is_some_and(&visible)) {
         let angle = if plank.turned { std::f64::consts::FRAC_PI_2 } else { 0.0 };
         notes.push(note(plank.at, format!("P{} {}", plank.mark, plank.sizes[0]), Align::Center, angle));
     }
@@ -540,7 +540,7 @@ mod tests {
         let sheet = app.document.add_sheet("Fundering");
         app.document.place_plan(&sheet, &view).unwrap();
         let grid = app.modeller.model.grid;
-        let pile = |x| Element::in_project(&grid, "T1 object", Some(level.clone()), Shape::Linear(LinearDef {
+        let pile = |x| Element::in_project(&grid, "T1 object", Some(level.clone()), Shape::Linear(LinearDef { role: Default::default(),
             start: DVec3::new(x, 0.0, 0.5), end: DVec3::new(x, 0.0, 4.5),
             profile: ProfileDef::Rectangle { width: 0.3, height: 0.3 }, roll: 0.0,
         }));
@@ -611,7 +611,7 @@ mod tests {
         let level = app.document.levels()[0].path.clone();
         let grid = app.modeller.model.grid;
         for (i, length) in [2.0, 2.0, 3.0, 4.0, 5.0].into_iter().enumerate() {
-            let mut pile = Element::in_project(&grid, format!("Paal {i}"), Some(level.clone()), Shape::Linear(LinearDef {
+            let mut pile = Element::in_project(&grid, format!("Paal {i}"), Some(level.clone()), Shape::Linear(LinearDef { role: Default::default(),
                 start: DVec3::new(i as f64, 0.0, -length), end: DVec3::new(i as f64, 0.0, 0.0),
                 profile: ProfileDef::Circle { diameter: 0.3 }, roll: 0.0,
             }));
@@ -674,7 +674,7 @@ mod tests {
         app.new_model("Foundation");
         let level = app.document.levels()[0].path.clone();
         let grid = app.modeller.model.grid;
-        let mut e = Element::in_project(&grid, "Paal", Some(level.clone()), Shape::Linear(LinearDef {
+        let mut e = Element::in_project(&grid, "Paal", Some(level.clone()), Shape::Linear(LinearDef { role: Default::default(),
             start: DVec3::new(0.0,0.0,-3.0), end: DVec3::new(0.0,0.0,1.0),
             profile: ProfileDef::Rectangle { width: 0.29,height: 0.29 }, roll: 0.0,
         }));
@@ -749,9 +749,9 @@ mod tests {
         let mut app = App::default();
         let _ = app.update(Message::NewModel("Level 0"));
         let level = app.work_plane().2;
-        let beam = Shape::Linear(LinearDef { start: DVec3::new(0.0, 0.0, 3.0), end: DVec3::new(6.0, 0.0, 3.0), profile: ProfileDef::Rectangle { width: 0.3, height: 0.5 }, roll: 0.0 });
+        let beam = Shape::Linear(LinearDef { role: Default::default(), start: DVec3::new(0.0, 0.0, 3.0), end: DVec3::new(6.0, 0.0, 3.0), profile: ProfileDef::Rectangle { width: 0.3, height: 0.5 }, roll: 0.0 });
         let id = app.add_element("Beam", level.clone(), beam).unwrap();
-        let steel = app.add_element("Steel", level, Shape::Linear(LinearDef { start: DVec3::new(0.0, 4.0, 3.0), end: DVec3::new(6.0, 4.0, 3.0), profile: ProfileDef::steel("IPE 300").unwrap(), roll: 0.0 })).unwrap();
+        let steel = app.add_element("Steel", level, Shape::Linear(LinearDef { role: Default::default(), start: DVec3::new(0.0, 4.0, 3.0), end: DVec3::new(6.0, 4.0, 3.0), profile: ProfileDef::steel("IPE 300").unwrap(), roll: 0.0 })).unwrap();
         assert!(app.schedules.iter().all(|s| s.name != "Bar schedule"));
         let select = |app: &mut App, id: bim_core::ElementId| {
             let scene = app.model.clone().unwrap();
@@ -789,7 +789,7 @@ mod tests {
         let path = level.clone().unwrap();
         // 4.2 m wide (three planks of 1200 and a narrow one) spanning 6 m
         let t = app.library.system_type("system.hollow-core-200").unwrap().clone();
-        let generic = SystemDef { start: DVec2::ZERO, end: DVec2::new(4.2, 0.0), base: t.lying.unwrap(), height: 6.0, spacing: DVec2::splat(0.6), member: DVec2::new(0.045, 0.14), panel: 0.012, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new() };
+        let generic = SystemDef { division: Default::default(), start: DVec2::ZERO, end: DVec2::new(4.2, 0.0), base: t.lying.unwrap(), height: 6.0, spacing: DVec2::splat(0.6), member: DVec2::new(0.045, 0.14), panel: 0.012, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new() };
         let floor = app.add_element("Floor", level, Shape::System(generic.clone().laid(&t).unwrap())).unwrap();
         // a second floor beside it, spanning 4 m: other planks, another mark
         let short = SystemDef { start: DVec2::new(5.0, 0.0), end: DVec2::new(7.4, 0.0), height: 4.0, ..generic.clone() };

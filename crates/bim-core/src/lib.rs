@@ -106,9 +106,8 @@ pub enum Refusal {
     NoUnitJoint,
     /// Two building systems are joined only butt or apart, and only when both are framed.
     SystemJoin,
-    /// A run is too short to stop clear of the fitting at its end.
+    /// A service run is shorter than its fitting.
     TooShortForFitting,
-    NotInLine,
 }
 
 impl Refusal {
@@ -147,7 +146,6 @@ impl Refusal {
             Refusal::NoUnitJoint => "The frame cannot be split into prefab units clear of its openings.",
             Refusal::SystemJoin => "Two framed systems are joined butt or kept apart.",
             Refusal::TooShortForFitting => "A run is too short for the fitting at its end.",
-            Refusal::NotInLine => "The two runs do not lie in one line.",
         }
     }
 }

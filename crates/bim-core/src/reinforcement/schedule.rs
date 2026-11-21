@@ -197,3 +197,4 @@ mod tests {
         let rows = Reinforcement { top: Bars { count: 0, diameter: 0.0 }, ..Default::default() }.bars(&section, 4.0).unwrap();
         assert_eq!(rows.iter().map(|r| r.kind).collect::<Vec<_>>(), [BarKind::Bottom, BarKind::Stirrup]);
     }
+}

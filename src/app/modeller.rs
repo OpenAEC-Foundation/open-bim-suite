@@ -249,7 +249,7 @@ pub struct Modeller {
     /// The kind of snap that took the cursor's point where it is, for its mark; and what that
     /// kind is called, in the interface language.
     pub snap_mark: Option<snaps::Snap>,
-    pub snap_words: [&'static str; 6],
+    pub snap_words: [&'static str; 7],
     /// The series of grid lines being typed beside the picked one (see `grids`); `None`: closed.
     pub grid_series: Option<String>,
     /// Which snaps are on (see `snaps`).
@@ -589,28 +589,62 @@ impl App {
                 straight = Some(snaps::Snap::Ortho);
             }
         }
+        if straight.is_none() && snaps.polar {
+            if let Some(start) = self.modeller.points.last() {
+                let delta = (p - *start).truncate();
+                let heading = delta.y.atan2(delta.x);
+                let step = std::f64::consts::FRAC_PI_4;
+                let ray = (heading / step).round() * step;
+                if delta.length_squared() > 0.0 && (heading - ray).abs().to_degrees() < ORTHO_DEGREES {
+                    let direction = DVec2::new(ray.cos(), ray.sin());
+                    p = (start.truncate() + direction * delta.dot(direction)).extend(p.z);
+                    straight = Some(snaps::Snap::Polar);
+                }
+            }
+        }
         (p, straight)
+    }
+
+    /// Project a metric work-plane point onto the active viewport, then use the GUI placement path.
+    pub(crate) fn place_model_point(&mut self, x: f64, y: f64) -> Result<serde_json::Value, String> {
+        if !self.annotates || !self.modeller.in_modeller || self.active_doc_tab() != 0 { return Err("Open the Modeller 3D view first".into()) }
+        let (tool, _) = self.modeller.tool.ok_or("Choose a modelling tool in the ribbon first")?;
+        if tool.opens() { return Err("Pick the host face in the viewport for an opening".into()) }
+        let (z, _, _) = self.work_plane();
+        let (w, h) = self.viewport_size;
+        let target = DVec3::new(x, y, z);
+        let (px, py) = self.on_screen(target, w, h).filter(|(a,b)| (0.0..w).contains(a) && (0.0..h).contains(b)).ok_or("Point outside the current viewport")?;
+        let before = self.modeller.model.iter().map(|e| e.id.0).max().unwrap_or(0);
+        let (point, snap) = self.click_work_plane(tool, px, py, w, h).ok_or("The work plane is edge-on")?;
+        if let Some(reason) = self.modeller.refusal { return Err(reason.reason().into()) }
+        let created: Vec<_> = self.modeller.model.iter().filter(|e| e.id.0 > before).map(|e| e.id.0).collect();
+        Ok(serde_json::json!({"point": point.to_array(), "snap": snap.map(|s| s.label(openaec_ui::Language::English)), "created": created}))
     }
 
     /// A click in the viewport while a tool is on.
     pub(super) fn model_click(&mut self, x: f32, y: f32, width: f32, height: f32) {
-        let Some((tool, name)) = self.modeller.tool else { return };
+        let Some((tool, _)) = self.modeller.tool else { return };
         if tool.opens() {
             return self.place_opening(tool, x, y, width, height);
         }
+        let _ = self.click_work_plane(tool, x, y, width, height);
+    }
+
+    fn click_work_plane(&mut self, tool: ModelTool, x: f32, y: f32, width: f32, height: f32) -> Option<(DVec3, Option<snaps::Snap>)> {
+        let (_, name) = self.modeller.tool?;
         let (z, _, level) = self.work_plane();
-        let Some(p) = self.plane_point(x, y, width, height, z) else { return };
-        let p = self.snapped(p, x, y, width, height);
+        let p = self.plane_point(x, y, width, height, z)?;
+        let (p, snap) = self.snapped_as(p, x, y, width, height);
         // walls as a rectangle: the second click is the opposite corner, and four walls go
         // round, each from the end of the one before, as a chain does
         if tool == ModelTool::Wall && self.modeller.placement.rectangle {
             let Some(&a) = self.modeller.points.first() else {
                 self.modeller.points.push(p);
                 self.modeller.refusal = None;
-                return;
+                return Some((p, snap));
             };
             if (a.x - p.x).abs() < 1e-6 || (a.y - p.y).abs() < 1e-6 {
-                return;
+                return Some((p, snap));
             }
             let chained = std::mem::replace(&mut self.modeller.placement.chain, true);
             self.modeller.points.clear();
@@ -621,9 +655,10 @@ impl App {
             self.modeller.points.clear();
             self.modeller.placement.last_wall = None;
             self.modeller.placement.chain = chained;
-            return;
+            return Some((p, snap));
         }
         self.model_point(tool, name, level, p);
+        Some((p, snap))
     }
 
     /// The next point of `tool`, already snapped: with its last point the element is placed.
@@ -740,6 +775,11 @@ impl App {
         let mut element = Element::in_project(&grid, name, level, shape);
         element.top = top;
         element.service = service;
+        if let Some((tool,_)) = self.modeller.tool.filter(|(tool,_)| tool.service().is_some()) {
+            if matches!(&element.shape, Shape::Linear(_)) {
+                element.service_type = self.modeller.placement.of(tool).kind;
+            }
+        }
         // numbered per IFC class: Wall 1, Wall 2, Slab 1
         let number = self.modeller.model.iter().filter(|e| e.class() == element.class()).count() + 1;
         element.name = format!("{name} {number}");
@@ -1013,17 +1053,17 @@ impl App {
 /// The profile of a run of a building service: a duct of 1 mm sheet `width` × `depth`, a round
 /// duct or a pipe of diameter `width` (a pipe's wall a twentieth of it, at least 1 mm), a cable
 /// tray `width` wide with sides `depth` high, of 2 mm sheet, open above.
-pub(super) fn service_profile(tool: ModelTool, width: f64, depth: f64) -> ProfileDef {
+pub(super) fn service_profile(tool: ModelTool, width: f64, depth: f64, wall: Option<f64>) -> ProfileDef {
     let mm = |v: f64| format!("{}", (v * 1000.0).round());
     match tool {
-        ModelTool::RoundDuct => ProfileDef::Catalogue { designation: format!("Ø{}", mm(width)), shape: bim_library::ProfileShape::Chs { d: width, t: 0.001 } },
-        ModelTool::Pipe => ProfileDef::Catalogue { designation: format!("Ø{}", mm(width)), shape: bim_library::ProfileShape::Chs { d: width, t: (width / 20.0).max(0.001) } },
+        ModelTool::RoundDuct => ProfileDef::Catalogue { designation: format!("Ø{}", mm(width)), shape: bim_library::ProfileShape::Chs { d: width, t: wall.unwrap_or(0.001) } },
+        ModelTool::Pipe => ProfileDef::Catalogue { designation: format!("Ø{}", mm(width)), shape: bim_library::ProfileShape::Chs { d: width, t: wall.unwrap_or_else(|| (width / 20.0).max(0.001)) } },
         ModelTool::CableTray => {
-            let (w, h, t) = (width / 2.0, depth, 0.002);
+            let (w, h, t) = (width / 2.0, depth, wall.unwrap_or(0.002));
             let outer = vec![DVec2::new(-w, -h / 2.0), DVec2::new(w, -h / 2.0), DVec2::new(w, h / 2.0), DVec2::new(w - t, h / 2.0), DVec2::new(w - t, -h / 2.0 + t), DVec2::new(-w + t, -h / 2.0 + t), DVec2::new(-w + t, h / 2.0), DVec2::new(-w, h / 2.0)];
             ProfileDef::Polygon { outer, holes: Vec::new() }
         }
-        _ => ProfileDef::Catalogue { designation: format!("{}×{}", mm(width), mm(depth)), shape: bim_library::ProfileShape::Rhs { h: depth, b: width, t: 0.001, r_out: 0.0, r_in: 0.0 } },
+        _ => ProfileDef::Catalogue { designation: format!("{}×{}", mm(width), mm(depth)), shape: bim_library::ProfileShape::Rhs { h: depth, b: width, t: wall.unwrap_or(0.001), r_out: 0.0, r_in: 0.0 } },
     }
 }
 
@@ -1059,7 +1099,7 @@ pub(super) fn tool_shape(tool: ModelTool, a: DVec3, b: DVec3, z: f64, storey: f6
             let up = DVec3::Z * (z + s.height.unwrap_or(SERVICE_HEIGHT) - a.z);
             let role = tool.service().unwrap_or_default();
             // its rise takes its end up (a slope; a riser when both clicks are one point)
-            Shape::Linear(LinearDef { start: a + up, end: b + up + DVec3::Z * s.offset, profile: service_profile(tool, s.width, s.depth), roll: 0.0, role })
+            Shape::Linear(LinearDef { start: a + up, end: b + up + DVec3::Z * s.offset, profile: service_profile(tool, s.width, s.depth, s.kind.as_deref().and_then(|id| library.service_type(id)).and_then(|series| series.sizes.iter().find(|size| (size.width-s.width).abs() < 1e-6 && ((size.height-s.depth).abs() < 1e-6 || matches!(tool, ModelTool::Pipe | ModelTool::RoundDuct)))).map(|size| size.wall)), roll: 0.0, role })
         }
         ModelTool::Wall => {
             let base = z + s.offset;
@@ -1309,6 +1349,7 @@ fn properties(model: &bim_core::Model, e: &Element, parts: &[bim_core::Part], le
         put("level", level.into());
     }
     // the service it is of, and the kind of system that is in IFC
+    if let Some(key) = &e.service_type { put("Service type", key.clone()); }
     if let Some(service) = e.service {
         put("Service", service.name().into());
         put("System type", service.ifc_system().into());

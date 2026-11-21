@@ -197,7 +197,7 @@ mod tests {
     #[test]
     fn registered_symbols_require_a_complete_match_and_preserve_other_line_styles() {
         let mut model = Model::default();
-        let l = LinearDef {
+        let l = LinearDef { role: Default::default(),
             start: DVec3::NEG_Z,
             end: DVec3::ZERO,
             profile: ProfileDef::Rectangle {

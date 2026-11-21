@@ -184,7 +184,7 @@ mod tests {
         let mut doc = Document::default();
         doc.add_level("Foundation", 0.0).unwrap();
         let level = doc.levels()[0].path.clone();
-        let shape = Shape::Linear(LinearDef {
+        let shape = Shape::Linear(LinearDef { role: Default::default(),
             start: DVec3::new(1.0, 2.0, -12.0),
             end: DVec3::new(1.0, 2.0, -0.5),
             profile: ProfileDef::Rectangle {

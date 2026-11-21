@@ -377,7 +377,7 @@ mod tests {
     fn a_reinforced_beam_is_drawn_with_its_bars_its_stirrups_and_its_section() {
         let mut app = App::default();
         app.new_model("Level 0");
-        let beam = Shape::Linear(LinearDef { start: DVec3::new(0.0, 0.0, 3.0), end: DVec3::new(6.0, 0.0, 3.0), profile: ProfileDef::Rectangle { width: 0.3, height: 0.5 }, roll: 0.0 });
+        let beam = Shape::Linear(LinearDef { role: Default::default(), start: DVec3::new(0.0, 0.0, 3.0), end: DVec3::new(6.0, 0.0, 3.0), profile: ProfileDef::Rectangle { width: 0.3, height: 0.5 }, roll: 0.0 });
         let id = app.add_element("Beam", None, beam).unwrap();
         app.select_modelled(id);
         let _ = app.update(Message::Reinforce(true));
@@ -410,7 +410,7 @@ mod tests {
 
     #[test]
     fn a_reinforced_column_has_its_bars_upright_and_its_stirrups_across() {
-        let column = Shape::Linear(LinearDef { start: DVec3::new(4.0, 4.0, 0.0), end: DVec3::new(4.0, 4.0, 3.0), profile: ProfileDef::Rectangle { width: 0.3, height: 0.5 }, roll: 0.0 });
+        let column = Shape::Linear(LinearDef { role: Default::default(), start: DVec3::new(4.0, 4.0, 0.0), end: DVec3::new(4.0, 4.0, 3.0), profile: ProfileDef::Rectangle { width: 0.3, height: 0.5 }, roll: 0.0 });
         let mut e = Element::in_project(&bim_core::TileGrid::default(), "Column", None, column.clone());
         e.reinforcement = Some(Default::default());
         let f = frame(&column).unwrap();
@@ -421,7 +421,7 @@ mod tests {
         assert!(upright.iter().all(|l| (l[0][1] - 0.03).abs() < 1e-9 && (l[1][1] - 2.97).abs() < 1e-9));
         assert_eq!(b.lines.len() - 5, 20, "a stirrup every 150 over 2.94");
         // a sloping member has none drawn, nor one without reinforcement
-        let rafter = Shape::Linear(LinearDef { start: DVec3::ZERO, end: DVec3::new(4.0, 0.0, 2.0), profile: ProfileDef::Rectangle { width: 0.3, height: 0.5 }, roll: 0.0 });
+        let rafter = Shape::Linear(LinearDef { role: Default::default(), start: DVec3::ZERO, end: DVec3::new(4.0, 0.0, 2.0), profile: ProfileDef::Rectangle { width: 0.3, height: 0.5 }, roll: 0.0 });
         assert!(bar_drawing(&e, &rafter, &frame(&rafter).unwrap(), 20.0, 0.1).is_none());
         e.reinforcement = None;
         assert!(bar_drawing(&e, &column, &f, 20.0, 0.1).is_none());

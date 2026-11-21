@@ -121,7 +121,7 @@ pub fn hairpin_solid(line: &crate::LinearDef, leg: f64) -> Result<crate::Solid, 
     let solid = Solid { positions, faces };
     solid.check()?;
     Ok(solid)
+}
 
 mod schedule;
 pub use schedule::*;
-}

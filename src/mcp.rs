@@ -255,6 +255,8 @@ pub fn tools() -> Vec<Value> {
         tool("clear_measurements", "Remove the measurements drawn in the viewport.", json!({}), &[], false),
         tool("cancel", "Press Esc: stop placing a section plane, else clear the selection.", json!({}), &[], false),
         // the Modeller's viewport gestures
+        tool("place_model_point", "Click the active Modeller tool on its work plane at x and y in metres. The point must be visible in the viewport. Uses the same snaps, placement settings and undo as the window. Returns the snapped point, snap kind and newly created element IDs.",
+            json!({"x":{"type":"number"},"y":{"type":"number"}}), &["x","y"], false),
         tool("place_cursor", "The Modeller: put the 3D cursor under a pixel of the last viewport screenshot, as Shift + the right button does. It lands on a point of an element near it, else on the level worked on.",
             json!({ "x": { "type": "number" }, "y": { "type": "number" } }), &["x", "y"], false),
         tool("click_drawing", "The Modeller: click on the drawing shown (a floor plan, a section or an elevation) at pixels of the last viewport screenshot, one after the other, as the mouse does. With a tool of the Annotate or Project tab on (ui_press its button first) the clicks place what it places: two for a section or a dimension, two for a line, a rectangle or a circle, one for a text; without a tool a click picks a dimension, a text or a section line.",

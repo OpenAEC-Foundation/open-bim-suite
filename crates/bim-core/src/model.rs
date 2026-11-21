@@ -856,7 +856,7 @@ mod tests {
     #[test]
     fn a_splice_and_a_base_plate_are_assemblies_with_their_fixity() {
         let mut m = Model::new(TileGrid::default());
-        let steel = |a: DVec3, b: DVec3, name: &str| Shape::Linear(LinearDef { start: a, end: b, profile: ProfileDef::steel(name).unwrap(), roll: 0.0 });
+        let steel = |a: DVec3, b: DVec3, name: &str| Shape::Linear(LinearDef { role: Default::default(), start: a, end: b, profile: ProfileDef::steel(name).unwrap(), roll: 0.0 });
         // two beams in one line: joined by nothing of themselves, spliced on request
         let a = add(&mut m, steel(DVec3::new(0.0, 0.0, 3.0), DVec3::new(4.0, 0.0, 3.0), "IPE 300"));
         let b = add(&mut m, steel(DVec3::new(4.0, 0.0, 3.0), DVec3::new(9.0, 0.0, 3.0), "IPE 300"));
@@ -869,7 +869,7 @@ mod tests {
         assert_eq!(m.evaluate(splice).unwrap().len(), 6, "two plates and four bolts");
         assert!(m.evaluate(a).unwrap()[0].solid.volume() < before, "the beam makes room for its plate");
         // a steel column on a concrete pile: a base plate, a hinge to the analysis
-        let pile = add(&mut m, Shape::Linear(LinearDef { start: DVec3::new(20.0, 0.0, -8.0), end: DVec3::new(20.0, 0.0, 0.0), profile: ProfileDef::Rectangle { width: 0.4, height: 0.4 }, roll: 0.0 }));
+        let pile = add(&mut m, Shape::Linear(LinearDef { role: Default::default(), start: DVec3::new(20.0, 0.0, -8.0), end: DVec3::new(20.0, 0.0, 0.0), profile: ProfileDef::Rectangle { width: 0.4, height: 0.4 }, roll: 0.0 }));
         let column = add(&mut m, steel(DVec3::new(20.0, 0.0, 0.0), DVec3::new(20.0, 0.0, 3.0), "HEA 200"));
         let kind = ConnectionKind::BasePlate(crate::join::BasePlate::default());
         assert_eq!(kind.fixity(), Some(crate::Fixity::Pinned));
