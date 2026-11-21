@@ -1371,7 +1371,10 @@ fn properties(model: &bim_core::Model, e: &Element, parts: &[bim_core::Part], le
                 ConnectionKind::Cut => "Cut",
                 ConnectionKind::EndPlate(_) => "End plate",
                 ConnectionKind::FinPlate(_) => "Fin plate",
-                ConnectionKind::Bend(_) | ConnectionKind::Tee(_) | ConnectionKind::Transition(_) | ConnectionKind::Splice(_) => "Splice",
+                ConnectionKind::Splice(_) => "Splice",
+                ConnectionKind::Bend(_) => "Bend",
+                ConnectionKind::Tee(_) => "Tee",
+                ConnectionKind::Transition(_) => "Transition",
                 ConnectionKind::BasePlate(_) => "Base plate",
                 ConnectionKind::Apart => "Apart",
             };
