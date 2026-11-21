@@ -66,7 +66,8 @@ fn mm(metres: f64) -> i64 {
 }
 
 /// The drawings of `element` of `model`: for every prefab unit it is made of, in order from its
-/// start, the drawing of its frame and then one of every layer with boards or battens. `named`
+/// start, the drawing of its frame and then one of every layer with boards or battens; and last,
+/// for a frame of several units, their [`overview`]. `named`
 /// gives a material's name for its key. A standing system that is not framed gets its
 /// [`elevation`], a lying one its [`laying_plan`]. None for an element that is not a system with
 /// a type, or that the kernel refuses.
@@ -278,7 +279,53 @@ pub fn element_drawings(model: &Model, element: &Element, named: &dyn Fn(&str) -
         }
         lo = hi;
     }
+    // a frame of several units: last, where each of them stands in it
+    if units.len() > 1 {
+        drawings.push(overview(element, &units, &members, &openings, start, s.height));
+    }
     drawings
+}
+
+/// The overview of a frame made of several prefab units, at 1 : 50, seen as its units are: each
+/// unit as its outline with its mark in it, the frame's members thin inside it, its openings
+/// crossed; the units' lengths, the frame's length and its height dimensioned, and the list of
+/// the units with their sizes. The site puts the units up from it.
+fn overview(element: &Element, units: &[f64], members: &[Member], openings: &[bim_core::Opening], start: f64, height: f64) -> Drawing2d {
+    let (text, off) = (TEXT * PLAN_SCALE, OFFSET * PLAN_SCALE);
+    let mut d = Drawing2d { name: format!("{} {} overview", element.name, element.id.0), space: Space::Model { scale: PLAN_SCALE }, paper: None, lines: Vec::new(), texts: Vec::new(), dimensions: Vec::new() };
+    let rectangle = |d: &mut Drawing2d, pen: Pen, u: (f64, f64), v: (f64, f64)| {
+        for (a, b) in [([u.0, v.0], [u.1, v.0]), ([u.1, v.0], [u.1, v.1]), ([u.1, v.1], [u.0, v.1]), ([u.0, v.1], [u.0, v.0])] {
+            d.lines.push(Line2d::new(pen, a, b));
+        }
+    };
+    for m in members {
+        rectangle(&mut d, Pen::Beyond, (m.u.0 - start, m.u.1 - start), m.v);
+    }
+    for o in openings {
+        let (a, b, foot, head) = (o.along - start, o.along + o.width - start, o.sill, o.sill + o.height);
+        d.lines.push(Line2d::new(Pen::Detail, [a, foot], [b, head]));
+        d.lines.push(Line2d::new(Pen::Detail, [a, head], [b, foot]));
+        rectangle(&mut d, Pen::Detail, (a, b), (foot, head));
+    }
+    let total: f64 = units.iter().sum();
+    let mut lo = 0.0;
+    let mut y = -(off * 3.5 + text);
+    let title = format!("{} · {} × {} mm · 1:{}", element.name, mm(total), mm(height), PLAN_SCALE as i64);
+    d.texts.push(Text2d { pen: Pen::Text, at: [0.0, y], height: text * 1.4, text: title, align: Align::Left, angle: 0.0 });
+    y -= text * 1.4 * 1.8;
+    for (k, length) in units.iter().enumerate() {
+        let mark = bim_core::system::mark(element, k + 1);
+        rectangle(&mut d, Pen::Cut, (lo, lo + length), (0.0, height));
+        d.dimensions.push(Dim2d { from: [lo, height], to: [lo + length, height], value: *length, offset: off, text_height: text });
+        // its number large in its middle, its whole mark in the list
+        d.texts.push(Text2d { pen: Pen::Text, at: [lo + length / 2.0, height / 2.0], height: text * 2.0, text: (k + 1).to_string(), align: Align::Center, angle: 0.0 });
+        d.texts.push(Text2d { pen: Pen::Text, at: [0.0, y], height: text, text: format!("{}  {mark} · {} × {} mm", k + 1, mm(*length), mm(height)), align: Align::Left, angle: 0.0 });
+        y -= text * 1.8;
+        lo += length;
+    }
+    d.dimensions.push(Dim2d { from: [total, 0.0], to: [0.0, 0.0], value: total, offset: off, text_height: text });
+    d.dimensions.push(Dim2d { from: [0.0, 0.0], to: [0.0, height], value: height, offset: off, text_height: text });
+    d
 }
 
 /// The scale a laying plan is drawn at: 1 : 50.
@@ -645,9 +692,9 @@ fn open_plan(model: &Model, element: &Element, s: &bim_core::SystemDef, t: &bim_
     Some(d)
 }
 
-/// Whether a drawing of [`element_drawings`] is the frame's, not a layer's.
+/// Whether a drawing of [`element_drawings`] is a unit's frame, not a layer's or the overview.
 pub fn is_frame(d: &Drawing2d) -> bool {
-    !d.name.rsplit(' ').nth(1).is_some_and(|w| w.starts_with('L') && w[1..].parse::<usize>().is_ok())
+    !d.name.ends_with(" overview") && !d.name.rsplit(' ').nth(1).is_some_and(|w| w.starts_with('L') && w[1..].parse::<usize>().is_ok())
 }
 
 /// Writes under a drawing, from `y` down, its `title` and the list of its parts (each its size in
@@ -735,6 +782,16 @@ mod tests {
         let all = element_drawings(&m, m.get(id).unwrap(), &|key| key.to_string());
         let drawings: Vec<&Drawing2d> = all.iter().filter(|d| is_frame(d)).collect();
         assert_eq!(drawings.len(), 3);
+        // last the overview: the three units side by side, each with its number, its length and
+        // its line in the list, and the frame's whole length
+        let over = all.last().unwrap();
+        assert!(over.name == format!("Frame {} overview", id.0) && !is_frame(over));
+        assert_eq!(over.lines.iter().filter(|l| l.pen == Pen::Cut).count(), 3 * 4);
+        let values: Vec<i64> = over.dimensions.iter().map(|x| mm(x.value)).collect();
+        assert_eq!(values, [2400, 2400, 2400, 7200, 2700]);
+        for k in 1..=3 {
+            assert!(over.texts.iter().any(|t| t.text == k.to_string()) && over.texts.iter().any(|t| t.text == format!("{k}  Frame {}-{k} · 2400 × 2700 mm", id.0)), "{k}");
+        }
         for (k, d) in drawings.iter().enumerate() {
             // two plates, two end studs and the studs at 600 between them: 7 members, 4 lines each
             assert_eq!(elevation(d).count(), 7 * 4, "unit {k}");
@@ -837,7 +894,7 @@ mod tests {
         assert_eq!(all.iter().filter(|d| is_frame(d)).count(), units.len());
         assert_eq!(all.iter().filter(|d| is_frame(d)).map(|d| d.lines.iter().filter(|l| l.pen == Pen::Detail).count()).sum::<usize>(), 6, "the window, once");
         let mut unit = 0;
-        for d in &all {
+        for d in all.iter().filter(|d| !d.name.ends_with(" overview")) {
             if is_frame(d) {
                 unit = d.name.rsplit('-').next().unwrap().parse::<usize>().unwrap() - 1;
             }
