@@ -252,6 +252,10 @@ debug = "limited"
 [profile.dev.package."*"]
 opt-level = 2
 
+# Interactive editing rebuilds solids and display meshes on each committed change.
+[profile.dev.package.bim-core]
+opt-level = 2
+
 [dev-dependencies]
 # The 3dm writer of the Rhino tests
 threedm-core = { git = "https://github.com/OpenAEC-Foundation/rhino-dll", rev = "104d9f9fb4cec48633e6e2e2c54893c4c2ac70aa" }
