@@ -700,7 +700,7 @@
     "Location line": "Linia położenia",
     "Left side": "Lewa strona",
     "Right side": "Prawa strona",
-    "Grade": "Klasa wytrzymałości",
+    "Grade": "Klasa",
     "Alignment": "Wyrównanie",
     "top": "góra",
     "Pile schedule": "Zestawienie pali",
@@ -1087,7 +1087,6 @@
     "Colour to": "Kolor do",
     "Colour steps": "Stopnie koloru",
     "smooth": "płynnie",
-    "top": "góra",
     "bottom": "dół",
     "Plates in colour": "Płyty w kolorze",
     "Plate value": "Wartość na płytach",
@@ -1332,7 +1331,6 @@
     "from the template": "z szablonu",
     "from practice": "z praktyki",
     "own": "własny",
-    "No.": "Nr",
     "Origin": "Pochodzenie",
     "+ Kind of drawing": "+ Rodzaj rysunku",
     "Kinds of drawing": "Rodzaje rysunków",
@@ -1498,7 +1496,6 @@
     "Not removed: types with this code": "Nie usunięto: typy z tym kodem",
     "Hatch of its own": "Własne kreskowanie",
     "by its kind": "według rodzaju",
-    "Grade": "Klasa",
     "Sheet formats": "Formaty arkuszy",
     "+ Colour": "+ Kolor",
     "running text": "tekst ciągły",
@@ -1738,6 +1735,11 @@
     "Maker": "Producent",
     "Licence": "Licencja",
     "Source": "Źródło",
-    "The drawing itself is not in the library yet: a view cannot place it yet.": "Samego rysunku nie ma jeszcze w bibliotece: widok nie może go jeszcze umieścić."
+    "The drawing itself is not in the library yet: a view cannot place it yet.": "Samego rysunku nie ma jeszcze w bibliotece: widok nie może go jeszcze umieścić.",
+    "Division": "Podział",
+    "Equal bays": "Równe pola",
+    "Whole from the start": "Całe od początku",
+    "Whole from the end": "Całe od końca",
+    "Centred": "Wyśrodkowane"
   }
 }

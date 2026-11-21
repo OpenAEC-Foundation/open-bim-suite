@@ -700,9 +700,9 @@
     "Location line": "Línea de ubicación",
     "Left side": "Lado izquierdo",
     "Right side": "Lado derecho",
-    "Grade": "Clase resistente",
+    "Grade": "Calidad",
     "Alignment": "Alineación",
-    "top": "sup.",
+    "top": "arriba",
     "Pile schedule": "Cuadro de pilotes",
     "No.": "N.º",
     "Cut-off level": "Cota de descabezado",
@@ -1087,7 +1087,6 @@
     "Colour to": "Color hasta",
     "Colour steps": "Pasos de color",
     "smooth": "continuo",
-    "top": "arriba",
     "bottom": "abajo",
     "Plates in colour": "Placas en color",
     "Plate value": "Valor de las placas",
@@ -1332,7 +1331,6 @@
     "from the template": "de la plantilla",
     "from practice": "de la práctica",
     "own": "propio",
-    "No.": "N.º",
     "Origin": "Origen",
     "+ Kind of drawing": "+ Tipo de plano",
     "Kinds of drawing": "Tipos de plano",
@@ -1498,7 +1496,6 @@
     "Not removed: types with this code": "No eliminado: tipos con este código",
     "Hatch of its own": "Trama propia",
     "by its kind": "según su tipo",
-    "Grade": "Calidad",
     "Sheet formats": "Formatos de hoja",
     "+ Colour": "+ Color",
     "running text": "texto corrido",
@@ -1738,6 +1735,11 @@
     "Maker": "Fabricante",
     "Licence": "Licencia",
     "Source": "Fuente",
-    "The drawing itself is not in the library yet: a view cannot place it yet.": "El dibujo en sí aún no está en la biblioteca: una vista todavía no puede colocarlo."
+    "The drawing itself is not in the library yet: a view cannot place it yet.": "El dibujo en sí aún no está en la biblioteca: una vista todavía no puede colocarlo.",
+    "Division": "División",
+    "Equal bays": "Vanos iguales",
+    "Whole from the start": "Enteros desde el inicio",
+    "Whole from the end": "Enteros desde el final",
+    "Centred": "Centrado"
   }
 }

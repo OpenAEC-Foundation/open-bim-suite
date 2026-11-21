@@ -700,7 +700,7 @@
     "Location line": "Ligne de référence",
     "Left side": "Côté gauche",
     "Right side": "Côté droit",
-    "Grade": "Classe de résistance",
+    "Grade": "Qualité",
     "Alignment": "Alignement",
     "top": "dessus",
     "Pile schedule": "Tableau des pieux",
@@ -1087,7 +1087,6 @@
     "Colour to": "Couleur jusqu'à",
     "Colour steps": "Paliers de couleur",
     "smooth": "continu",
-    "top": "dessus",
     "bottom": "dessous",
     "Plates in colour": "Plaques en couleur",
     "Plate value": "Valeur des plaques",
@@ -1332,7 +1331,6 @@
     "from the template": "du gabarit",
     "from practice": "de la pratique",
     "own": "propre",
-    "No.": "N°",
     "Origin": "Origine",
     "+ Kind of drawing": "+ Type de dessin",
     "Kinds of drawing": "Types de dessin",
@@ -1498,7 +1496,6 @@
     "Not removed: types with this code": "Non supprimé : types avec ce code",
     "Hatch of its own": "Hachure propre",
     "by its kind": "selon son type",
-    "Grade": "Qualité",
     "Sheet formats": "Formats de feuille",
     "+ Colour": "+ Couleur",
     "running text": "texte courant",
@@ -1738,6 +1735,11 @@
     "Maker": "Fabricant",
     "Licence": "Licence",
     "Source": "Source",
-    "The drawing itself is not in the library yet: a view cannot place it yet.": "Le dessin lui-même n'est pas encore dans la bibliothèque : une vue ne peut pas encore le placer."
+    "The drawing itself is not in the library yet: a view cannot place it yet.": "Le dessin lui-même n'est pas encore dans la bibliothèque : une vue ne peut pas encore le placer.",
+    "Division": "Division",
+    "Equal bays": "Travées égales",
+    "Whole from the start": "Entiers depuis le début",
+    "Whole from the end": "Entiers depuis la fin",
+    "Centred": "Centré"
   }
 }

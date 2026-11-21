@@ -700,9 +700,9 @@
     "Location line": "Linea di ubicazione",
     "Left side": "Lato sinistro",
     "Right side": "Lato destro",
-    "Grade": "Classe di resistenza",
+    "Grade": "Qualità",
     "Alignment": "Allineamento",
-    "top": "estr.",
+    "top": "sopra",
     "Pile schedule": "Tabella dei pali",
     "No.": "N.",
     "Cut-off level": "Quota di scapitozzatura",
@@ -1087,7 +1087,6 @@
     "Colour to": "Colore fino a",
     "Colour steps": "Gradini di colore",
     "smooth": "continuo",
-    "top": "sopra",
     "bottom": "sotto",
     "Plates in colour": "Piastre a colori",
     "Plate value": "Valore delle piastre",
@@ -1332,7 +1331,6 @@
     "from the template": "dal modello",
     "from practice": "dalla pratica",
     "own": "proprio",
-    "No.": "N.",
     "Origin": "Origine",
     "+ Kind of drawing": "+ Tipo di disegno",
     "Kinds of drawing": "Tipi di disegno",
@@ -1498,7 +1496,6 @@
     "Not removed: types with this code": "Non rimosso: tipi con questo codice",
     "Hatch of its own": "Tratteggio proprio",
     "by its kind": "secondo il tipo",
-    "Grade": "Qualità",
     "Sheet formats": "Formati dei fogli",
     "+ Colour": "+ Colore",
     "running text": "testo corrente",
@@ -1738,6 +1735,11 @@
     "Maker": "Produttore",
     "Licence": "Licenza",
     "Source": "Fonte",
-    "The drawing itself is not in the library yet: a view cannot place it yet.": "Il disegno stesso non è ancora nella libreria: una vista non può ancora posizionarlo."
+    "The drawing itself is not in the library yet: a view cannot place it yet.": "Il disegno stesso non è ancora nella libreria: una vista non può ancora posizionarlo.",
+    "Division": "Divisione",
+    "Equal bays": "Campate uguali",
+    "Whole from the start": "Interi dall'inizio",
+    "Whole from the end": "Interi dalla fine",
+    "Centred": "Centrato"
   }
 }

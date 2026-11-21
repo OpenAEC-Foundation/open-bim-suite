@@ -700,9 +700,9 @@
     "Location line": "Placeringslinje",
     "Left side": "Vänster sida",
     "Right side": "Höger sida",
-    "Grade": "Hållfasthetsklass",
+    "Grade": "Kvalitet",
     "Alignment": "Justering",
-    "top": "ök",
+    "top": "ovan",
     "Pile schedule": "Pålförteckning",
     "No.": "Nr",
     "Cut-off level": "Kapnivå",
@@ -1087,7 +1087,6 @@
     "Colour to": "Färg till",
     "Colour steps": "Färgsteg",
     "smooth": "steglöst",
-    "top": "ovan",
     "bottom": "under",
     "Plates in colour": "Plattor i färg",
     "Plate value": "Plattvärde",
@@ -1332,7 +1331,6 @@
     "from the template": "från mallen",
     "from practice": "från praxis",
     "own": "egen",
-    "No.": "Nr",
     "Origin": "Ursprung",
     "+ Kind of drawing": "+ Ritningstyp",
     "Kinds of drawing": "Ritningstyper",
@@ -1498,7 +1496,6 @@
     "Not removed: types with this code": "Inte borttagen: typer med den här koden",
     "Hatch of its own": "Egen skraffering",
     "by its kind": "enligt sort",
-    "Grade": "Kvalitet",
     "Sheet formats": "Arkformat",
     "+ Colour": "+ Färg",
     "running text": "löptext",
@@ -1738,6 +1735,11 @@
     "Maker": "Tillverkare",
     "Licence": "Licens",
     "Source": "Källa",
-    "The drawing itself is not in the library yet: a view cannot place it yet.": "Själva ritningen finns ännu inte i biblioteket: en vy kan inte placera den än."
+    "The drawing itself is not in the library yet: a view cannot place it yet.": "Själva ritningen finns ännu inte i biblioteket: en vy kan inte placera den än.",
+    "Division": "Indelning",
+    "Equal bays": "Lika fack",
+    "Whole from the start": "Hela från början",
+    "Whole from the end": "Hela från slutet",
+    "Centred": "Centrerad"
   }
 }

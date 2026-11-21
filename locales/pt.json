@@ -700,7 +700,7 @@
     "Location line": "Linha de localização",
     "Left side": "Lado esquerdo",
     "Right side": "Lado direito",
-    "Grade": "Classe de resistência",
+    "Grade": "Qualidade",
     "Alignment": "Alinhamento",
     "top": "topo",
     "Pile schedule": "Quadro de estacas",
@@ -1087,7 +1087,6 @@
     "Colour to": "Cor até",
     "Colour steps": "Passos de cor",
     "smooth": "contínuo",
-    "top": "topo",
     "bottom": "fundo",
     "Plates in colour": "Placas a cores",
     "Plate value": "Valor das placas",
@@ -1332,7 +1331,6 @@
     "from the template": "do modelo",
     "from practice": "da prática",
     "own": "próprio",
-    "No.": "N.º",
     "Origin": "Origem",
     "+ Kind of drawing": "+ Tipo de desenho",
     "Kinds of drawing": "Tipos de desenho",
@@ -1498,7 +1496,6 @@
     "Not removed: types with this code": "Não removido: tipos com este código",
     "Hatch of its own": "Trama própria",
     "by its kind": "segundo o tipo",
-    "Grade": "Qualidade",
     "Sheet formats": "Formatos de folha",
     "+ Colour": "+ Cor",
     "running text": "texto corrido",
@@ -1738,6 +1735,11 @@
     "Maker": "Fabricante",
     "Licence": "Licença",
     "Source": "Fonte",
-    "The drawing itself is not in the library yet: a view cannot place it yet.": "O desenho em si ainda não está na biblioteca: uma vista ainda não o pode colocar."
+    "The drawing itself is not in the library yet: a view cannot place it yet.": "O desenho em si ainda não está na biblioteca: uma vista ainda não o pode colocar.",
+    "Division": "Divisão",
+    "Equal bays": "Vãos iguais",
+    "Whole from the start": "Inteiros desde o início",
+    "Whole from the end": "Inteiros desde o fim",
+    "Centred": "Centrado"
   }
 }

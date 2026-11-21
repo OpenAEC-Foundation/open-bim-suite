@@ -700,9 +700,9 @@
     "Location line": "Referenzlinie",
     "Left side": "Linke Seite",
     "Right side": "Rechte Seite",
-    "Grade": "Festigkeitsklasse",
+    "Grade": "Güte",
     "Alignment": "Ausrichtung",
-    "top": "OK",
+    "top": "oben",
     "Pile schedule": "Pfahlliste",
     "No.": "Nr.",
     "Cut-off level": "Kappkote",
@@ -1087,7 +1087,6 @@
     "Colour to": "Farbe bis",
     "Colour steps": "Farbstufen",
     "smooth": "fließend",
-    "top": "oben",
     "bottom": "unten",
     "Plates in colour": "Platten in Farbe",
     "Plate value": "Plattenwert",
@@ -1332,7 +1331,6 @@
     "from the template": "aus der Vorlage",
     "from practice": "aus der Praxis",
     "own": "eigen",
-    "No.": "Nr.",
     "Origin": "Herkunft",
     "+ Kind of drawing": "+ Zeichnungsart",
     "Kinds of drawing": "Zeichnungsarten",
@@ -1498,7 +1496,6 @@
     "Not removed: types with this code": "Nicht entfernt: Typen mit diesem Code",
     "Hatch of its own": "Eigene Schraffur",
     "by its kind": "nach Art",
-    "Grade": "Güte",
     "Sheet formats": "Blattformate",
     "+ Colour": "+ Farbe",
     "running text": "Fließtext",
@@ -1738,6 +1735,11 @@
     "Maker": "Hersteller",
     "Licence": "Lizenz",
     "Source": "Quelle",
-    "The drawing itself is not in the library yet: a view cannot place it yet.": "Die Zeichnung selbst ist noch nicht in der Bibliothek: eine Ansicht kann sie noch nicht platzieren."
+    "The drawing itself is not in the library yet: a view cannot place it yet.": "Die Zeichnung selbst ist noch nicht in der Bibliothek: eine Ansicht kann sie noch nicht platzieren.",
+    "Division": "Teilung",
+    "Equal bays": "Gleiche Felder",
+    "Whole from the start": "Ganz ab Anfang",
+    "Whole from the end": "Ganz ab Ende",
+    "Centred": "Zentriert"
   }
 }
