@@ -4,9 +4,8 @@
 //! - **A beam**: its profile, its strength class and the top of the beam to the plan's level in
 //!   millimetres (`HEA 200 S355 b.k. +2800`), along the beam, over its line.
 //! - **A column**: its profile and its strength class, beside it.
-//! - **A pile**: a column that stands wholly under its level. The piles of a level are numbered
-//!   row by row, from the top of the drawing down and from left to right; each has its number
-//!   to its lower right. [`piles`] gives them in that order, for the plan and for the pile schedule.
+//! - **A pile**: a registered member with an issued project-wide number. Legacy columns below
+//!   their level receive numbers in row order the first time they are read.
 //!
 //! The pile schedule is a schedule of the project beside those a file brings: per pile its level,
 //! number, place, profile, strength class, cut-off level, tip and length. It follows the model.
@@ -23,7 +22,7 @@ const ROW: f64 = 0.05;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pile {
     pub id: ElementId,
-    pub number: usize,
+    pub number: u64,
     pub at: DVec2,
     pub head: f64,
     pub tip: f64,
@@ -49,8 +48,8 @@ fn members<'a>(model: &'a Model, level: &'a str) -> impl Iterator<Item = (&'a bi
 /// numbered row by row from the top of the drawing down, each row from left to right.
 pub fn piles(model: &Model, level: &str, elevation: f64) -> Vec<Pile> {
     let mut piles: Vec<Pile> = members(model, level)
-        .filter(|(e, l)| e.class() == "IfcColumn" && l.start.z.max(l.end.z) <= elevation + 1e-6)
-        .map(|(e, l)| Pile { id: e.id, number: 0, at: l.start.truncate(), head: l.start.z.max(l.end.z), tip: l.start.z.min(l.end.z), profile: l.profile.name(), grade: e.grade.clone() })
+        .filter(|(e, l)| e.pile_number.is_some() || (e.class() == "IfcColumn" && l.start.z.max(l.end.z) <= elevation + 1e-6))
+        .map(|(e, l)| Pile { id: e.id, number: e.pile_number.unwrap_or(0), at: l.start.truncate(), head: l.start.z.max(l.end.z), tip: l.start.z.min(l.end.z), profile: l.profile.name(), grade: e.grade.clone() })
         .collect();
     // rows by y, within a row by x
     piles.sort_by(|a, b| b.at.y.total_cmp(&a.at.y));
@@ -69,8 +68,9 @@ pub fn piles(model: &Model, level: &str, elevation: f64) -> Vec<Pile> {
         numbered.extend(row);
     }
     for (k, pile) in numbered.iter_mut().enumerate() {
-        pile.number = k + 1;
+        if pile.number == 0 { pile.number = k as u64 + 1; }
     }
+    numbered.sort_by_key(|pile| pile.number);
     numbered
 }
 
@@ -84,15 +84,82 @@ pub fn to_level(height: f64) -> String {
     }
 }
 
+/// A precast plank of a floor laid as a system (a hollow-core slab, a wide slab), as the laying
+/// plan marks it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Plank {
+    /// The floor it is a plank of.
+    pub floor: ElementId,
+    /// Its mark: planks of one floor type with the same sizes share one, counted from 1.
+    pub mark: usize,
+    /// The middle of it on the plan.
+    pub at: DVec2,
+    /// Its length (the way it spans), its width and its thickness, in whole millimetres.
+    pub sizes: [i64; 3],
+    /// Whether it spans along the project's y axis rather than its x axis.
+    pub turned: bool,
+}
+
+/// The precast planks of the floors of `level`, marked: the panels of every lying system of a
+/// concrete floor type there (what its type's panels are made of; not its joints or its topping), by their boxes along the project's axes (a floor laid askew is measured too large).
+/// Marks go to the sizes in the order the planks lie, row by row from the top of the plan.
+pub fn planks(model: &Model, library: &bim_library::Library, level: &str) -> Vec<Plank> {
+    let mut found = Vec::new();
+    for e in model.iter().filter(|e| e.level.as_deref() == Some(level)) {
+        let Shape::System(system) = &e.shape else { continue };
+        if !system.lies() {
+            continue;
+        }
+        let Ok(parts) = model.evaluate(e.id) else { continue };
+        let origin = model.grid.origin(e.tile);
+        // the planks are the panels of its type: what they are made of tells them from the rest
+        let Some(panel) = system.system_type.as_ref().and_then(|t| library.system_type(&t.id)).filter(|t| t.group == bim_library::SystemGroup::Floor).map(|t| t.panels.material.clone()) else { continue };
+        for part in parts.iter().filter(|p| p.material.as_deref() == Some(panel.as_str())) {
+            let (lo, hi) = part.solid.bounds();
+            let size = hi - lo;
+            let turned = size.y > size.x;
+            let mm = |v: f64| (v * 1000.0).round() as i64;
+            let sizes = if turned { [mm(size.y), mm(size.x), mm(size.z)] } else { [mm(size.x), mm(size.y), mm(size.z)] };
+            let type_id = system.system_type.as_ref().map(|t| t.id.clone()).unwrap_or_default();
+            found.push((type_id, Plank { floor: e.id, mark: 0, at: ((lo + hi) / 2.0 + origin).truncate(), sizes, turned }));
+        }
+    }
+    found.sort_by(|a, b| b.1.at.y.total_cmp(&a.1.at.y).then(a.1.at.x.total_cmp(&b.1.at.x)));
+    let mut marks: Vec<(String, [i64; 3])> = Vec::new();
+    found
+        .into_iter()
+        .map(|(type_id, mut plank)| {
+            let key = (type_id, plank.sizes);
+            plank.mark = match marks.iter().position(|m| *m == key) {
+                Some(k) => k + 1,
+                None => {
+                    marks.push(key);
+                    marks.len()
+                }
+            };
+            plank
+        })
+        .collect()
+}
+
 /// What a structural plan of `level` (at `elevation`, drawn at 1 : `scale`) says by itself;
 /// `top_word` is what the top of a beam is called (`b.k.`).
-pub fn tags(model: &Model, level: &str, elevation: f64, scale: f64, top_word: &str) -> Vec<Note> {
+pub fn tags(model: &Model, library: &bim_library::Library, level: &str, elevation: f64, scale: f64, top_word: &str) -> Vec<Note> {
+    member_tags(model, library, level, elevation, scale, top_word, true, |_| true)
+}
+
+pub(super) fn member_tags(model: &Model, library: &bim_library::Library, level: &str, elevation: f64, scale: f64, top_word: &str, include_piles: bool, visible: impl Fn(&bim_core::Element) -> bool) -> Vec<Note> {
     // a millimetre on paper between a label and what it labels
     let gap = scale * 0.001;
     let note = |at: DVec2, text: String, align: Align, angle: f64| Note { at: at.to_array(), text, size: NOTE_HEIGHT, align, angle, level: false, face: crate::typeface::Face::default() };
     let piles = piles(model, level, elevation);
     let mut notes = Vec::new();
-    for (e, l) in members(model, level) {
+    // a precast floor's planks: each its mark and its length, along the way it spans
+    for plank in planks(model, library, level).into_iter().filter(|p| model.get(p.floor).is_some_and(&visible)) {
+        let angle = if plank.turned { std::f64::consts::FRAC_PI_2 } else { 0.0 };
+        notes.push(note(plank.at, format!("P{} {}", plank.mark, plank.sizes[0]), Align::Center, angle));
+    }
+    for (e, l) in members(model, level).filter(|(e, _)| visible(e)) {
         let (side, up) = reach(&l);
         let what = match &e.grade {
             Some(grade) => format!("{} {grade}", l.profile.name()),
@@ -109,10 +176,11 @@ pub fn tags(model: &Model, level: &str, elevation: f64, scale: f64, top_word: &s
                 let top = l.start.z.max(l.end.z) + up - elevation;
                 notes.push(note(middle + along.perp() * (side + gap), format!("{what} {top_word} {}", to_level(top)), Align::Center, along.y.atan2(along.x)));
             }
-            "IfcColumn" => {
+            "IfcColumn" | "IfcPile" => {
                 let at = l.start.truncate() + DVec2::splat(side + gap);
                 match piles.iter().find(|p| p.id == e.id) {
                     // to its lower right, clear of the label of a beam that lies over it
+                    Some(_) if !include_piles => {}
                     Some(pile) => notes.push(note(l.start.truncate() + DVec2::new(side + gap, -(side + gap) - scale * NOTE_HEIGHT), pile.number.to_string(), Align::Left, 0.0)),
                     None => notes.push(note(at, what, Align::Left, 0.0)),
                 }
@@ -123,10 +191,81 @@ pub fn tags(model: &Model, level: &str, elevation: f64, scale: f64, top_word: &s
     notes
 }
 
+mod legend;
+pub(super) use legend::{is_pile_legend, schedule_table};
+/// What the bar schedule, its columns and its kinds of bar are called when the interface has not
+/// said.
+pub const BAR_WORDS: [&str; 11] = ["Bar schedule", "Element", "Mark", "Bar", "Ø (mm)", "Number", "Length (mm)", "Weight (kg)", "top", "bottom", "stirrup"];
+
+/// What the precast schedule and its columns are called when the interface has not said.
+pub const PLANK_WORDS: [&str; 8] = ["Precast schedule", "Level", "Mark", "Type", "Length (mm)", "Width (mm)", "Thickness (mm)", "Number"];
+
 /// What the pile schedule and its columns are called when the interface has not said.
 pub const PILE_WORDS: [&str; 10] = ["Pile schedule", "Level", "No.", "X (mm)", "Y (mm)", "Pile", "Grade", "Cut-off level", "Pile tip", "Length (mm)"];
 
 impl crate::app::App {
+    pub(in crate::app) fn new_pile_schedule_view(&mut self, level: &str, name: &str) {
+        if let Some(path) = self.add_pile_legend(level, name) { self.open_plan(&path); }
+    }
+
+    pub(in crate::app) fn add_pile_legend(&mut self, level: &str, name: &str) -> Option<String> {
+        let path = self.document.add_plan_of(level, crate::document::PlanKind::Structural, name)?;
+        self.document.set_view_drawing(&path, Some("pile-schedule".into()));
+        let layers = self.model.iter().flat_map(|model| model.layers.iter().map(|l| (l.name.clone(), false))).collect();
+        self.document.set_view_layers(&path, layers);
+        self.tag_plans();
+        Some(path)
+    }
+
+    /// Issue numbers before rebuilding the native scene so the saved definitions contain them.
+    pub(in crate::app) fn issue_pile_numbers(&mut self) {
+        let model = &mut self.modeller.model;
+        let highest_member = model.iter().filter_map(|e| e.pile_number).max().unwrap_or(0);
+        let levels: Vec<_> = self.document.levels().iter().map(|l| (l.path.clone(), l.elevation)).collect();
+        let mut high = self.document.pile_high_water.max(highest_member);
+        // Older drawings register the piles in issue order on their native legend.
+        // A pile can start on its level and finish above it, outside the column heuristic.
+        for plan in self.document.plans().iter().filter(|p| legend::registered(&p.presentation)) {
+            for id in plan.presentation["legend"]["elementIds"].as_array().into_iter().flatten().filter_map(|v| v.as_u64()) {
+                let Some(e) = model.get(ElementId(id)).filter(|e| matches!(e.shape, Shape::Linear(_))) else { continue };
+                if e.pile_number.unwrap_or(0) > 0 { continue; }
+                let Some(next) = high.checked_add(1) else { continue };
+                let mut e = e.clone();
+                e.pile_number = Some(next);
+                model.insert(e);
+                high = next;
+            }
+        }
+        if self.document.plans().iter().any(|p| legend::registered(&p.presentation) && p.drawing.as_deref() != Some("pile-schedule")) {
+            self.document.inherit_pile_visibility();
+        }
+        for (level, elevation) in levels {
+            for pile in piles(model, &level, elevation) {
+                let Some(e) = model.get(pile.id) else { continue };
+                if e.pile_number.unwrap_or(0) > 0 { continue; }
+                let Some(next) = high.checked_add(1) else { continue };
+                let mut e = e.clone();
+                e.pile_number = Some(next);
+                model.insert(e);
+                high = next;
+            }
+        }
+        self.document.pile_high_water = high;
+    }
+
+    pub(in crate::app) fn designate_members(&mut self, reinforcement: bool) {
+        let ids = self.selected_modelled();
+        let model = &mut self.modeller.model;
+        for id in ids {
+            if let Some(e) = model.get(id).filter(|e| matches!(e.shape, Shape::Linear(_)) && e.pile_number.is_none() && (reinforcement || e.class() == "IfcColumn")) {
+                let mut e = e.clone();
+                if reinforcement { e.reinforcing_bar = true; } else { e.pile_number = Some(0); }
+                model.insert(e);
+            }
+        }
+        self.show_modelled();
+    }
+
     /// The pile schedule, made again from the model: a row per pile of every level, a click on
     /// which selects the pile. It comes when the first pile is drawn and stays, empty, when the
     /// last one goes, so the schedules keep their places.
@@ -136,8 +275,10 @@ impl crate::app::App {
         // a row selects its pile where the modelled project is shown alone
         let alone = self.models.len() <= 1;
         let mut rows = Vec::new();
+        let mut listed = std::collections::HashSet::new();
         for level in self.document.levels() {
             for pile in piles(&self.modeller.model, &level.path, level.elevation) {
+                if !listed.insert(pile.id) { continue; }
                 let cells = [
                     level.name.clone(),
                     pile.number.to_string(),
@@ -162,6 +303,80 @@ impl crate::app::App {
     }
 }
 
+impl crate::app::App {
+    /// The precast schedule, made again from the model: a row per mark of the planks of every
+    /// level's floors, with how many there are of it. A click on a row selects the floors they
+    /// lie in. It comes with the first precast floor and stays, empty, when the last one goes.
+    pub(in crate::app) fn list_planks(&mut self) {
+        let words = if self.modeller.plank_words[0].is_empty() { PLANK_WORDS } else { self.modeller.plank_words };
+        let alone = self.models.len() <= 1;
+        let mut rows = Vec::new();
+        for level in self.document.levels() {
+            let planks = planks(&self.modeller.model, &self.library, &level.path);
+            let marks = planks.iter().map(|p| p.mark).max().unwrap_or(0);
+            for mark in 1..=marks {
+                let same: Vec<&Plank> = planks.iter().filter(|p| p.mark == mark).collect();
+                let Some(first) = same.first() else { continue };
+                let kind = self.modeller.model.get(first.floor).and_then(|e| match &e.shape {
+                    Shape::System(s) => s.system_type.as_ref().map(|t| self.library.system_name(&t.id, bim_library::Lang::En).unwrap_or_else(|| t.id.clone())),
+                    _ => None,
+                });
+                let cells = [level.name.clone(), format!("P{mark}"), kind.unwrap_or_default(), first.sizes[0].to_string(), first.sizes[1].to_string(), first.sizes[2].to_string(), same.len().to_string()];
+                let mut floors: Vec<u64> = same.iter().map(|p| p.floor.0).collect();
+                floors.dedup();
+                rows.push(crate::model::ScheduleRow { cells: cells.into_iter().map(Some).collect(), elements: if alone { floors } else { Vec::new() }, ..Default::default() });
+            }
+        }
+        let named = std::mem::replace(&mut self.modeller.plank_schedule, words[0].to_string());
+        let schedule = crate::model::Schedule { name: words[0].to_string(), title: words[0].to_string(), columns: words[1..].iter().map(|w| w.to_string()).collect(), rows, computed: true };
+        match self.schedules.iter_mut().find(|s| !named.is_empty() && s.name == named) {
+            Some(listed) => *listed = schedule,
+            None if !schedule.rows.is_empty() => self.schedules.push(schedule),
+            None => self.modeller.plank_schedule = named,
+        }
+    }
+
+    /// The bar schedule, made again from the model: a row for the top bars, the bottom bars and
+    /// the stirrups of every reinforced member, marked 1, 2, 3 … through the project, with what
+    /// they weigh. A click on a row selects its member. It comes with the first reinforced
+    /// member and stays, empty, when the last one loses its reinforcement.
+    pub(in crate::app) fn list_bars(&mut self) {
+        use bim_core::reinforcement::BarKind;
+        let words = if self.modeller.bar_words[0].is_empty() { BAR_WORDS } else { self.modeller.bar_words };
+        let alone = self.models.len() <= 1;
+        let mut rows = Vec::new();
+        let mut mark = 0;
+        for e in self.modeller.model.iter() {
+            let Some(Ok(bars)) = crate::app::element_props::bars_of(e) else { continue };
+            for bar in bars {
+                mark += 1;
+                let kind = match bar.kind {
+                    BarKind::Top => words[8],
+                    BarKind::Bottom => words[9],
+                    BarKind::Stirrup => words[10],
+                };
+                let cells = [
+                    e.name.clone(),
+                    mark.to_string(),
+                    kind.to_string(),
+                    format!("{}", (bar.diameter * 1000.0).round() as i64),
+                    bar.count.to_string(),
+                    format!("{}", (bar.length * 1000.0).round() as i64),
+                    format!("{:.1}", bar.weight()),
+                ];
+                rows.push(crate::model::ScheduleRow { cells: cells.into_iter().map(Some).collect(), elements: if alone { vec![e.id.0] } else { Vec::new() }, ..Default::default() });
+            }
+        }
+        let named = std::mem::replace(&mut self.modeller.bar_schedule, words[0].to_string());
+        let schedule = crate::model::Schedule { name: words[0].to_string(), title: words[0].to_string(), columns: words[1..8].iter().map(|w| w.to_string()).collect(), rows, computed: true };
+        match self.schedules.iter_mut().find(|s| !named.is_empty() && s.name == named) {
+            Some(listed) => *listed = schedule,
+            None if !schedule.rows.is_empty() => self.schedules.push(schedule),
+            None => self.modeller.bar_schedule = named,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,7 +387,7 @@ mod tests {
         let grid = TileGrid::default();
         let mut model = Model::new(grid);
         let mut add = |name: &str, grade: Option<&str>, start: DVec3, end: DVec3, profile: ProfileDef| {
-            let mut e = Element::in_project(&grid, name, Some("ground".into()), Shape::Linear(LinearDef { start, end, profile, roll: 0.0 }));
+            let mut e = Element::in_project(&grid, name, Some("ground".into()), Shape::Linear(LinearDef { start, end, profile, roll: 0.0, role: Default::default() }));
             e.grade = grade.map(str::to_string);
             model.add(e).unwrap()
         };
@@ -194,7 +409,7 @@ mod tests {
     #[test]
     fn piles_are_the_columns_under_their_level_numbered_row_by_row() {
         let piles = piles(&model(), "ground", 0.0);
-        let found: Vec<(usize, f64, f64)> = piles.iter().map(|p| (p.number, p.at.x, p.at.y)).collect();
+        let found: Vec<(u64, f64, f64)> = piles.iter().map(|p| (p.number, p.at.x, p.at.y)).collect();
         assert_eq!(found, [(1, 0.0, 5.0), (2, 6.0, 5.02), (3, 0.0, 0.0), (4, 6.0, 0.0)]);
         assert_eq!((piles[0].head, piles[0].tip, piles[0].profile.as_str(), piles[0].grade.as_deref()), (-0.93, -18.93, "Ø300", Some("C35/45")));
         // of another level: none
@@ -203,7 +418,7 @@ mod tests {
 
     #[test]
     fn a_structural_plan_labels_its_beams_and_columns_and_numbers_its_piles() {
-        let notes = tags(&model(), "ground", 0.0, 100.0, "b.k.");
+        let notes = tags(&model(), &bim_library::Library::starter(), "ground", 0.0, 100.0, "b.k.");
         let text = |t: &str| notes.iter().find(|n| n.text == t).unwrap_or_else(|| panic!("{t}: {:?}", notes.iter().map(|n| &n.text).collect::<Vec<_>>()));
         // the foundation beam: over its line (0.2 to its side and a millimetre on paper), read from the foot
         let beam = text("400×500 C30/37 b.k. -430");
@@ -222,6 +437,274 @@ mod tests {
         assert!((first.at[0] - 0.25).abs() < 1e-9 && (first.at[1] - (5.0 - 0.25 - 0.25)).abs() < 1e-9, "{first:?}");
         assert_eq!(notes.len(), 7);
         assert_eq!((to_level(0.0), to_level(-0.0004), to_level(2.8)), ("+0".to_string(), "+0".to_string(), "+2800".to_string()));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "requires a local issued IFCX fixture and an empty output folder"]
+    fn issued_piles_survive_project_revision() {
+        use crate::app::App;
+        use crate::loaders::{load_with, Progress, Source};
+        use std::{path::PathBuf, sync::Arc};
+        let source = PathBuf::from(std::env::var_os("PILE_TEST_IFCX").unwrap());
+        let out = PathBuf::from(std::env::var_os("PILE_TEST_OUTPUT").unwrap());
+        std::fs::create_dir(&out).expect("fresh output folder");
+        let open = |path| {
+            let mut app = App::default();
+            app.set_model(Arc::new(load_with(&Source::File(path), &Progress::default()).unwrap()));
+            app
+        };
+        let save = |app: &App, name: &str| {
+            let bytes = crate::export::to_bytes(app.model.as_ref().unwrap(), &app.document_now(), name).unwrap();
+            let path = out.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            path
+        };
+        let mut app = open(source);
+        let issued = |app: &App| -> std::collections::BTreeMap<u64, ElementId> {
+            app.modeller.model.iter().filter_map(|e| Some((e.pile_number?, e.id))).collect()
+        };
+        let before = issued(&app);
+        let (&highest, _) = before.last_key_value().unwrap();
+        let (&first_number, &first_id) = before.first_key_value().unwrap();
+        let placements = |app: &App, id: ElementId| -> Vec<[f64; 2]> {
+            let mut positions = Vec::new();
+            for p in app.document.plans() {
+                for &(i, owner, _) in &p.pile_tags {
+                    if owner == id.0 { positions.push(p.tags[i].at); }
+                }
+                for d in &p.dimensions {
+                    for (anchor, point) in d.anchors.iter().zip([d.from, d.to]) {
+                        if anchor.is_some_and(|a| a.element == id.0) { positions.push(point); }
+                    }
+                }
+            }
+            positions
+        };
+        let placed = placements(&app, first_id);
+        assert!(placed.len() >= 3, "linked plan label, detail label and dimension endpoint");
+        let model = &mut app.modeller.model;
+        let mut moved = model.get(first_id).unwrap().clone();
+        moved.translate(&model.grid, DVec3::new(0.125, -0.25, 0.0));
+        model.replace(moved.clone()).unwrap();
+        let added = model.add(moved.clone()).unwrap();
+        app.show_modelled();
+        let after = placements(&app, first_id);
+        assert_eq!(after.len(), placed.len());
+        for (before, after) in placed.iter().zip(&after) {
+            assert!((after[0] - before[0] - 0.125).abs() < 1e-6);
+            assert!((after[1] - before[1] + 0.25).abs() < 1e-6);
+        }
+        assert_eq!(issued(&app)[&first_number], first_id);
+        assert_eq!(issued(&app)[&(highest + 1)], added);
+        app.modeller.model.remove(added);
+        app.show_modelled();
+        let mut back = open(save(&app, "reopened.ifcx"));
+        assert_eq!(issued(&back), before);
+        assert_eq!(placements(&back, first_id), after);
+        assert_eq!(back.modeller.model.get(first_id).unwrap(), &moved);
+        let inserted = back.modeller.model.add(moved).unwrap();
+        back.show_modelled();
+        assert_eq!(issued(&back)[&(highest + 2)], inserted);
+        let count = before.len() + 1;
+        let schedule = back.schedules.iter().find(|s| s.name == back.modeller.pile_schedule).unwrap();
+        assert_eq!(schedule.rows.len(), count);
+        let sheet_table = back.document.plans().iter().find(|p| p.drawing.as_deref() == Some("pile-schedule")).unwrap();
+        let rows = sheet_table.presentation["legend"]["rows"].as_array().unwrap();
+        assert_eq!(rows.iter().filter_map(|row| row["count"].as_u64()).sum::<u64>(), count as u64);
+        assert!(!sheet_table.tags.iter().any(|n| n.text == "X (m)"));
+        let baseline = open(save(&open(std::env::var_os("PILE_TEST_IFCX").unwrap().into()), "issued.ifcx"));
+        assert_eq!(issued(&baseline), before);
+        let mut baseline = baseline;
+        let sheets: Vec<_> = baseline.document.sheets().iter().map(|s| (s.path.clone(), s.number.clone())).collect();
+        for (index, (path, number)) in sheets.iter().enumerate() {
+            baseline.open_doc_sheet(path);
+            baseline.export_shown_to(&out.join(format!("sheet-{}.pdf", index + 1))).unwrap();
+            eprintln!("exported {}: {}", index + 1, number);
+        }
+        eprintln!("{} issued piles; retained {}, deleted {}, next {}", before.len(), first_number, highest + 1, highest + 2);
+    }
+
+    #[test]
+    fn grouped_pile_legend_migrates_changes_members_and_reopens() {
+        use crate::app::App;
+        use crate::document::{PlanKind, PlanView};
+        use crate::loaders::{load_with, Progress, Source};
+        use serde_json::json;
+        use std::sync::Arc;
+
+        let mut app = App::default();
+        app.new_model("Ground");
+        let level = app.document.levels()[0].path.clone();
+        let view = app.document.add_plan_of(&level, PlanKind::Structural, "Legenda").unwrap();
+        let sheet = app.document.add_sheet("Fundering");
+        app.document.place_plan(&sheet, &view).unwrap();
+        let grid = app.modeller.model.grid;
+        let pile = |x| Element::in_project(&grid, "T1 object", Some(level.clone()), Shape::Linear(LinearDef { role: Default::default(),
+            start: DVec3::new(x, 0.0, 0.5), end: DVec3::new(x, 0.0, 4.5),
+            profile: ProfileDef::Rectangle { width: 0.3, height: 0.3 }, roll: 0.0,
+        }));
+        let a = app.modeller.model.add(pile(2.0)).unwrap();
+        let b = app.modeller.model.add(pile(8.0)).unwrap();
+        app.document.set_plan_tags(|p| {
+            p.crop = Some(([1000.0, 990.0], [1010.0, 1000.0]));
+            p.presentation = json!({"origin":[0,0], "legend":{"source":"openaec::element","symbolSource":"pile profile",
+                "elementIds":[b.0,a.0], "rows":[{"type":"T1","count":2}]}});
+            p.layers.insert("IfcColumn".into(), false);
+            p.lines.push([[0.0, 0.0], [10.0, 0.0]]);
+            for (i, text) in ["Legenda", "Type", "Symbool", "Schacht [mm]", "Aantal", "Lengte [m]", "Punt [m NAP]", "Kop [m NAP]",
+                "T1", "300 × 300", "2", "4,00", "+0,50", "+4,50", "Paalnummers 01 t/m 02. Toelichting"].into_iter().enumerate() {
+                p.notes.push(Note { at: [1000.0, 1000.0-i as f64*0.4], text: text.into(), size: NOTE_HEIGHT, angle: 0.0,
+                    align: Align::Left, level: false, face: Default::default() });
+            }
+            (vec![], vec![])
+        });
+        app.show_modelled();
+        let counts = |p: &PlanView| p.presentation["legend"]["rows"].as_array().unwrap().iter()
+            .map(|r| (r["type"].as_str().unwrap().to_owned(), r["count"].as_u64().unwrap())).collect::<std::collections::BTreeMap<_,_>>();
+        let p = app.document.plan(&view).unwrap();
+        assert_eq!(counts(p)["T1"], 2);
+        assert_eq!(p.layers["IfcPile"], false);
+        assert!(p.lines.is_empty());
+        assert_eq!(p.notes.len(), 1);
+        assert_eq!(p.notes[0].text, "Toelichting");
+        assert_eq!(app.modeller.model.get(b).unwrap().pile_number, Some(1));
+        assert_eq!(app.modeller.model.get(a).unwrap().pile_number, Some(2));
+
+        let mut changed = app.modeller.model.get(a).unwrap().clone();
+        let Shape::Linear(l) = &mut changed.shape else { unreachable!() };
+        l.profile = ProfileDef::Catalogue { designation: "Rond".into(), shape: bim_library::ProfileShape::Circle { diameter: 0.4 } };
+        app.modeller.model.replace(changed.clone()).unwrap();
+        app.show_modelled();
+        let p = app.document.plan(&view).unwrap();
+        assert_eq!((counts(p)["T1"], counts(p)["Rond"]), (1, 1));
+        assert!(p.tags.iter().any(|n| n.text == "Ø400"));
+        assert!(p.tags.iter().any(|n| n.text == "+4,50"));
+        let new = app.modeller.model.add(changed).unwrap();
+        app.show_modelled();
+        assert_eq!(counts(app.document.plan(&view).unwrap())["Rond"], 2);
+        app.modeller.model.remove(b);
+        app.show_modelled();
+        let p = app.document.plan(&view).unwrap();
+        assert_eq!(counts(p).into_values().collect::<Vec<_>>(), vec![2]);
+        let (lo, hi) = p.crop.unwrap();
+        assert_eq!((lo[0], hi[1]), (1000.0, 1000.0));
+        for n in p.notes.iter().chain(&p.tags) { assert!(n.at[0] >= lo[0] && n.at[0] <= hi[0] && n.at[1] >= lo[1] && n.at[1] <= hi[1]); }
+        let encoded = crate::export::to_bytes(app.model.as_ref().unwrap(), &app.document_now(), "piles.ifcx").unwrap();
+        let source = Source::Bytes { name: "piles.ifcx".into(), data: Arc::new(encoded) };
+        let mut back = App::default();
+        back.set_model(Arc::new(load_with(&source, &Progress::default()).unwrap()));
+        let restored = back.document.plan(&view).unwrap();
+        assert_eq!(restored.presentation, p.presentation);
+        assert_eq!(restored.tags, p.tags);
+        assert_eq!(restored.symbols, p.symbols);
+        assert_eq!(restored.notes, p.notes);
+        assert_eq!(back.document.sheet(&sheet).unwrap().views[0].plan, view);
+        assert_eq!(back.modeller.model.get(new).unwrap().pile_number, Some(3));
+    }
+
+    #[test]
+    fn pile_legend_groups_free_profiles_independently_of_object_names_and_fits_every_row() {
+        use crate::app::App;
+        let mut app = App::default();
+        app.new_model("Ground");
+        let level = app.document.levels()[0].path.clone();
+        let grid = app.modeller.model.grid;
+        for (i, length) in [2.0, 2.0, 3.0, 4.0, 5.0].into_iter().enumerate() {
+            let mut pile = Element::in_project(&grid, format!("Paal {i}"), Some(level.clone()), Shape::Linear(LinearDef { role: Default::default(),
+                start: DVec3::new(i as f64, 0.0, -length), end: DVec3::new(i as f64, 0.0, 0.0),
+                profile: ProfileDef::Circle { diameter: 0.3 }, roll: 0.0,
+            }));
+            pile.pile_number = Some(0);
+            app.modeller.model.add(pile).unwrap();
+        }
+        app.show_modelled();
+        let path = app.add_pile_legend(&level, "Legenda").unwrap();
+        let plan = app.document.plan(&path).unwrap();
+        let rows = plan.presentation["legend"]["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 4);
+        assert!(rows.iter().all(|r| r["type"] == "Ø300"));
+        assert_eq!(rows[0]["count"], 2);
+        let (lo, hi) = plan.crop.unwrap();
+        for [x,y] in plan.symbols.iter().flatten() {
+            assert!((lo[0]..=hi[0]).contains(x) && (lo[1]..=hi[1]).contains(y));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a local copy of a registered pile project with an office renvooi"]
+    fn issued_pile_legend_renvooi_is_native_and_uses_its_authored_levels() {
+        use crate::app::App;
+        use crate::loaders::{Source, load_with, Progress};
+        use std::sync::Arc;
+        let source=Source::File(std::env::var_os("PILE_RENVOOI_IFCX").unwrap().into());
+        let mut app=App::default();
+        app.set_model(Arc::new(load_with(&source,&Progress::default()).unwrap()));
+        let plan=app.document.plans().iter().find(|p| p.presentation["legend"]["layout"]=="pile-renvooi").unwrap();
+        assert!(plan.lines.is_empty() && plan.fills.is_empty());
+        assert!(plan.symbols.len()<200 && plan.symbol_fills.len()==3);
+        let text:Vec<_>=plan.notes.iter().chain(&plan.tags).map(|n|n.text.as_str()).collect();
+        assert_eq!(text.iter().filter(|&&s|s=="Renvooi prefab betonpalen").count(),1);
+        for phrase in ["+3,80 m","paalkop +1,70 m NAP","puntniveau -2,30 m NAP","Schacht","403 *","−2100"] {
+            assert!(text.iter().any(|s|s.eq_ignore_ascii_case(phrase)), "{phrase}");
+        }
+        assert!(text.iter().any(|s|s.starts_with("Sondeerrapport:") && s.contains("DKM19")));
+        assert!(text.iter().any(|s|s.starts_with("Funderingsadvies:") && s.contains("VK290")));
+        assert!(plan.notes.iter().any(|n|n.text.contains("vóór") && n.face.color.is_some()));
+        let view=plan.path.clone();
+        let saved=crate::export::to_bytes(app.model.as_ref().unwrap(),&app.document_now(),"renvooi.ifcx").unwrap();
+        let mut back=App::default();
+        back.set_model(Arc::new(load_with(&Source::Bytes{name:"renvooi.ifcx".into(),data:Arc::new(saved)},&Progress::default()).unwrap()));
+        let reopened=back.document.plan(&view).unwrap();
+        assert_eq!(reopened.presentation["legend"],plan.presentation["legend"]);
+        assert_eq!(reopened.tags,plan.tags);
+        let sheet=back.document.sheets().iter().find(|s|s.views.iter().any(|v|v.plan==view)).unwrap().path.clone();
+        back.open_doc_sheet(&sheet);
+        let drawing=back.drawing_to_export().unwrap();
+        assert!(drawing.texts.iter().any(|t|t.text=="403 *"));
+    }
+
+    #[test]
+    fn pile_legend_renvooi_edits_print_and_survive_ifcx_reopening() {
+        use crate::app::{App, Message};
+        use crate::document::PileLegendField;
+        use crate::loaders::{load_with, Progress, Source};
+        use std::sync::Arc;
+        let mut app = App::default();
+        app.new_model("Foundation");
+        let level = app.document.levels()[0].path.clone();
+        let grid = app.modeller.model.grid;
+        let mut e = Element::in_project(&grid, "Paal", Some(level.clone()), Shape::Linear(LinearDef { role: Default::default(),
+            start: DVec3::new(0.0,0.0,-3.0), end: DVec3::new(0.0,0.0,1.0),
+            profile: ProfileDef::Rectangle { width: 0.29,height: 0.29 }, roll: 0.0,
+        }));
+        e.pile_number = Some(0);
+        app.modeller.model.add(e).unwrap();
+        app.show_modelled();
+        let path = app.add_pile_legend(&level,"Renvooi").unwrap();
+        let plan = app.document.plan(&path).unwrap();
+        let key = plan.presentation["legend"]["rows"][0]["key"].as_str().unwrap().to_string();
+        assert!(plan.tags.iter().any(|n| n.text == "Rapport: —"));
+        for (field,value) in [(PileLegendField::Report,"Advies R-12"),(PileLegendField::Datum,"+0,20 m"),(PileLegendField::Cutoff(key),"+0,85 m NAP")] {
+            let _ = app.update(Message::PileLegendField(path.as_str().into(),field,value.into()));
+        }
+        let bytes = crate::export::to_bytes(app.model.as_ref().unwrap(),&app.document_now(),"fundering.ifcx").unwrap();
+        let mut back = App::default();
+        back.set_model(Arc::new(load_with(&Source::Bytes{name:"fundering.ifcx".into(),data:Arc::new(bytes)},&Progress::default()).unwrap()));
+        let sheet = back.document.add_sheet("Fundering");
+        let plan = back.document.plan(&path).unwrap();
+        let (lo, hi) = plan.crop.unwrap();
+        let paper = back.document.sheet(&sheet).unwrap().paper;
+        let centre = back.pile_legend_centre(&sheet, &path).unwrap();
+        for i in 0..2 {
+            assert!((paper[i] - centre[i] - (hi[i] - lo[i]) / (2.0 * plan.scale) - 0.015).abs() < 1e-9);
+        }
+        back.place_on_sheet(&sheet, &path);
+        back.open_doc_sheet(&sheet);
+        let drawing = back.drawing_to_export().unwrap();
+        for expected in ["290 × 290","Rapport: Advies R-12","Peil t.o.v. NAP: +0,20 m","+0,85 m NAP","-3,00","+1,00"] {
+            assert!(drawing.texts.iter().any(|n| n.text == expected), "{expected}");
+        }
     }
 
     #[test]
@@ -244,18 +727,96 @@ mod tests {
         let [schedule] = &app.schedules[..] else { panic!("{:?}", app.schedules) };
         assert_eq!((schedule.name.as_str(), schedule.columns.len(), schedule.rows.len()), ("Pile schedule", 9, 2));
         let cells = |row: usize| schedule.rows[row].cells.iter().map(|c| c.clone().unwrap()).collect::<Vec<_>>();
-        assert_eq!(cells(0), ["Level 0", "1", "0", "0", "Concrete round 300", "C35/45", "-930", "-18930", "18000"]);
-        assert_eq!(cells(1)[1..4], ["2", "2000", "0"]);
+        assert_eq!(cells(0), ["Level 0", "1", "2000", "0", "Concrete round 300", "C35/45", "-930", "-18930", "18000"]);
+        assert_eq!(cells(1)[1..4], ["2", "0", "0"]);
         // a structural plan says their numbers
         let _ = app.update(Message::NewPlanOf(level.into(), crate::document::PlanKind::Structural, "structure"));
         let plan = app.document.plans()[0].path.clone();
         let tags: Vec<&str> = app.document.view_tags(&plan).iter().map(|n| n.text.as_str()).collect();
-        assert_eq!(tags, ["2", "1"]);
+        assert_eq!(tags, ["1", "2"]);
         // the piles gone: the schedule stays, empty
         for id in [1, 2] {
             app.select_modelled(ElementId(id));
             let _ = app.update(Message::DeletePicked);
         }
         assert_eq!((app.schedules.len(), app.schedules[0].rows.len()), (1, 0));
+    }
+
+    #[test]
+    fn a_reinforced_beam_lists_its_bars_and_loses_them_again() {
+        use crate::app::{App, Message};
+        use bim_core::{LinearDef, Shape};
+        let mut app = App::default();
+        let _ = app.update(Message::NewModel("Level 0"));
+        let level = app.work_plane().2;
+        let beam = Shape::Linear(LinearDef { role: Default::default(), start: DVec3::new(0.0, 0.0, 3.0), end: DVec3::new(6.0, 0.0, 3.0), profile: ProfileDef::Rectangle { width: 0.3, height: 0.5 }, roll: 0.0 });
+        let id = app.add_element("Beam", level.clone(), beam).unwrap();
+        let steel = app.add_element("Steel", level, Shape::Linear(LinearDef { role: Default::default(), start: DVec3::new(0.0, 4.0, 3.0), end: DVec3::new(6.0, 4.0, 3.0), profile: ProfileDef::steel("IPE 300").unwrap(), roll: 0.0 })).unwrap();
+        assert!(app.schedules.iter().all(|s| s.name != "Bar schedule"));
+        let select = |app: &mut App, id: bim_core::ElementId| {
+            let scene = app.model.clone().unwrap();
+            let shown = scene.element_with_key(crate::model::ElementKey { model: 0, source: id.0 }).unwrap();
+            app.sel.set(Some(crate::selection::Pickable::Element(shown)));
+        };
+        select(&mut app, id);
+        let _ = app.update(Message::Reinforce(true));
+        assert!(app.modeller.refusal.is_none(), "{:?}", app.modeller.refusal);
+        let listed = app.schedules.iter().find(|s| s.name == "Bar schedule").expect("the bar schedule");
+        let cells: Vec<Vec<String>> = listed.rows.iter().map(|r| r.cells.iter().map(|c| c.clone().unwrap_or_default()).collect()).collect();
+        assert_eq!(cells[0], ["Beam 1", "1", "top", "12", "2", "5940", "10.5"]);
+        assert_eq!(cells[1][..6], ["Beam 1", "2", "bottom", "16", "3", "5940"]);
+        assert_eq!(cells[2][..6], ["Beam 1", "3", "stirrup", "8", "40", "1488"]);
+        assert_eq!(listed.rows[0].elements, vec![id.0]);
+        // an I section takes none
+        select(&mut app, steel);
+        let _ = app.update(Message::Reinforce(true));
+        assert_eq!(app.modeller.refusal, Some(bim_core::Refusal::NotRectangular));
+        assert!(app.modeller.model.get(steel).unwrap().reinforcement.is_none());
+        // taken away again: the schedule stays, empty
+        select(&mut app, id);
+        let _ = app.update(Message::Reinforce(false));
+        assert!(app.schedules.iter().find(|s| s.name == "Bar schedule").unwrap().rows.is_empty());
+    }
+
+    #[test]
+    fn a_hollow_core_floor_is_marked_plank_by_plank_and_listed() {
+        use crate::app::{App, Message};
+        use bim_core::SystemDef;
+        use glam::DVec2;
+        let mut app = App::default();
+        let _ = app.update(Message::NewModel("Level 0"));
+        let level = app.work_plane().2;
+        let path = level.clone().unwrap();
+        // 4.2 m wide (three planks of 1200 and a narrow one) spanning 6 m
+        let t = app.library.system_type("system.hollow-core-200").unwrap().clone();
+        let generic = SystemDef { division: Default::default(), start: DVec2::ZERO, end: DVec2::new(4.2, 0.0), base: t.lying.unwrap(), height: 6.0, spacing: DVec2::splat(0.6), member: DVec2::new(0.045, 0.14), panel: 0.012, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new() };
+        let floor = app.add_element("Floor", level, Shape::System(generic.clone().laid(&t).unwrap())).unwrap();
+        // a second floor beside it, spanning 4 m: other planks, another mark
+        let short = SystemDef { start: DVec2::new(5.0, 0.0), end: DVec2::new(7.4, 0.0), height: 4.0, ..generic.clone() };
+        app.add_element("Floor", app.work_plane().2, Shape::System(short.laid(&t).unwrap())).unwrap();
+        let planks = planks(&app.modeller.model, &app.library, &path);
+        // Standard-width planks retain the edge half-joints and a narrower closing plank.
+        let first: Vec<&Plank> = planks.iter().filter(|p| p.floor == floor).collect();
+        assert_eq!(first.len(), 4, "{planks:?}");
+        assert_eq!(first.iter().map(|p| p.sizes).collect::<Vec<_>>(), [[6000,1190,200],[6000,1180,200],[6000,1180,200],[6000,590,200]]);
+        assert!(first.iter().all(|p| p.turned) && first[1].mark == first[2].mark);
+        let other: Vec<&Plank> = planks.iter().filter(|p| p.floor != floor).collect();
+        assert!(!other.is_empty() && other.iter().all(|p| p.sizes[0] == 4000 && p.mark != first[0].mark), "{planks:?}");
+        assert_eq!(planks.iter().map(|p| p.mark).max(), Some(4));
+        // a wide-slab floor: its planks of 60 count, its joints and its topping do not
+        let wide = app.library.system_type("system.wide-slab-200").unwrap().clone();
+        let slab = SystemDef { start: DVec2::new(10.0, 0.0), end: DVec2::new(14.8, 0.0), ..generic.clone() };
+        let slab = app.add_element("Floor", app.work_plane().2, Shape::System(slab.laid(&wide).unwrap())).unwrap();
+        let planks = super::planks(&app.modeller.model, &app.library, &path);
+        let wide: Vec<&Plank> = planks.iter().filter(|p| p.floor == slab).collect();
+        assert!(wide.len() == 2 && wide.iter().all(|p| p.sizes[2] == 60 && p.sizes[1] > 2000), "{wide:?}");
+        // the plan says each plank's mark and length; the schedule counts them
+        let notes = tags(&app.modeller.model, &app.library, &path, 0.0, 100.0, "top");
+        assert_eq!(notes.iter().filter(|n| n.text.starts_with('P')).count(), planks.len());
+        let listed = app.schedules.iter().find(|s| s.name == "Precast schedule").expect("the precast schedule");
+        let number: usize = listed.rows.iter().map(|r| r.cells[6].as_deref().unwrap().parse::<usize>().unwrap()).sum();
+        assert_eq!(number, planks.len());
+        assert_eq!(listed.rows.iter().map(|r| r.cells[1].as_deref().unwrap()).collect::<Vec<_>>(), (1..=planks.iter().map(|p| p.mark).max().unwrap()).map(|n| format!("P{n}")).collect::<Vec<_>>());
+        assert!(listed.rows.iter().any(|r| r.elements == vec![floor.0]));
     }
 }

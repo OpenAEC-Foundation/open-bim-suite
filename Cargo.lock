@@ -415,6 +415,8 @@ dependencies = [
 name = "bim-gis"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "serde",
  "serde_json",
  "tiff",
 ]
@@ -662,6 +664,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
+name = "bzip2"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f3a53fac24f34a81bc9954b5d6cfce0c21e18ec6959f44f56e8e90e4bb7c346c"
+dependencies = [
+ "libbz2-rs-sys",
+]
+
+[[package]]
 name = "cadmpeg-codec-step"
 version = "0.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -824,6 +835,17 @@ name = "cesu8"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6d43a04d8753f35258c91f8ec639f792891f748a1edbd759cf1dcea3382ad83c"
+
+[[package]]
+name = "cfb"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fef29b910ef2b9dbecc60168d1568d643c633b0518af970c17e83bd5f6e2c94f"
+dependencies = [
+ "fnv",
+ "uuid",
+ "web-time",
+]
 
 [[package]]
 name = "cfg-if"
@@ -3026,6 +3048,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "inventor-read"
+version = "0.1.0"
+source = "git+https://github.com/OpenAEC-Foundation/inventor-dll?rev=c496ca45a1419f2620a60c703c0996efd56b0fd3#c496ca45a1419f2620a60c703c0996efd56b0fd3"
+dependencies = [
+ "bzip2",
+ "cfb",
+ "flate2",
+ "ruzstd 0.9.1",
+ "serde",
+ "serde_json",
+ "spade",
+]
+
+[[package]]
 name = "itertools"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3311,6 +3347,12 @@ name = "lebe"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a79a3332a6609480d7d0c9eab957bca6b455b91bb84e66d19f5ff66294b85b8"
+
+[[package]]
+name = "libbz2-rs-sys"
+version = "0.2.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5314d1d545fce0307c770d791adf20d997e0b63b64e1ffeed8a920e290eabe4"
 
 [[package]]
 name = "libc"
@@ -4303,6 +4345,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 name = "open-3d-viewer"
 version = "2026.47.5"
 dependencies = [
+ "base64 0.22.1",
  "bim-bcf",
  "bim-civil",
  "bim-core",
@@ -4332,6 +4375,7 @@ dependencies = [
  "ifc-lite-processing",
  "ifcx-core",
  "image",
+ "inventor-read",
  "js-sys",
  "las 0.11.2",
  "libloading",

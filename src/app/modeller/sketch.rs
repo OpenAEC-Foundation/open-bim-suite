@@ -163,6 +163,7 @@ pub enum SketchTool {
     /// Picks a line; a drag moves a point.
     #[default]
     Pick,
+    Copy,
     Line,
     Rectangle,
     Arc,
@@ -308,9 +309,16 @@ impl Sketch {
         points
     }
 
+    fn copy_at(&self, base: DVec2, target: DVec2) -> Option<Segment> {
+        let s = self.segments.get(self.picked?)?;
+        let delta = target - base;
+        Some(Segment { a: s.a + delta, b: s.b + delta, bulge: s.bulge })
+    }
+
     /// The lines a click would add now: from the points clicked to the cursor.
     fn preview(&self) -> Vec<Segment> {
         match (self.tool, self.first, self.second, self.cursor) {
+            (SketchTool::Copy, Some(a), _, Some(b)) => self.copy_at(a, b).into_iter().collect(),
             (SketchTool::Line, Some(a), _, Some(b)) | (SketchTool::Arc, Some(a), None, Some(b)) => vec![Segment::line(a, b)],
             (SketchTool::Rectangle, Some(a), _, Some(b)) => rectangle(a, b).to_vec(),
             (SketchTool::Arc, Some(a), Some(b), Some(p)) => vec![Segment::through(a, b, p)],
@@ -319,12 +327,31 @@ impl Sketch {
     }
 
     /// A click of the Line, the Rectangle or the Arc tool at `p`.
+    fn append_contour_edge(&mut self, edge: Segment) {
+        let meets_end = self.segments.iter().any(|s| s.a.distance(edge.b) <= MEET || s.b.distance(edge.b) <= MEET);
+        self.segments.push(edge);
+        self.first = Some(edge.b);
+        self.second = None;
+        if meets_end && loops(&self.segments).is_ok() {
+            self.first = None;
+            self.tool = SketchTool::Pick;
+        }
+    }
+
     fn place(&mut self, p: DVec2) {
         self.error = None;
         match (self.tool, self.first, self.second) {
+            (SketchTool::Copy, Some(a), _) if a.distance(p) > MEET => {
+                if let Some(copy) = self.copy_at(a, p) {
+                    self.picked = Some(self.segments.len());
+                    self.segments.push(copy);
+                    self.tool = SketchTool::Pick;
+                    self.first = None;
+                }
+            }
+            (SketchTool::Copy, None, _) if self.picked.is_some() => self.first = Some(p),
             (SketchTool::Line, Some(a), _) if a.distance(p) > MEET => {
-                self.segments.push(Segment::line(a, p));
-                self.first = Some(p);
+                self.append_contour_edge(Segment::line(a, p));
             }
             (SketchTool::Rectangle, Some(a), _) if (a.x - p.x).abs() > MEET && (a.y - p.y).abs() > MEET => {
                 self.segments.extend(rectangle(a, p));
@@ -332,8 +359,7 @@ impl Sketch {
             }
             (SketchTool::Arc, Some(a), None) if a.distance(p) > MEET => self.second = Some(p),
             (SketchTool::Arc, Some(a), Some(b)) => {
-                self.segments.push(Segment::through(a, b, p));
-                (self.first, self.second) = (None, None);
+                self.append_contour_edge(Segment::through(a, b, p));
             }
             (SketchTool::Line | SketchTool::Rectangle | SketchTool::Arc, None, _) => self.first = Some(p),
             _ => {}
@@ -354,6 +380,7 @@ impl App {
 
     /// Opens the sketch of floor `element`: its outline and its openings as lines.
     pub(in crate::app) fn open_sketch(&mut self, element: ElementId) {
+        self.drop_grab();
         let Some(shape) = self.modeller.model.get(element).map(|e| e.shape_in_project(&self.modeller.model.grid)) else { return };
         let (outline, holes, top, bulges) = match shape {
             Shape::Planar(PlanarDef { form: PlanarForm::Slab { outline, holes, top, bulges, .. }, .. }) => (outline, holes, top, bulges),
@@ -368,10 +395,7 @@ impl App {
         for hole in &holes {
             segments.extend((0..hole.len()).map(|i| Segment::line(hole[i], hole[(i + 1) % hole.len()])));
         }
-        self.modeller.tool = None;
-        self.modeller.points.clear();
-        self.modeller.refusal = None;
-        self.measure.tool = None;
+        self.select_tool();
         self.modeller.sketch = Some(Sketch { element, top, segments, tool: SketchTool::Pick, first: None, second: None, cursor: None, picked: None, held: None, error: None });
     }
 
@@ -407,7 +431,11 @@ impl App {
         let Some(tool) = self.modeller.sketch.as_ref().map(|s| s.tool) else { return false };
         self.modeller.refusal = None;
         match tool {
-            SketchTool::Line | SketchTool::Rectangle | SketchTool::Arc => {
+            SketchTool::Copy if self.modeller.sketch.as_ref().is_some_and(|s| s.picked.is_none()) => {
+                let under = self.sketch_line_under(x, y, width, height).map(|(index, _)| index);
+                self.modeller.sketch.as_mut().unwrap().picked = under;
+            }
+            SketchTool::Copy | SketchTool::Line | SketchTool::Rectangle | SketchTool::Arc => {
                 let p = self.sketch_point(x, y, width, height, None);
                 if let (Some(p), Some(sketch)) = (p, self.modeller.sketch.as_mut()) {
                     sketch.place(p);
@@ -454,8 +482,10 @@ impl App {
             't' => SketchTool::Trim,
             _ => return,
         };
+        let continues = matches!((sketch.tool, tool), (SketchTool::Line, SketchTool::Arc) | (SketchTool::Arc, SketchTool::Line));
         sketch.tool = if sketch.tool == tool { SketchTool::Pick } else { tool };
-        (sketch.first, sketch.second) = (None, None);
+        if !continues { sketch.first = None; }
+        sketch.second = None;
         sketch.picked = None;
     }
 
@@ -556,7 +586,7 @@ impl App {
                 let Some(&p) = sketch.points().get(index) else { return true };
                 match sketch.tool {
                     SketchTool::Pick => sketch.held = Some(p),
-                    SketchTool::Line | SketchTool::Rectangle | SketchTool::Arc => sketch.place(p),
+                    SketchTool::Copy | SketchTool::Line | SketchTool::Rectangle | SketchTool::Arc => sketch.place(p),
                     SketchTool::Trim => {}
                 }
             }
@@ -588,6 +618,7 @@ impl App {
         let picked = sketch.picked.and_then(|i| sketch.segments.get(i));
         let lines = sketch.segments.iter().copied().chain(sketch.preview()).flat_map(|s| s.chords().windows(2).map(|w| [up(w[0]), up(w[1])]).collect::<Vec<_>>()).collect();
         Some(EditOverlay {
+            selected_sketch_line: Some(picked.map(|s| s.chords().into_iter().map(up).collect()).unwrap_or_default()),
             // the ends of the picked line, and the point held, show filled
             picked: points.iter().map(|p| sketch.held.is_some_and(|h| h.distance(*p) <= MEET) || picked.is_some_and(|s| [s.a, s.b].iter().any(|e| e.distance(*p) <= MEET))).collect(),
             points: points.iter().map(|p| up(*p)).collect(),
@@ -632,8 +663,13 @@ impl App {
                 "Sleep een punt · klik een lijn: kiezen, Del: weg · L: lijn · R: rechthoek · A: boog · T: trimmen · Tab: klaar · Esc: annuleren",
                 "Drag a point · click a line: pick, Del: remove · L: line · R: rectangle · A: arc · T: trim · Tab: done · Esc: cancel",
             ),
+            SketchTool::Copy if sketch.picked.is_none() => l.text("Kopiëren: kies een contourlijn", "Copy: select an outline segment"),
+            SketchTool::Copy if sketch.first.is_none() => l.text("Kopiëren: kies het basispunt", "Copy: pick the base point"),
+            SketchTool::Copy => l.text("Kopiëren: kies het doelpunt", "Copy: pick the destination point"),
             SketchTool::Line => l.text("Lijn: klik de punten · Esc: stoppen · Tab: klaar", "Line: click the points · Esc: stop · Tab: done"),
             SketchTool::Rectangle => l.text("Rechthoek: klik twee hoeken · Esc: stoppen · Tab: klaar", "Rectangle: click two corners · Esc: stop · Tab: done"),
+            SketchTool::Arc if sketch.second.is_some() => l.text("Klik een punt op de boog", "Click a point on the arc"),
+            SketchTool::Arc if sketch.first.is_some() => l.text("Klik het eindpunt van de boog", "Click the end of the arc"),
             SketchTool::Arc => l.text(
                 "Boog: klik het begin, het eind en een punt op de boog · Esc: stoppen · Tab: klaar",
                 "Arc: click its start, its end and a point on it · Esc: stop · Tab: done",
@@ -739,6 +775,60 @@ mod tests {
     fn slab_of(app: &App, id: ElementId) -> (Vec<DVec2>, Vec<Vec<DVec2>>, Vec<f64>) {
         let Shape::Planar(PlanarDef { form: PlanarForm::Slab { outline, holes, bulges, .. }, .. }) = app.modeller.model.get(id).unwrap().shape_in_project(&app.modeller.model.grid) else { panic!() };
         (outline, holes, bulges)
+    }
+
+    #[test]
+    fn tab_from_rotate_picks_the_floor_edge_on_mouse_down() {
+        use iced::{mouse, Point, Rectangle, Size};
+        use iced::widget::canvas::Program;
+        let (mut app, _) = floor();
+        let _ = app.update(Message::Transform(crate::app::transform::TransformKind::Rotate));
+        let _ = app.update(Message::EditMode);
+        assert!(app.modeller.transform.is_none());
+        let overlay = app.sketch_overlay(Color::BLACK, Color::WHITE).unwrap();
+        let (x, y) = app.on_screen(DVec3::new(2.0, 0.0, 0.0), 1000.0, 800.0).unwrap();
+        let action = overlay.update(&mut Default::default(), &iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            Rectangle::new(Point::ORIGIN, Size::new(1000.0, 800.0)), mouse::Cursor::Available(Point::new(x, y))).unwrap();
+        let _ = app.update(action.into_inner().0.unwrap());
+        assert_eq!(app.modeller.sketch.as_ref().unwrap().picked, Some(0));
+        assert_eq!(app.sketch_overlay(Color::BLACK, Color::WHITE).unwrap().selected_sketch_line.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn co_copies_the_selected_floor_edge_from_the_clicked_base_point() {
+        use crate::product::Product;
+        use crate::shell::{Msg, Studio};
+        use iced::keyboard::{Key, Modifiers};
+        use openaec_ui::keyboard::KeyPress;
+        let (app, floor) = floor();
+        let mut studio = Studio::new(app);
+        studio.set_product(Product::Modeller);
+        studio.app.select_modelled(floor);
+        let co = |studio: &mut Studio| {
+            for key in ["c", "o"] {
+                let _ = studio.update(Msg::Key(KeyPress { key: Key::Character(key.into()), modifiers: Modifiers::empty() }));
+            }
+        };
+        studio.app.modeller.cursor3d.fresh = true;
+        co(&mut studio);
+        let copy = studio.app.modeller.transform.as_ref().unwrap();
+        assert_eq!(copy.kind, crate::app::transform::TransformKind::Copy);
+        assert!(copy.points.is_empty());
+        let _ = studio.update(Msg::App(Message::Escape));
+        let _ = studio.update(Msg::App(Message::EditMode));
+        click(&mut studio.app, 2.0, 0.0);
+        let original = studio.app.modeller.sketch.as_ref().unwrap().segments[0];
+        studio.app.camera.ortho = false;
+        co(&mut studio);
+        assert!(!studio.app.camera.ortho);
+        click(&mut studio.app, 10.0, 10.0);
+        click(&mut studio.app, 12.0, 13.0);
+        let sketch = studio.app.modeller.sketch.as_ref().unwrap();
+        assert_eq!(sketch.segments.len(), 5);
+        assert_eq!(sketch.segments[0], original);
+        let copy = sketch.segments[4];
+        assert!(copy.a.distance(original.a + DVec2::new(2.0, 3.0)) < MEET);
+        assert!(copy.b.distance(original.b + DVec2::new(2.0, 3.0)) < MEET);
     }
 
     #[test]
@@ -852,6 +942,9 @@ mod tests {
         click(&mut app, 0.05, 0.05);
         click(&mut app, 3.95, 0.05);
         assert_eq!(app.modeller.sketch.as_ref().unwrap().segments[3], seg((0.0, 0.0), (4.0, 0.0)));
+        assert_eq!(app.modeller.sketch.as_ref().unwrap().tool, SketchTool::Pick);
+        let _ = app.update(Message::EditKey('l'));
+        click(&mut app, 8.0, 8.0);
         // Esc: the line under way stops, then the tool goes, then the sketch leaves
         let _ = app.update(Message::Escape);
         assert!(app.modeller.sketch.as_ref().is_some_and(|s| s.first.is_none() && s.tool == SketchTool::Line));
@@ -860,6 +953,29 @@ mod tests {
         let _ = app.update(Message::Escape);
         assert!(app.modeller.sketch.is_none());
         assert_eq!(slab_of(&app, id).0.len(), 4, "the floor as it was");
+    }
+
+    #[test]
+    fn line_and_arc_share_the_endpoint_and_enter_commits_only_a_closed_floor() {
+        let (mut app, id) = floor();
+        let _ = app.update(Message::EditMode);
+        click(&mut app, 2.0, 0.0);
+        let _ = app.update(Message::DeletePicked);
+        let _ = app.update(Message::EditKey('l'));
+        click(&mut app, 0.0, 0.0);
+        click(&mut app, 2.0, -1.0);
+        let _ = app.update(Message::MeasureFinish);
+        assert!(app.modeller.sketch.as_ref().unwrap().error.is_some());
+        let _ = app.update(Message::EditKey('a'));
+        click(&mut app, 4.0, 0.0);
+        click(&mut app, 4.0, -3.0);
+        let sketch = app.modeller.sketch.as_ref().unwrap();
+        assert_eq!(sketch.tool, SketchTool::Pick);
+        let _ = app.update(Message::MeasureFinish);
+        assert!(app.modeller.sketch.is_none());
+        let (outline, _, bows) = slab_of(&app, id);
+        assert_eq!(outline.len(), 5);
+        assert_eq!(bows.iter().filter(|b| **b != 0.0).count(), 1);
     }
 
     #[test]

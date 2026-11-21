@@ -264,7 +264,7 @@ mod tests {
 
     fn column(app: &App, x: f64, id: &str) -> Shape {
         let profile = linear_profile(&app.library, id).expect("a linear type of the library");
-        Shape::Linear(LinearDef { start: DVec3::new(x, 10.0, 0.0), end: DVec3::new(x, 10.0, 3.0), profile, roll: 0.0 })
+        Shape::Linear(LinearDef { start: DVec3::new(x, 10.0, 0.0), end: DVec3::new(x, 10.0, 3.0), profile, roll: 0.0, role: Default::default() })
     }
 
     fn thickness(app: &App, id: ElementId) -> f64 {
@@ -422,7 +422,7 @@ mod tests {
     #[test]
     fn systems_follow_their_type() {
         let mut app = project();
-        let line = |y: f64| SystemDef { start: DVec2::new(0.0, y), end: DVec2::new(6.0, y), base: 0.0, height: 2.7, spacing: DVec2::splat(1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new() };
+        let line = |y: f64| SystemDef { start: DVec2::new(0.0, y), end: DVec2::new(6.0, y), base: 0.0, height: 2.7, spacing: DVec2::splat(1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), division: None };
         let frame = app.add_element("Frame", None, Shape::System(line(0.0).typed_from(&app.library, "system.timber-frame-140").unwrap())).unwrap();
         let masonry = app.add_element("Masonry", None, Shape::System(line(8.0).typed_from(&app.library, "system.masonry-waal-stretcher").unwrap())).unwrap();
         let untyped = app.add_element("Curtain wall", None, Shape::System(line(16.0))).unwrap();

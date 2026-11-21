@@ -28,8 +28,18 @@ pub(super) enum Typing {
     House(super::house::Typed),
     /// The grade typed for a material (its key).
     MaterialGrade(String),
+    /// The scale typed from which a material's hatch is drawn (its key).
+    MaterialScale(String),
+    /// The name typed for a hatch standard (its key).
+    HatchStandard(String),
     /// The name of a code in a language.
     CodeName(String, Lang),
+    /// A size of a connection type (its key).
+    Connection(String, super::connections::Field),
+    /// A field of a service type or of a cover type (its key).
+    Service(String, super::services::Field),
+    /// A field of an object (its id).
+    Object(String, super::objects::Field),
     /// The name typed for a build-up (its id).
     BuildUpName(String),
     /// The name typed for a linear type (its id).
@@ -46,7 +56,13 @@ impl App {
             Message::Material(MaterialMessage::Hex(_) | MaterialMessage::Channel(..) | MaterialMessage::Shown) => Some(Typing::MaterialColour(self.material_view.picked.clone()?)),
             Message::House(super::house::HouseMessage::Typed(field, _, _)) => Some(Typing::House(*field)),
             Message::Material(MaterialMessage::Graded(_)) => Some(Typing::MaterialGrade(self.material_view.picked.clone()?)),
+            Message::Material(MaterialMessage::From(_)) => Some(Typing::MaterialScale(self.material_view.picked.clone()?)),
+            Message::Material(MaterialMessage::StandardNamed(_)) => Some(Typing::HatchStandard(self.library.hatch_standard()?.key.clone())),
             Message::Code(super::codes::CodeMessage::Named(lang, _)) => Some(Typing::CodeName(self.code_view.picked.clone()?, *lang)),
+            Message::Connection(super::connections::ConnectionMessage::Typed(field, _)) => Some(Typing::Connection(self.connection_view.picked.clone()?, *field)),
+            Message::Service(super::services::ServiceMessage::Typed(super::services::Field::Cover, _)) => Some(Typing::Service(self.service_view.cover.clone()?, super::services::Field::Cover)),
+            Message::Service(super::services::ServiceMessage::Typed(field, _)) => Some(Typing::Service(self.service_view.picked.clone()?, *field)),
+            Message::Object(super::objects::ObjectMessage::Typed(field, _)) => Some(Typing::Object(self.object_view.picked.clone()?, *field)),
             Message::BuildUp(BuildUpMessage::Named(_)) => Some(Typing::BuildUpName(self.buildup_view.picked.clone()?)),
             Message::Profile(ProfileMessage::Named(_)) => Some(Typing::ProfileName(self.profile_view.picked.clone()?)),
             Message::Standard(StandardMessage::Typed(field, _, lang)) => Some(Typing::Standard(self.standard_view.picked.clone()?, *field, *lang)),
@@ -162,11 +178,17 @@ impl App {
     }
 
     pub fn can_undo(&self) -> bool {
-        self.history.can_undo() || self.modeller.history.can_undo()
+        let view = self.history.can_undo();
+        let model = self.modeller.history.can_undo();
+        if self.annotates { return view || model; }
+        view && (!model || self.undo_trail.last() != Some(&true))
     }
 
     pub fn can_redo(&self) -> bool {
-        self.history.can_redo() || self.modeller.history.can_redo()
+        let view = self.history.can_redo();
+        let model = self.modeller.history.can_redo();
+        if self.annotates { return view || model; }
+        view && (!model || self.redo_trail.last() != Some(&true))
     }
 
     /// Which history the next step comes from: the one `trail` names last that still has a step
@@ -215,6 +237,7 @@ impl App {
         }
         self.show_files_without(step.taken.clone());
         self.modeller.base = step;
+        self.modeller.rebar_edit = None;
         self.modeller.edit = None;
         self.modeller.points.clear();
         self.modeller.aim = None;
@@ -229,9 +252,7 @@ impl App {
     /// Takes back the last step.
     pub(super) fn undo_step(&mut self) {
         // a move under way is dropped first: the model is then as its last step left it
-        if self.moving() {
-            return;
-        }
+        if self.moving() || !self.can_undo() { return; }
         match Self::next_step(&mut self.undo_trail, self.history.can_undo(), self.modeller.history.can_undo()) {
             Some(true) => {
                 if let Some(model) = self.modeller.history.undo(self.modeller.base.clone()) {
@@ -251,9 +272,7 @@ impl App {
 
     /// Makes the step taken back last again.
     pub(super) fn redo_step(&mut self) {
-        if self.moving() {
-            return;
-        }
+        if self.moving() || !self.can_redo() { return; }
         match Self::next_step(&mut self.redo_trail, self.history.can_redo(), self.modeller.history.can_redo()) {
             Some(true) => {
                 if let Some(model) = self.modeller.history.redo(self.modeller.base.clone()) {

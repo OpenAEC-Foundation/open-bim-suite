@@ -6,7 +6,7 @@
 //! width.
 
 use crate::drawing2d::{Align, Drawing2d, Pen, Space};
-use opencaddocument::entities::{Dimension, DimensionAligned, Line, Text, TextHorizontalAlignment};
+use opencaddocument::entities::{Dimension, DimensionAligned, DimensionLinear, Line, Text, TextHorizontalAlignment};
 use opencaddocument::tables::{DimStyle, Layer};
 use opencaddocument::{Document, Dwg, Dxf, EntityType, Format, Ifcx, LineWeight, Vector3};
 
@@ -49,25 +49,39 @@ pub fn cad_document(d: &Drawing2d) -> Document {
             let _ = doc.layers.add(layer);
         }
     }
-    // 2.5 mm text and ticks on paper, in the drawing's millimetres
+    // Use native CAD dimension entities and retain the view's paper style.
     let unit = MM / d.paper_per_unit();
-    let mut style = DimStyle::new(STYLE);
-    style.handle = doc.allocate_handle();
-    style.dimtxt = 0.0025 * unit;
-    style.dimasz = 0.0025 * unit;
-    style.dimtsz = 0.0012 * unit;
-    style.dimexo = 0.0015 * unit;
-    style.dimexe = 0.0015 * unit;
-    style.dimgap = 0.001 * unit;
-    style.dimdec = 0;
-    style.dimtad = 1;
-    style.dimtih = false;
-    style.dimtoh = false;
-    let _ = doc.dim_styles.add(style);
+    let mut styles = Vec::new();
+    for dim in &d.dimensions {
+        if styles.contains(&&dim.style) { continue; }
+        let index = styles.len();
+        styles.push(&dim.style);
+        let mut style = DimStyle::new(if index == 0 { STYLE.to_string() } else { format!("{STYLE}-{index}") });
+        style.handle = doc.allocate_handle();
+        style.dimtxt = dim.style.size * unit;
+        style.dimasz = dim.style.tick_size * unit;
+        style.dimtsz = 0.0;
+        match dim.style.tick {
+            crate::document::Tick::Slash => style.dimtsz = dim.style.tick_size * unit,
+            crate::document::Tick::Dot => style.dimblk_name = "_DOT".into(),
+            crate::document::Tick::None => style.dimblk_name = "_NONE".into(),
+            crate::document::Tick::Arrow => {}
+        }
+        style.dimexo = dim.style.gap * unit;
+        style.dimexe = dim.style.extension * unit;
+        style.dimgap = 0.001 * unit;
+        style.dimdec = dim.style.decimals as i16;
+        if dim.style.unit == crate::document::DimensionUnit::Metres { style.dimlfac = 0.001; }
+        style.dimtad = 1;
+        style.dimtih = false;
+        style.dimtoh = false;
+        let _ = doc.dim_styles.add(style);
+    }
 
     for l in &d.lines {
         let mut line = Line::from_points(mm(l.a), mm(l.b));
         line.common.layer = layer_of(l.pen, l.width);
+        if let Some([r, g, b]) = l.color { line.common.color = opencaddocument::Color::from_rgb(r, g, b); }
         let _ = doc.add_entity(EntityType::Line(line));
     }
     for t in &d.texts {
@@ -91,19 +105,32 @@ pub fn cad_document(d: &Drawing2d) -> Document {
     }
     for dim in &d.dimensions {
         let Some((_, on_line)) = dim.line() else { continue };
-        let mut aligned = DimensionAligned::new(mm(dim.from), mm(dim.to));
-        aligned.definition_point = mm(on_line);
-        let base = &mut aligned.base;
-        base.style_name = STYLE.into();
+        let mut entity = if dim.witnesses == [dim.from, dim.to] {
+            let mut aligned = DimensionAligned::new(mm(dim.from), mm(dim.to));
+            aligned.definition_point = mm(on_line);
+            Dimension::Aligned(aligned)
+        } else {
+            let angle = (dim.to[1]-dim.from[1]).atan2(dim.to[0]-dim.from[0]);
+            let [a,b] = dim.witnesses.map(mm);
+            let mut linear = DimensionLinear::rotated(a, b, angle);
+            linear.definition_point = mm(on_line);
+            linear.base.actual_measurement = linear.measurement();
+            Dimension::Linear(linear)
+        };
+        let base = entity.base_mut();
+        let index = styles.iter().position(|s| **s == dim.style).unwrap_or(0);
+        base.style_name = if index == 0 { STYLE.to_string() } else { format!("{STYLE}-{index}") };
         base.common.layer = Pen::Dimension.name().into();
         // the middle of its text
         let label = dim.label();
-        base.text_middle_point = mm([label.at[0], label.at[1] + label.height / 2.0]);
+        let (sin, cos) = label.angle.sin_cos();
+        base.text_middle_point = mm([label.at[0] - sin*label.height/2., label.at[1] + cos*label.height/2.]);
         // on paper a dimension measures the model, not the paper
-        if d.space == Space::Paper {
+        let geometric = (dim.to[0]-dim.from[0]).hypot(dim.to[1]-dim.from[1]);
+        if d.space == Space::Paper || dim.style.figure(geometric) != dim.label().text {
             base.set_text_override(Some(dim.label().text));
         }
-        let _ = doc.add_entity(EntityType::Dimension(Box::new(Dimension::Aligned(aligned))));
+        let _ = doc.add_entity(EntityType::Dimension(Box::new(entity)));
     }
     doc
 }
@@ -137,6 +164,8 @@ mod tests {
     /// Two cut walls of 8 m and 5 m, a line beyond, a text and an 8 m dimension, at 1:100.
     fn drawing() -> Drawing2d {
         Drawing2d {
+            polygons: Vec::new(),
+            images: Vec::new(),
             name: "Begane grond".into(),
             space: Space::Model { scale: 100.0 },
             paper: None,
@@ -145,8 +174,8 @@ mod tests {
                 Line2d::new(Pen::Cut, [8.0, 0.0], [8.0, 5.0]),
                 Line2d::new(Pen::Beyond, [1.0, 1.0], [7.0, 1.0]),
             ],
-            texts: vec![Text2d { pen: Pen::Text, at: [1.0, 2.0], height: 0.25, text: "Kamer ë".into(), align: Align::Left, angle: 0.0 }],
-            dimensions: vec![Dim2d { from: [0.0, 0.0], to: [8.0, 0.0], value: 8.0, offset: 0.6, text_height: 0.25 }],
+            texts: vec![Text2d { family: None, bold: false, color: None, pen: Pen::Text, at: [1.0, 2.0], height: 0.25, text: "Kamer ë".into(), align: Align::Left, angle: 0.0 }],
+            dimensions: vec![Dim2d { first_witness: true, units_per_paper_metre: 100., witnesses: [[0.0, 0.0], [8.0, 0.0]], from: [0.0, 0.0], to: [8.0, 0.0], value: 8.0, offset: 0.6, text_height: 0.25, style: crate::document::DimensionStyle::standard() }],
         }
     }
 
@@ -190,12 +219,14 @@ mod tests {
     #[test]
     fn a_sheet_dimension_shows_the_model_length() {
         let d = Drawing2d {
+            polygons: Vec::new(),
+            images: Vec::new(),
             name: "A01".into(),
             space: Space::Paper,
             paper: Some([0.42, 0.297]),
             lines: Vec::new(),
             texts: Vec::new(),
-            dimensions: vec![Dim2d { from: [0.1, 0.1], to: [0.18, 0.1], value: 8.0, offset: 0.006, text_height: 0.0025 }],
+            dimensions: vec![Dim2d { first_witness: true, units_per_paper_metre: 1., witnesses: [[0.1, 0.1], [0.18, 0.1]], from: [0.1, 0.1], to: [0.18, 0.1], value: 8.0, offset: 0.006, text_height: 0.0025, style: crate::document::DimensionStyle::standard() }],
         };
         for (bytes, format) in [(dwg(&d).unwrap(), &opencaddocument::Dwg as &dyn Format), (dxf(&d).unwrap(), &opencaddocument::Dxf)] {
             let (read, _) = format.read(&bytes).unwrap();
@@ -210,7 +241,7 @@ mod tests {
     #[test]
     fn texts_and_dimension_texts_stand_where_they_are_drawn() {
         let mut d = drawing();
-        d.texts.push(Text2d { pen: Pen::Text, at: [8.0, 6.0], height: 0.25, text: "Noord".into(), align: Align::Right, angle: 0.0 });
+        d.texts.push(Text2d { family: None, bold: false, color: None, pen: Pen::Text, at: [8.0, 6.0], height: 0.25, text: "Noord".into(), align: Align::Right, angle: 0.0 });
         let doc = cad_document(&d);
         let right = doc.entities().find_map(|e| match e {
             EntityType::Text(t) if t.value == "Noord" => Some(t.clone()),

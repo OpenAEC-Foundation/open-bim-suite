@@ -189,6 +189,14 @@ pub enum Category {
     ViewTemplates,
     /// The objects of a library, by their group: doors, luminaires, air terminals and the rest.
     Objects(bim_library::object::ObjectGroup),
+    /// The connection types of a library, by their family: steel, timber and the rest.
+    Connections(bim_library::connection::Family),
+    /// The service types of a library, by what they carry: ducts, pipes, cable trays and the rest.
+    Services(bim_library::service::Carrier),
+    /// The insulation and lining types of a library.
+    Covers,
+    /// The 2D components of Project Ocondat of one series (its place in the catalogue).
+    Components(u8),
     /// Every type of a library at one level of development.
     Lod(bim_library::lod::Lod),
     /// The libraries of the online place, to add to the project.
@@ -210,6 +218,9 @@ pub enum Heading {
     Standard,
     Hatches,
     Objects,
+    Connections,
+    Services,
+    Components,
     Lod,
     Codes,
     Sets,
@@ -229,6 +240,9 @@ impl Heading {
             Heading::Codes => l.text("Coderingen", "Classification"),
             Heading::Sets => l.text("Annotatie", "Annotation"),
             Heading::Objects => l.text("Objecten", "Objects"),
+            Heading::Connections => l.text("Verbindingen", "Connections"),
+            Heading::Services => l.text("Kanalen en leidingen", "Ducts and pipes"),
+            Heading::Components => l.text("2D-componenten", "2D components"),
             Heading::Lod => l.text("Uitwerkingsniveau", "Level of development"),
             Heading::Online => l.text("Online", "Online"),
             Heading::House => l.text("Huisstijl", "House style"),
@@ -265,6 +279,10 @@ impl Category {
             Category::DrawingSets => l.text("Tekeningsets", "Drawing sets"),
             Category::ViewTemplates => l.text("Weergavesjablonen", "View templates"),
             Category::Objects(group) => group.name(super::library::lang(l)),
+            Category::Connections(family) => family.name(super::library::lang(l)),
+            Category::Services(carrier) => carrier.name(super::library::lang(l)),
+            Category::Covers => l.text("isolatie en bekleding", "insulation and lining"),
+            Category::Components(series) => bim_library::component::series().get(usize::from(series)).map_or("", |s| s.title(super::library::lang(l))),
             Category::Lod(lod) => lod.name(),
             Category::Online => l.text("Open BIM Library", "Open BIM Library"),
             Category::Colours => l.text("Kleuren", "Colours"),
@@ -373,6 +391,8 @@ pub enum Item {
     Setting(Setting),
     /// A hatch of the catalogue, by its key.
     Hatch(String),
+    /// A 2D component of Project Ocondat, by its id.
+    Component(String),
 }
 
 /// Something found: its name, what kind of thing it is, where it is from, and the thing itself.
@@ -478,6 +498,7 @@ impl App {
                         let here = self.library_tree().iter().any(|(_, categories)| categories.iter().any(|(c, _)| *c == category));
                         (if here { (self.libraries.source, self.libraries.country) } else { (Source::Country, Country::Netherlands) }, category)
                     }),
+                    Item::Component(id) => component_series(id).map(|series| ((Source::Country, Country::Netherlands), Category::Components(series))),
                 };
                 if let Some(((source, country), category)) = found {
                     self.edit_none();
@@ -546,7 +567,7 @@ impl App {
     pub(super) fn settle_library_editors(&mut self) {
         let library = &self.library;
         let material = &mut self.material_view;
-        (material.name, material.hex, material.in_use) = (None, None, None);
+        (material.name, material.hex, material.in_use, material.from, material.standard) = (None, None, None, None, None);
         material.picked = material.picked.take().filter(|key| library.material(key).is_some());
         let buildup = &mut self.buildup_view;
         (buildup.draft, buildup.refused) = (None, None);
@@ -560,6 +581,10 @@ impl App {
         let code = &mut self.code_view;
         (code.draft, code.refused, code.in_use) = (None, None, None);
         code.picked = code.picked.take().filter(|of| library.code(of).is_some());
+        // (an object picked of another library stays picked; one that is gone shows the hint)
+        (self.object_view.draft, self.object_view.refused) = (None, None);
+        (self.connection_view.draft, self.connection_view.refused) = (None, None);
+        (self.service_view.draft, self.service_view.refused) = (None, None);
         // (a layer that is gone shows no fields: the face does)
         let layers = system.picked.as_deref().and_then(|id| library.system_type(id)).map_or(0, |t| t.layers.len());
         if matches!(system.part, super::systems::Part::Layer(k) if k >= layers) {
@@ -621,6 +646,10 @@ impl App {
             Category::DrawingSets => of(&|lib| lib.drawing_sets.len()),
             Category::ViewTemplates => of(&|lib| lib.view_templates.len()),
             Category::Objects(group) => of(&|lib| lib.object_types_of(group).count()),
+            Category::Connections(family) => of(&|lib| lib.connection_types_of(family).count()),
+            Category::Services(carrier) => of(&|lib| lib.service_types_of(carrier).count()),
+            Category::Covers => of(&|lib| lib.cover_types.len()),
+            Category::Components(series) => bim_library::component::series().get(usize::from(series)).map_or(0, |s| s.components.len()),
             Category::Lod(lod) => of(&|lib| bim_library::remote::levels(lib)[bim_library::lod::Lod::ALL.iter().position(|l| *l == lod).unwrap_or(0)]),
             Category::Online => self.online.index.as_ref().map_or(0, |index| index.libraries.len()),
             Category::Colours => self.house.colours.len(),
@@ -650,6 +679,8 @@ impl App {
                 (Heading::Linear, has(counted(LinearRole::ALL.map(Category::Linear).to_vec()))),
                 (Heading::Systems, has(counted(SystemGroup::ALL.map(Category::Systems).to_vec()))),
                 (Heading::Objects, has(counted(bim_library::object::ObjectGroup::ALL.map(Category::Objects).to_vec()))),
+                (Heading::Connections, has(counted(bim_library::connection::Family::ALL.map(Category::Connections).to_vec()))),
+                (Heading::Services, has(counted(bim_library::service::Carrier::ALL.map(Category::Services).into_iter().chain([Category::Covers]).collect()))),
                 (Heading::Lod, has(counted(bim_library::lod::Lod::ALL.map(Category::Lod).to_vec()))),
                 (Heading::Codes, has(counted(vec![Category::Codes]))),
                 (Heading::Sets, has(counted(vec![Category::ViewTemplates, Category::DrawingSets]))),
@@ -671,6 +702,8 @@ impl App {
                 let mut tree = vec![(Heading::Standard, counted(standard())), hatches(&HatchSet::ALL)];
                 tree.extend(types(false));
                 steel(&mut tree);
+                // the generic 2D components of Project Ocondat, a category per series
+                tree.push((Heading::Components, counted((0..bim_library::component::series().len()).filter_map(|at| u8::try_from(at).ok()).map(Category::Components).collect())));
                 tree
             }
             Source::Country => {
@@ -771,6 +804,11 @@ impl App {
                 found.push(Found { name: h.name(lang).to_string(), kind: l.text("Arceringen", "Hatches"), place: h.set.name(), item: Item::Hatch(h.key.clone()) });
             }
         }
+        for c in bim_library::component::items() {
+            if hit(&[&c.component.name, &c.component.id, c.series.title(lang)]) {
+                found.push(Found { name: c.component.name.clone(), kind: l.text("2D-componenten", "2D components"), place: "Project Ocondat", item: Item::Component(c.component.id.clone()) });
+            }
+        }
         for steel in steel_profiles() {
             if hit(&[&steel.designation]) {
                 add(&mut found, steel.designation.clone(), l.text("Staalprofielen", "Steel profiles"), Source::General.label(l), Item::Steel(steel.designation.clone()));
@@ -842,6 +880,15 @@ impl App {
                 return self.object_pane(p, l, self.shelf(shelf), shelf);
             }
         }
+        if let (Category::Connections(_), true, Some(shelf)) = (self.category(), view.query.trim().chars().count() < 2, self.shown_shelf()) {
+            return self.connection_pane(p, l, self.shelf(shelf), shelf);
+        }
+        if let (Category::Services(_), true, Some(shelf)) = (self.category(), view.query.trim().chars().count() < 2, self.shown_shelf()) {
+            return self.service_pane(p, l, self.shelf(shelf), shelf);
+        }
+        if let (Category::Covers, true, Some(shelf)) = (self.category(), view.query.trim().chars().count() < 2, self.shown_shelf()) {
+            return self.cover_pane(p, l, self.shelf(shelf), shelf);
+        }
         if self.category() == Category::ViewTemplates && view.query.trim().chars().count() < 2 {
             if let Some(library) = self.shown_shelf().map(|shelf| self.shelf(shelf)) {
                 return self.view_template_pane(p, l, library);
@@ -898,6 +945,8 @@ impl App {
             Item::Setting(_) => None,
             // (a hatch is the catalogue's: there is no copy of it to edit yet)
             Item::Hatch(key) => hatch::hatch(key).map(|h| (h.name(lang).to_string(), hatch_detail(p, l, h), None)),
+            // (a component is Ocondat's: its drawing is not in the library yet)
+            Item::Component(id) => bim_library::component::item(id).map(|c| (c.component.name.clone(), component_detail(p, l, c), None)),
         };
         let Some((name, detail, copy)) = found else {
             return container(text(l.text("Dit staat niet meer in de bibliotheek.", "This is no longer in the library.")).size(12).color(p.text_muted)).padding(8).into();
@@ -988,7 +1037,16 @@ impl App {
                 tiles
             }
             (Category::DrawingSets, Some(_), Some(library)) => self.drawing_set_tiles(p, l, library),
-            (Category::Objects(group), Some(_), Some(library)) => self.object_tiles(p, l, library, group),
+            (Category::Objects(group), Some(_), Some(library)) => {
+                let mut tiles = self.object_tiles(p, l, library, group);
+                if project {
+                    tiles.push(tile_more(p, l.text("+ Object", "+ Object"), Message::Object(super::objects::ObjectMessage::Add(group))));
+                }
+                tiles
+            }
+            (Category::Connections(family), Some(_), Some(library)) => self.connection_tiles(p, l, library, family),
+            (Category::Services(carrier), Some(_), Some(library)) => self.service_tiles(p, l, library, carrier),
+            (Category::Covers, Some(_), Some(library)) => self.cover_tiles(p, l, library),
             (Category::Lod(lod), Some(_), Some(library)) => self.lod_tiles(p, l, library, lod),
             (Category::Online, _, _) => self.online_tiles(p, l),
             (Category::ViewTemplates, Some(_), Some(library)) => self.view_template_tiles(p, l, library),
@@ -1013,6 +1071,16 @@ impl App {
                     let item = Item::Hatch(h.key.clone());
                     let on = looked(&item);
                     tile(p, tile_hatch_look(h, p, LOOK, HatchLook::SCALE), h.name(lang).to_string(), hatch_about(h, lang), on, look(item))
+                })
+                .collect(),
+            (Category::Components(series), _, _) => bim_library::component::series()
+                .get(usize::from(series))
+                .into_iter()
+                .flat_map(|s| s.components.iter().map(move |component| bim_library::component::Item { series: s, component }))
+                .map(|c| {
+                    let item = Item::Component(c.component.id.clone());
+                    let on = looked(&item);
+                    tile(p, component_look(p, c), c.component.name.clone(), component_about(c), on, look(item))
                 })
                 .collect(),
             (Category::Hatches, _, _) => {
@@ -1075,6 +1143,16 @@ impl App {
             for h in hatch::of(set) {
                 let item = Item::Hatch(h.key.clone());
                 code.push((h.name(lang).to_string(), look(item.clone()), looked(&item), hatch::hatch_node(h)));
+            }
+            return code;
+        }
+        if let Category::Components(series) = category {
+            for s in bim_library::component::series().get(usize::from(series)) {
+                for component in &s.components {
+                    let c = bim_library::component::Item { series: s, component };
+                    let item = Item::Component(component.id.clone());
+                    code.push((component.name.clone(), look(item.clone()), looked(&item), c.node()));
+                }
             }
             return code;
         }
@@ -1177,6 +1255,7 @@ impl App {
                 }
                 Item::Steel(designation) => profile_outline(p, &bim_library::profile::steel(designation)?.shape, general().material("steel"), LOOK - 8.0),
                 Item::Hatch(key) => tile_hatch_look(hatch::hatch(key)?, p, LOOK, HatchLook::SCALE),
+                Item::Component(id) => component_look(p, bim_library::component::item(id)?),
                 Item::Setting(setting) => words(match setting {
                     Setting::Kind(key) => self.standard.kind(key).map(|k| format!("{} · {} · {}", k.code, k.discipline.code(), k.scales.iter().map(|s| bim_library::drawing::scale_text(*s)).collect::<Vec<_>>().join(", "))),
                     Setting::LineStyle(key) => self.standard.line_style(key).map(|s| s.names.get(lang).to_string()),
@@ -1310,6 +1389,62 @@ pub(super) fn code_text(value: &serde_json::Value) -> String {
     out
 }
 
+/// The place in the catalogue of the series of component `id`.
+fn component_series(id: &str) -> Option<u8> {
+    let of = bim_library::component::item(id)?.series;
+    bim_library::component::series().iter().position(|s| std::ptr::eq(s, of)).and_then(|at| u8::try_from(at).ok())
+}
+
+/// The size of a component's drawing: "145 × 10 mm".
+fn component_size(c: bim_library::component::Item<'_>) -> String {
+    let [w, h] = c.component.size;
+    format!("{w} × {h} mm")
+}
+
+/// The line about a component on its tile: its layer and its size.
+fn component_about(c: bim_library::component::Item<'_>) -> String {
+    format!("{} · {}", c.layer(), component_size(c))
+}
+
+/// A component on a tile: the shape of its drawing (its width to its height) and its IFC class.
+/// The drawing itself is not in the library yet.
+fn component_look<'a>(p: Palette, c: bim_library::component::Item<'_>) -> Element<'a, Message> {
+    let [w, h] = c.component.size.map(|v| v.max(1.0) as f32);
+    let most = w.max(h);
+    let (w, h) = ((w / most * 64.0).max(3.0), (h / most * 48.0).max(3.0));
+    let frame = container(iced::widget::Space::new().width(w).height(h)).style(move |_| container::Style { border: iced::Border { color: p.text_secondary, width: 1.0, radius: 0.0.into() }, ..container::Style::default() });
+    column![frame, text(c.series.class.clone()).size(10).color(p.text_muted)].spacing(4).align_x(Center).into()
+}
+
+/// A component in the right pane: how it is categorised, its layer, and where it is from.
+fn component_detail<'a>(p: Palette, l: Language, c: bim_library::component::Item<'static>) -> Element<'a, Message> {
+    use bim_library::component::{Kind, LICENCE, MAKER};
+    let lang = super::library::lang(l);
+    let fact = |label: &'static str, value: String| row![text(label).size(11).color(p.text_muted).width(84), text(value).size(12).color(p.text).width(Fill).wrapping(Wrapping::WordOrGlyph)].spacing(6);
+    let kind = match c.kind() {
+        Kind::Detail => l.text("detail", "detail"),
+        _ => l.text("component", "component"),
+    };
+    let standard = Some(c.series.standard.clone()).filter(|s| !s.is_empty()).map(|s| fact(l.text("Norm", "Standard"), s));
+    column![
+        component_look(p, c),
+        fact(l.text("Reeks", "Set"), c.series.title(lang).to_string()),
+        fact(l.text("Soort", "Kind"), kind.to_string()),
+        fact("IFC", format!("{} · {}", c.series.class, c.series.predefined)),
+        fact("NL-SfB", c.series.nlsfb.clone()),
+        fact(l.text("Laag", "Layer"), c.layer()),
+        fact(l.text("Maat", "Size"), component_size(c)),
+        fact(l.text("Maker", "Maker"), MAKER.to_string()),
+        fact(l.text("Licentie", "Licence"), LICENCE.to_string()),
+        fact(l.text("Bron", "Source"), format!("Project Ocondat · {}", c.source())),
+        fact(l.text("Sleutel", "Key"), c.component.id.clone()),
+    ]
+    .push(standard)
+    .push(text(l.text("De tekening zelf staat nog niet in de bibliotheek: een aanzicht kan haar nog niet plaatsen.", "The drawing itself is not in the library yet: a view cannot place it yet.")).size(11).color(p.text_muted).wrapping(Wrapping::Word))
+    .spacing(6)
+    .into()
+}
+
 /// The line about a hatch on its tile: its set and the number of its sign, or for one kind of
 /// material the sign it stands under.
 fn hatch_about(h: &Hatch, lang: bim_library::Lang) -> String {
@@ -1436,7 +1571,7 @@ mod tests {
         // the general library: materials, the planar elements together, the linear ones with the
         // steel table, the systems, and the hatches: the suite's own, and those of its standard
         let general = app.library_tree();
-        assert_eq!(general.iter().map(|(heading, _)| *heading).collect::<Vec<_>>(), [Heading::Materials, Heading::Planar, Heading::Linear, Heading::Systems, Heading::Objects, Heading::Lod, Heading::Codes, Heading::Sets, Heading::Hatches]);
+        assert_eq!(general.iter().map(|(heading, _)| *heading).collect::<Vec<_>>(), [Heading::Materials, Heading::Planar, Heading::Linear, Heading::Systems, Heading::Objects, Heading::Connections, Heading::Services, Heading::Lod, Heading::Codes, Heading::Sets, Heading::Hatches]);
         assert_eq!(general.iter().find(|(heading, _)| *heading == Heading::Codes).map(|(_, list)| list.clone()), Some(vec![(Category::Codes, Library::starter().codes.len())]));
         assert_eq!(categories(&general, Heading::Planar), Role::ALL.map(Category::Planar));
         assert_eq!(general[0].1, [(Category::Materials, Library::starter().materials.len())]);
@@ -1574,6 +1709,37 @@ mod tests {
         let _ = app.libraries_update(LibrariesMessage::Source(Source::General));
         let general = app.category_code(l, Category::Planar(Role::Wall));
         assert!(matches!(general[0].1, Some(Message::Libraries(LibrariesMessage::Look(Item::BuildUp(Shelf::General, _))))));
+    }
+
+    #[test]
+    fn the_2d_components_of_ocondat_show_by_series_in_the_dutch_library() {
+        let mut app = App::default();
+        let l = Language::English;
+        let palette = app.theme.palette();
+        let of = |app: &App| app.library_tree().into_iter().find(|(heading, _)| *heading == Heading::Components).map(|(_, categories)| categories);
+        assert_eq!(of(&app), None, "not among the project's own");
+        let _ = app.libraries_update(LibrariesMessage::Source(Source::Country));
+        let _ = app.libraries_update(LibrariesMessage::Country(Country::Netherlands));
+        let series = of(&app).expect("the Dutch library has the components");
+        assert_eq!((series.len(), series.iter().map(|(_, count)| count).sum::<usize>()), (25, 1307));
+        assert_eq!(series[0].0.label(l), "Basic Materials");
+        // a search finds one from anywhere, and looking at it shows its series
+        let _ = app.libraries_update(LibrariesMessage::Source(Source::General));
+        assert_eq!(of(&app), None);
+        let anchor = Item::Component("gen-betonanker-m10".into());
+        assert!(app.library_search("betonanker-m10", l).iter().any(|f| f.item == anchor && f.place == "Project Ocondat"));
+        let _ = app.libraries_update(LibrariesMessage::Look(anchor.clone()));
+        assert_eq!((app.libraries.source, app.libraries.country, app.category().label(l), app.libraries.looked.clone()), (Source::Country, Country::Netherlands, "Basic Materials", Some(anchor.clone())));
+        // its tiles, and its node with its layer, its source and its licence
+        assert_eq!(app.category_tiles(palette, l, app.category()).len(), 162);
+        let code = app.category_code(l, app.category());
+        let (_, press, looked, node) = code.iter().find(|(name, ..)| name == "Betonanker-m10").expect("the anchor's node");
+        assert!(*looked && matches!(press, Some(Message::Libraries(LibrariesMessage::Look(Item::Component(id)))) if id == "gen-betonanker-m10"));
+        let own = &node["attributes"]["openaec::component"];
+        assert_eq!((own["layer"].as_str(), own["licence"].as_str(), own["maker"].as_str()), (Some("S-DETL-00"), Some("LGPL-3.0"), Some("generic")));
+        // the pane says how it is categorised and where it is from
+        let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 700.0), app.look_pane(palette, l, &anchor));
+        assert!(pane.find("S-DETL-00").is_ok() && pane.find("LGPL-3.0").is_ok() && pane.find("IfcMechanicalFastener · USERDEFINED").is_ok() && pane.find("145 × 10 mm").is_ok());
     }
 
     #[test]

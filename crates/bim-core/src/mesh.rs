@@ -21,6 +21,19 @@ impl Mesh {
         for face in &solid.faces {
             let points: Vec<Vec<DVec3>> = face.rings.iter().map(|r| r.iter().map(|&i| solid.positions[i as usize]).collect()).collect();
             let normal = newell(&points[0]).try_normalize().ok_or(Refusal::NotTriangulated)?;
+            // Extruded profiles have mostly convex quadrilateral sides. Triangulate these
+            // directly, keeping the general polygon triangulator for concave faces and holes.
+            if points.len() == 1 {
+                if let [a, b, c, d] = points[0].as_slice() {
+                    if (*b-*a).cross(*c-*a).dot(normal) > 0.0 && (*c-*a).cross(*d-*a).dot(normal) > 0.0 {
+                        let i = mesh.positions.len() as u32;
+                        mesh.positions.extend_from_slice(&points[0]);
+                        mesh.normals.extend([normal; 4]);
+                        mesh.indices.extend([i, i+1, i+2, i, i+2, i+3]);
+                        continue;
+                    }
+                }
+            }
             // the face's plane: u, v square to the normal
             let u = normal.any_orthonormal_vector();
             let v = normal.cross(u);

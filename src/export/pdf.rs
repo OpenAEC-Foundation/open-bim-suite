@@ -1,5 +1,5 @@
 //! A 2D drawing as a vector PDF: one page (a sheet's paper, or what a view draws at its scale),
-//! its lines with the pens' line weights and its texts in Helvetica. A small writer of its own:
+//! its lines with the pens' line weights, with installed Swiss condensed type embedded where specified.
 //! PDF 1.4, no compression, WinAnsi text (a character outside it becomes `?`).
 
 use crate::drawing2d::{Align, Drawing2d, Pen, Text2d};
@@ -28,7 +28,11 @@ fn win_ansi(c: char) -> u8 {
         ('Š', 0x8A), ('‹', 0x8B), ('Œ', 0x8C), ('Ž', 0x8E), ('‘', 0x91), ('’', 0x92), ('“', 0x93), ('”', 0x94), ('•', 0x95),
         ('–', 0x96), ('—', 0x97), ('˜', 0x98), ('™', 0x99), ('š', 0x9A), ('›', 0x9B), ('œ', 0x9C), ('ž', 0x9E), ('Ÿ', 0x9F),
     ];
+    if c == '′' { return b'\''; }
     match c as u32 {
+        0x2212 | 0x2010 | 0x2011 => b'-',
+        0xfd3e => b'(',
+        0xfd3f => b')',
         0x20..=0x7E | 0xA0..=0xFF => c as u8,
         _ => EXTRA.iter().find(|(e, _)| *e == c).map_or(b'?', |(_, b)| *b),
     }
@@ -55,27 +59,39 @@ pub(crate) fn literal(text: &str) -> String {
 }
 
 /// The page's drawing operators.
-fn content(d: &Drawing2d) -> String {
+struct DrawingFont {
+    family: &'static str,
+    bold: bool,
+    resource: &'static str,
+    name: &'static str,
+    font: super::pdf_font::Font,
+}
+
+fn content(d: &Drawing2d, fonts: &[DrawingFont]) -> String {
     let (lo, _) = d.page();
     let k = d.paper_per_unit() * 1000.0 * POINTS;
     let at = |q: [f64; 2]| format!("{} {}", num((q[0] - lo[0]) * k), num((q[1] - lo[1]) * k));
     let mut s = String::from("1 J 1 j 0 G 0 g\n");
+    for (i, image) in d.images.iter().enumerate() {
+        let [a, b] = image.bounds;
+        let [c, e] = image.clip;
+        let _ = writeln!(s, "q {} {} {} re W n {} 0 0 {} {} cm /Im{} Do Q", at(c), num((e[0]-c[0])*k), num((e[1]-c[1])*k),
+            num((b[0]-a[0])*k), num((b[1]-a[1])*k), at(a), i);
+    }
+    for polygon in &d.polygons {
+        let Some((first, rest)) = polygon.points.split_first() else { continue };
+        let [r, g, b] = polygon.color.map(|c| num(f64::from(c) / 255.0));
+        let _ = writeln!(s, "{r} {g} {b} rg {} m", at(*first));
+        for &point in rest { let _ = writeln!(s, "{} l", at(point)); }
+        s.push_str("h f\n");
+    }
     for pen in Pen::ALL {
         // the lines of a pen a width at a time: a view's kind of drawing gives what is cut and
         // what is seen beyond it a width of its own
-        let mut groups: Vec<(f64, Vec<([f64; 2], [f64; 2])>)> =
-            d.widths(pen).into_iter().map(|width| (width, d.lines.iter().filter(|l| l.pen == pen && (l.width - width).abs() < 1e-9).map(|l| (l.a, l.b)).collect())).collect();
-        if pen == Pen::Dimension {
-            let marks: Vec<([f64; 2], [f64; 2])> = d.dimensions.iter().flat_map(|dim| dim.lines()).map(|[a, b]| (a, b)).collect();
-            match groups.iter_mut().find(|(width, _)| (*width - pen.weight_mm()).abs() < 1e-9) {
-                Some((_, segments)) => segments.extend(marks),
-                None if !marks.is_empty() => groups.push((pen.weight_mm(), marks)),
-                None => {}
-            }
-        }
-        for (width, segments) in groups {
-            let _ = writeln!(s, "{} w", num(width * POINTS));
-            for (a, b) in segments {
+        for (width, rgb, segments) in d.strokes(pen) {
+            let [r, g, b] = rgb.map(|c| num(f64::from(c) / 255.0));
+            let _ = writeln!(s, "{r} {g} {b} RG {} w", num(width * POINTS));
+            for [a, b] in segments {
                 let _ = writeln!(s, "{} m {} l", at(a), at(b));
             }
             s.push_str("S\n");
@@ -83,8 +99,14 @@ fn content(d: &Drawing2d) -> String {
     }
     let labels: Vec<Text2d> = d.dimensions.iter().map(|dim| dim.label()).collect();
     for t in d.texts.iter().chain(&labels) {
-        let size = t.height * k / CAPITALS;
-        let width = width(&t.text, size);
+        let [r, g, b] = t.color.unwrap_or_default().map(|c| num(f64::from(c) / 255.0));
+        let _ = writeln!(s, "{r} {g} {b} rg");
+        let size = t.height * k / if t.family.is_some() { 1.0 } else { CAPITALS };
+        let face = fonts.iter().find(|f| t.family.as_deref() == Some(f.family) && t.bold == f.bold);
+        let (font, width) = match face {
+            Some(f) => (f.resource, t.text.chars().map(|c| f64::from(f.font.widths[usize::from(win_ansi(c))])).sum::<f64>() * size / 1000.0),
+            None => (if t.bold { "F2" } else { "F1" }, width(&t.text, size)),
+        };
         let shift = match t.align {
             Align::Left => 0.0,
             Align::Center => width / 2.0,
@@ -95,9 +117,9 @@ fn content(d: &Drawing2d) -> String {
         let x = (t.at[0] - lo[0]) * k - shift * cos;
         let y = (t.at[1] - lo[1]) * k - shift * sin;
         if t.angle == 0.0 {
-            let _ = writeln!(s, "BT /F1 {} Tf {} {} Td {} Tj ET", num(size), num(x), num(y), literal(&t.text));
+            let _ = writeln!(s, "BT /{font} {} Tf {} {} Td {} Tj ET", num(size), num(x), num(y), literal(&t.text));
         } else {
-            let _ = writeln!(s, "BT /F1 {} Tf {} {} {} {} {} {} Tm {} Tj ET", num(size), num(cos), num(sin), num(-sin), num(cos), num(x), num(y), literal(&t.text));
+            let _ = writeln!(s, "BT /{font} {} Tf {} {} {} {} {} {} Tm {} Tj ET", num(size), num(cos), num(sin), num(-sin), num(cos), num(x), num(y), literal(&t.text));
         }
     }
     s
@@ -151,28 +173,70 @@ pub fn pdf(d: &Drawing2d) -> Vec<u8> {
     let (lo, hi) = d.page();
     let k = d.paper_per_unit() * 1000.0 * POINTS;
     let (w, h) = (num_to((hi[0] - lo[0]) * k, 2), num_to((hi[1] - lo[1]) * k, 2));
-    let stream = content(d);
+    let choices: [(&str, bool, &str, &str, fn() -> Option<&'static [u8]>); 6] = [
+        (crate::typeface::SWISS_CONDENSED, false, "F3", crate::typeface::SWISS_POSTSCRIPT, crate::typeface::swiss_condensed),
+        (crate::typeface::ARIAL_NARROW, false, "F6", "ArialNarrow", crate::typeface::arial_narrow),
+        ("Calibri", false, "F7", "Calibri", || crate::typeface::calibri(false)),
+        ("Calibri", true, "F8", "Calibri-Bold", || crate::typeface::calibri(true)),
+        ("Segoe UI", false, "F4", "SegoeUI", || crate::typeface::segoe_ui(false)),
+        ("Segoe UI", true, "F5", "SegoeUI-Bold", || crate::typeface::segoe_ui(true)),
+    ];
+    let embedded: Vec<_> = choices.into_iter().filter_map(|(family, bold, resource, name, load)| {
+        if !d.texts.iter().any(|t| t.family.as_deref() == Some(family) && t.bold == bold)
+            && (bold || !d.dimensions.iter().any(|dim| dim.style.label_family().as_deref() == Some(family))) { return None; }
+        let bytes = load()?;
+        use ttf_parser::Permissions::{Editable, Installable, PreviewAndPrint};
+        let face = ttf_parser::Face::parse(bytes, 0).ok()?;
+        (face.is_outline_embedding_allowed() && matches!(face.permissions(), Some(Editable | Installable | PreviewAndPrint)))
+            .then(|| DrawingFont { family, bold, resource, name, font: super::pdf_font::font(bytes) })
+    }).collect();
+    let stream = content(d, &embedded);
+    let fonts = embedded.iter().enumerate().map(|(i,f)| format!("/{} {} 0 R", f.resource, 8 + d.images.len() + 3*i)).collect::<Vec<_>>().join(" ");
+    let references = (0..d.images.len()).map(|i| format!("/Im{i} {} 0 R", i+8)).collect::<Vec<_>>().join(" ");
     let objects = [
         "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
         "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
-        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {w} {h}] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>"),
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {w} {h}] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 7 0 R {fonts} >> /XObject << {references} >> >> >>"),
         format!("<< /Length {} >>\nstream\n{stream}endstream", stream.len()),
         "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_string(),
         format!("<< /Title {} /Producer (Open BIM Suite) >>", utf16(&d.name)),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>".to_string(),
     ];
-    let mut out = String::from("%PDF-1.4\n");
+    let mut objects = objects.into_iter().map(String::into_bytes).collect::<Vec<_>>();
+    for image in &d.images {
+        use std::io::Write as _;
+        let (filter, stream) = if image.format == image::ImageFormat::Jpeg {
+            ("DCTDecode", image.bytes.to_vec())
+        } else {
+            let rgba = image::load_from_memory_with_format(&image.bytes, image.format).expect("validated drawing image").into_rgba8();
+            let mut encoded = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+            for px in rgba.pixels() {
+                let a = u32::from(px[3]);
+                let rgb = [0, 1, 2].map(|k| ((u32::from(px[k])*a + 255*(255-a) + 127)/255) as u8);
+                encoded.write_all(&rgb).expect("in-memory stream");
+            }
+            ("FlateDecode", encoded.finish().expect("in-memory stream"))
+        };
+        let mut object = format!("<< /Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /{filter} /Length {} >>\nstream\n", image.pixels[0], image.pixels[1], stream.len()).into_bytes();
+        object.extend(stream);
+        object.extend_from_slice(b"\nendstream");
+        objects.push(object);
+    }
+    for f in &embedded { super::pdf_font::push_font(&mut objects, &f.font, f.name, if f.bold {120} else {80}); }
+    use std::io::Write as _;
+    let mut out = b"%PDF-1.4\n".to_vec();
     let mut offsets = Vec::new();
     for (i, object) in objects.iter().enumerate() {
         offsets.push(out.len());
-        let _ = write!(out, "{} 0 obj\n{object}\nendobj\n", i + 1);
+        let _ = writeln!(out, "{} 0 obj", i+1);
+        out.extend(object);
+        out.extend_from_slice(b"\nendobj\n");
     }
     let xref = out.len();
     let _ = write!(out, "xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1);
-    for offset in offsets {
-        let _ = write!(out, "{offset:010} 00000 n \n");
-    }
+    for offset in offsets { let _ = writeln!(out, "{offset:010} 00000 n "); }
     let _ = write!(out, "trailer\n<< /Size {} /Root 1 0 R /Info 6 0 R >>\nstartxref\n{xref}\n%%EOF\n", objects.len() + 1);
-    out.into_bytes()
+    out
 }
 
 #[cfg(test)]
@@ -183,13 +247,15 @@ mod tests {
 
     fn sheet() -> Drawing2d {
         Drawing2d {
+            polygons: Vec::new(),
+            images: Vec::new(),
             name: "A01 Plattegronden".into(),
             space: Space::Paper,
             paper: Some(A3_LANDSCAPE),
             lines: vec![Line2d::new(Pen::Cut, [0.05, 0.05], [0.30, 0.05]), Line2d::new(Pen::Beyond, [0.05, 0.10], [0.30, 0.10])],
             texts: vec![
-                Text2d { pen: Pen::Text, at: [0.05, 0.2], height: 0.005, text: "A & <B> ë".into(), align: Align::Left, angle: 0.0 },
-                Text2d { pen: Pen::Text, at: [0.40, 0.28], height: 0.004, text: "(1) \\ 2 €".into(), align: Align::Right, angle: 0.0 },
+                Text2d { family: None, bold: false, color: None, pen: Pen::Text, at: [0.05, 0.2], height: 0.005, text: "A & <B> ë".into(), align: Align::Left, angle: 0.0 },
+                Text2d { family: None, bold: false, color: None, pen: Pen::Text, at: [0.40, 0.28], height: 0.004, text: "(1) \\ 2 €".into(), align: Align::Right, angle: 0.0 },
             ],
             dimensions: Vec::new(),
         }
@@ -197,6 +263,57 @@ mod tests {
 
     fn text(bytes: &[u8]) -> String {
         bytes.iter().map(|&b| b as char).collect()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn office_dimension_embeds_arial_narrow_at_nominal_point_size() {
+        if crate::typeface::arial_narrow().is_none() { return; }
+        let style = crate::document::DimensionStyle::from_ifcx(&serde_json::json!({"name":"3BM ronde stip","size":0.0025})).unwrap();
+        let doc = &mut crate::document::Document::default();
+        let level = doc.add_level("Ground", 0.0).unwrap();
+        let plan = doc.add_plan(&doc.levels()[level].path.clone()).unwrap();
+        let style_index = doc.set_dimension_style(style);
+        doc.add_dimension(&plan,[0.,0.],[4.,0.]);
+        assert!(doc.set_dimension_style_of(&plan,0,style_index));
+        let sheet = doc.add_sheet("Foundation");
+        doc.place_plan(&sheet,&plan);
+        let drawing = crate::drawing2d::sheet_drawing(doc,&sheet,&|_| None,&|_| vec![],&|_| Default::default()).unwrap();
+        let label = drawing.dimensions[0].label();
+        assert_eq!(label.family.as_deref(), Some("Arial Narrow"));
+        assert!((label.height*72./0.0254-6.8).abs()<1e-9);
+        let rendered = text(&pdf(&drawing));
+        assert!(rendered.contains("/BaseFont /ArialNarrow"));
+        assert!(rendered.contains("BT /F6 6.8 Tf"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn installed_swiss_condensed_is_embedded_at_seven_points() {
+        let Some(bytes) = crate::typeface::swiss_condensed() else { return };
+        assert!(crate::typeface::Face::of(crate::typeface::SWISS_CONDENSED).installed());
+        let mut page = sheet();
+        page.texts[0].family = Some(crate::typeface::SWISS_CONDENSED.into());
+        page.texts[0].height = 7.0 * 0.0254 / 72.0;
+        let result = text(&pdf(&page));
+        assert!(result.contains("/BaseFont /Swiss721BT-RomanCondensed"));
+        assert!(result.contains("BT /F3 7 Tf"));
+        assert!(result.contains(&format!("/Length1 {}", bytes.len())));
+    }
+
+    #[test]
+    fn office_stamp_uses_distinct_embedded_regular_and_bold_resources() {
+        if crate::typeface::segoe_ui(false).is_none() || crate::typeface::segoe_ui(true).is_none() { return; }
+        let mut page = sheet();
+        for (i,t) in page.texts.iter_mut().enumerate() {
+            t.family = Some("Segoe UI".into());
+            t.bold = i == 1;
+            t.height = 0.00353;
+        }
+        let bytes = pdf(&page);
+        let output = String::from_utf8_lossy(&bytes);
+        assert!(output.contains("/BaseFont /SegoeUI ") && output.contains("/BaseFont /SegoeUI-Bold "));
+        assert!(output.contains("BT /F4 10.006 Tf") && output.contains("BT /F5 10.006 Tf"));
     }
 
     #[test]
@@ -212,7 +329,7 @@ mod tests {
     fn a_turned_text_is_written_with_its_matrix() {
         let mut d = sheet();
         // the same text level and from the left, and read from the right of the sheet, centred
-        let level = Text2d { pen: Pen::Text, at: [0.1, 0.1], height: 0.005, text: "HEA 200".into(), align: Align::Left, angle: 0.0 };
+        let level = Text2d { family: None, bold: false, color: None, pen: Pen::Text, at: [0.1, 0.1], height: 0.005, text: "HEA 200".into(), align: Align::Left, angle: 0.0 };
         d.texts = vec![level.clone(), Text2d { align: Align::Center, angle: std::f64::consts::FRAC_PI_2, ..level }];
         let s = text(&pdf(&d));
         let lines: Vec<&str> = s.lines().filter(|l| l.contains("(HEA 200) Tj")).collect();

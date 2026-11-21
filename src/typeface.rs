@@ -111,6 +111,19 @@ impl Face {
         }
     }
 
+    /// Distance from the baseline of the first line to the bottom of its canvas paragraph.
+    pub(crate) fn baseline_to_bottom(&self, content: &str, size: f32) -> f32 {
+        use iced::advanced::text::Paragraph as _;
+        let defaults = canvas::Text::default();
+        let paragraph = iced::advanced::graphics::text::Paragraph::with_text(iced::advanced::Text {
+            content, bounds: Size::INFINITE, size: iced::Pixels(size),
+            line_height: defaults.line_height, font: self.font(), align_x: defaults.align_x,
+            align_y: alignment::Vertical::Bottom, shaping: defaults.shaping,
+            wrapping: iced::widget::text::Wrapping::None,
+        });
+        paragraph.buffer().layout_runs().next().map_or(0., |line| paragraph.min_bounds().height - line.line_y)
+    }
+
     /// How wide `text` is at a letter size of `size`: its widest line.
     pub fn measure(&self, text: &str, size: f32) -> f32 {
         use iced::advanced::text::Paragraph as _;
@@ -271,6 +284,51 @@ impl Face {
     }
 }
 
+/// The family and PostScript names supplied by the installed Swiss condensed face.
+pub const SWISS_CONDENSED: &str = "Swis721 Cn BT";
+pub const SWISS_POSTSCRIPT: &str = "Swiss721BT-RomanCondensed";
+
+/// File supplied by the desktop installation. Verify its identity before using it.
+pub(crate) fn swiss_condensed() -> Option<&'static [u8]> {
+    static FILE: OnceLock<Option<Vec<u8>>> = OnceLock::new();
+    FILE.get_or_init(|| installed_ttf("swissc.ttf", SWISS_POSTSCRIPT)).as_deref()
+}
+
+pub const ARIAL_NARROW: &str = "Arial Narrow";
+
+pub(crate) fn arial_narrow() -> Option<&'static [u8]> {
+    static REGULAR: OnceLock<Option<Vec<u8>>> = OnceLock::new();
+    REGULAR.get_or_init(|| installed_ttf("arialn.ttf", "ArialNarrow")).as_deref()
+}
+
+pub(crate) fn calibri(bold: bool) -> Option<&'static [u8]> {
+    static REGULAR: OnceLock<Option<Vec<u8>>> = OnceLock::new();
+    static BOLD: OnceLock<Option<Vec<u8>>> = OnceLock::new();
+    if bold {
+        BOLD.get_or_init(|| installed_ttf("calibrib.ttf", "Calibri-Bold")).as_deref()
+    } else {
+        REGULAR.get_or_init(|| installed_ttf("calibri.ttf", "Calibri")).as_deref()
+    }
+}
+
+pub(crate) fn segoe_ui(bold: bool) -> Option<&'static [u8]> {
+    static REGULAR: OnceLock<Option<Vec<u8>>> = OnceLock::new();
+    static BOLD: OnceLock<Option<Vec<u8>>> = OnceLock::new();
+    if bold {
+        BOLD.get_or_init(|| installed_ttf("segoeuib.ttf", "SegoeUI-Bold")).as_deref()
+    } else {
+        REGULAR.get_or_init(|| installed_ttf("segoeui.ttf", "SegoeUI")).as_deref()
+    }
+}
+
+fn installed_ttf(file: &str, postscript: &str) -> Option<Vec<u8>> {
+    let path = std::path::PathBuf::from(std::env::var_os("WINDIR")?).join("Fonts").join(file);
+    let bytes = std::fs::read(path).ok()?;
+    let face = ttf_parser::Face::parse(&bytes, 0).ok()?;
+    let matched = face.names().into_iter().any(|n| n.name_id == ttf_parser::name_id::POST_SCRIPT_NAME && n.to_string().as_deref() == Some(postscript));
+    matched.then_some(bytes)
+}
+
 /// The name the fonts know a family by, when one of them is of it.
 fn family(name: &str) -> Option<&'static str> {
     if name.is_empty() {
@@ -283,6 +341,22 @@ fn family(name: &str) -> Option<&'static str> {
     }
     let found = {
         let mut fonts = iced::advanced::graphics::text::font_system().write().ok()?;
+        if name.eq_ignore_ascii_case(SWISS_CONDENSED) {
+            if let Some(bytes) = swiss_condensed() { fonts.load_font(std::borrow::Cow::Borrowed(bytes)); }
+        }
+        if name.eq_ignore_ascii_case(ARIAL_NARROW) {
+            if let Some(bytes) = arial_narrow() { fonts.load_font(std::borrow::Cow::Borrowed(bytes)); }
+        }
+        if name.eq_ignore_ascii_case("Calibri") {
+            for bold in [false, true] {
+                if let Some(bytes) = calibri(bold) { fonts.load_font(std::borrow::Cow::Borrowed(bytes)); }
+            }
+        }
+        if name.eq_ignore_ascii_case("Segoe UI") {
+            for bold in [false, true] {
+                if let Some(bytes) = segoe_ui(bold) { fonts.load_font(std::borrow::Cow::Borrowed(bytes)); }
+            }
+        }
         let spelled = fonts.raw().db().faces().flat_map(|f| f.families.iter()).find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|(n, _)| n.clone());
         // a name lives as long as the app: the fonts of a file are few
         spelled.map(|n| &*Box::leak(n.into_boxed_str()))
