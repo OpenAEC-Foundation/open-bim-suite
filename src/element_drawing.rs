@@ -59,9 +59,10 @@ impl Member {
     }
 }
 
-/// Millimetres, whole.
+/// Millimetres, whole: a half is rounded up whichever side of it the sum of its coordinates
+/// fell (a brick 52.5 high is 53 in every row of the list).
 fn mm(metres: f64) -> i64 {
-    (metres * 1000.0).round() as i64
+    ((metres * 10_000.0).round() / 10.0).round() as i64
 }
 
 /// The drawings of `element` of `model`: for every prefab unit it is made of, in order from its
@@ -873,6 +874,8 @@ mod tests {
         assert!(texts[0].contains(" · 43 × 62.5 · 1:50"), "{texts:?}");
         let bricks: usize = texts.iter().filter(|t| t.contains(" × 100 × ")).map(|t| t.split(' ').next().unwrap().parse::<usize>().unwrap()).sum();
         assert!(bricks > 2500, "{bricks}");
+        // alike bricks on one line: whole ones and halves at the ends of every other course
+        assert_eq!(texts.iter().filter(|t| t.contains(" × 100 × ")).count(), 2, "{texts:?}");
         let values: Vec<i64> = d.dimensions.iter().map(|x| mm(x.value)).collect();
         assert!(values.iter().any(|v| *v >= 16000) && values.iter().any(|v| (2690..=2710).contains(v)), "{values:?}");
     }
