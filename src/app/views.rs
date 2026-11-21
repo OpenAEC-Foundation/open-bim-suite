@@ -450,7 +450,7 @@ impl App {
     /// The Views tab.
     pub(in crate::app) fn view_group_header(&self, p: Palette, key: &'static str, label: &str) -> Element<'static, Message> {
         let arrow = if self.collapsed_view_groups.contains(key) { "▸" } else { "▾" };
-        button(row![text(arrow).size(12), text(label.to_owned()).size(11).font(FONT_BOLD)].spacing(5).align_y(Center))
+        button(row![text(arrow).size(12), text(if key == "view-root" { label.to_owned() } else { label.to_uppercase() }).size(11).font(FONT_BOLD)].spacing(5).align_y(Center))
             .padding([3, 7]).width(Fill).style(move |_, state| p.row_button(state))
             .on_press(Message::ToggleViewGroup(key)).into()
     }

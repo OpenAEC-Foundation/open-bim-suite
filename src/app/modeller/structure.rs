@@ -795,13 +795,14 @@ mod tests {
         let short = SystemDef { start: DVec2::new(5.0, 0.0), end: DVec2::new(7.4, 0.0), height: 4.0, ..generic.clone() };
         app.add_element("Floor", app.work_plane().2, Shape::System(short.laid(&t).unwrap())).unwrap();
         let planks = planks(&app.modeller.model, &app.library, &path);
-        // the system lays the first in four equal planks, 20 mm of grout between them
+        // Standard-width planks retain the edge half-joints and a narrower closing plank.
         let first: Vec<&Plank> = planks.iter().filter(|p| p.floor == floor).collect();
         assert_eq!(first.len(), 4, "{planks:?}");
-        assert!(first.iter().all(|p| p.sizes == [5980, 1030, 200] && p.turned && p.mark == first[0].mark), "{planks:?}");
+        assert_eq!(first.iter().map(|p| p.sizes).collect::<Vec<_>>(), [[6000,1190,200],[6000,1180,200],[6000,1180,200],[6000,590,200]]);
+        assert!(first.iter().all(|p| p.turned) && first[1].mark == first[2].mark);
         let other: Vec<&Plank> = planks.iter().filter(|p| p.floor != floor).collect();
-        assert!(!other.is_empty() && other.iter().all(|p| p.sizes[0] == 3980 && p.mark != first[0].mark), "{planks:?}");
-        assert_eq!(planks.iter().map(|p| p.mark).max(), Some(2));
+        assert!(!other.is_empty() && other.iter().all(|p| p.sizes[0] == 4000 && p.mark != first[0].mark), "{planks:?}");
+        assert_eq!(planks.iter().map(|p| p.mark).max(), Some(4));
         // a wide-slab floor: its planks of 60 count, its joints and its topping do not
         let wide = app.library.system_type("system.wide-slab-200").unwrap().clone();
         let slab = SystemDef { start: DVec2::new(10.0, 0.0), end: DVec2::new(14.8, 0.0), ..generic.clone() };
@@ -815,7 +816,7 @@ mod tests {
         let listed = app.schedules.iter().find(|s| s.name == "Precast schedule").expect("the precast schedule");
         let number: usize = listed.rows.iter().map(|r| r.cells[6].as_deref().unwrap().parse::<usize>().unwrap()).sum();
         assert_eq!(number, planks.len());
-        assert_eq!(listed.rows.iter().map(|r| r.cells[1].as_deref().unwrap()).collect::<Vec<_>>(), ["P1", "P2", "P3"]);
+        assert_eq!(listed.rows.iter().map(|r| r.cells[1].as_deref().unwrap()).collect::<Vec<_>>(), (1..=planks.iter().map(|p| p.mark).max().unwrap()).map(|n| format!("P{n}")).collect::<Vec<_>>());
         assert!(listed.rows.iter().any(|r| r.elements == vec![floor.0]));
     }
 }

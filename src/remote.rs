@@ -1050,11 +1050,18 @@ impl App {
             "level": r.level,
             "parameters": Value::Object(r.extra.iter().map(|(k, v)| (k.clone(), json!(v))).collect()),
         })).collect();
-        let truncated = p.levels.len() > MAX_LIST || p.grids.len() > MAX_LIST || offset.saturating_add(rooms.len()) < p.rooms.len();
+        let authored = self.modeller.in_modeller && self.modeller.shown.is_some();
+        let (level_count, levels): (usize, Vec<Value>) = if authored {
+            let levels = self.document.levels();
+            (levels.len(), levels.iter().take(MAX_LIST).map(|l| json!({"name": l.name, "elevation": l.elevation})).collect())
+        } else {
+            (p.levels.len(), p.levels.iter().take(MAX_LIST).map(|(n,z)| json!({"name":n, "elevation":round(*z)})).collect())
+        };
+        let truncated = level_count > MAX_LIST || p.grids.len() > MAX_LIST || offset.saturating_add(rooms.len()) < p.rooms.len();
         Ok(json!({
             "info": Value::Object(p.info.iter().map(|(k, v)| (k.clone(), json!(v))).collect()),
-            "levels": p.levels.iter().take(MAX_LIST).map(|(n, z)| json!({ "name": n, "elevation": round(*z) })).collect::<Vec<_>>(),
-            "level_count": p.levels.len(),
+            "levels": levels,
+            "level_count": level_count,
             "phases": p.phases,
             "grids": p.grids.iter().take(MAX_LIST).map(|g| json!({ "name": g.name, "a": g.a, "b": g.b })).collect::<Vec<_>>(),
             "grid_count": p.grids.len(),
