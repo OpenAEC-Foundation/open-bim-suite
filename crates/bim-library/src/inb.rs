@@ -137,10 +137,11 @@ mod tests {
         let mut project = Library::starter();
         let before = (project.materials.len(), project.buildups.len(), project.linear_types.len());
         let added = project.merge(&library());
-        // seven materials, 72 planar types and 16 linear types (the two piles among them),
-        // whatever the starter has like them
-        assert_eq!(added, 7 + 72 + 16);
-        assert_eq!((project.materials.len(), project.buildups.len(), project.linear_types.len()), (before.0 + 7, before.1 + 72, before.2 + 16));
+        // four materials (the general library has precast concrete, EPS and glass wool under the
+        // same keys), 72 planar types and 16 linear types (the two piles among them), whatever
+        // the starter has like them
+        assert_eq!(added, 4 + 72 + 16);
+        assert_eq!((project.materials.len(), project.buildups.len(), project.linear_types.len()), (before.0 + 4, before.1 + 72, before.2 + 16));
         assert_eq!(project.name("inb.floor.kpv_200", Lang::En).as_deref(), Some("kpv_200"));
         // a second time adds nothing
         assert_eq!(project.merge(&library()), 0);

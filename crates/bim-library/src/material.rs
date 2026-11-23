@@ -218,8 +218,92 @@ fn starter_sign(key: &str) -> Option<&'static str> {
         "plywood" => "openaec-16-plywood",
         "glass" => "openaec-29",
         "screed" => "openaec-10",
+        // the kinds a model taken over from another program usually has (see `common`)
+        "precast-concrete" => "openaec-6",
+        "concrete-block" | "aerated-concrete" => "openaec-3",
+        "natural-stone" => "openaec-9",
+        "ceramic-tile" | "plaster" | "carpet" | "linoleum" | "laminate" => "openaec-10",
+        "hardwood" => "openaec-13",
+        "parquet" => "openaec-12-oak",
+        "chipboard" | "fibre-cement" => "openaec-16",
+        "mdf" => "openaec-16-mdf",
+        "stainless-steel" | "cast-iron" | "steel-deck" => "openaec-18",
+        "brass" => "openaec-19",
+        "lead" => "openaec-20",
+        "insulation-eps" => "openaec-17-eps",
+        "insulation-xps" => "openaec-17",
+        "glass-wool" => "openaec-17-glass-wool",
+        "epdm" | "bitumen" => "openaec-24",
+        "vinyl" | "rubber" | "plastic" | "polycarbonate" => "openaec-22",
+        "mirror" => "openaec-29",
+        "sealant" => "openaec-23",
+        "earth" => "openaec-25-soil",
+        "asphalt" => "openaec-25-asphalt",
+        "sand" => "openaec-26",
+        "gravel" => "openaec-27",
+        "water" => "openaec-28",
         _ => return None,
     })
+}
+
+/// The kinds of material a model usually has beside the suite's own: what the material library
+/// of a modelling program such as Revit holds as its generic materials (masonry and stone,
+/// timber and boards, metals, insulation, membranes, finishes, plastics, and the ground of a
+/// site). The kinds are mirrored, not the content: the names, colours and hatches are the
+/// suite's own, by its own rules, and nothing of another program's library is taken over. A
+/// project starts with them, so a model taken over finds a material of its kind.
+pub fn common() -> Vec<Material> {
+    use HatchKind::*;
+    let m = |key: &str, nl: &str, en: &str, de: &str, fr: &str, hatch, colour| Material { sign: starter_sign(key).map(str::to_string), ..Material::new(key, Names::new(nl, en, de, fr), hatch, colour) };
+    vec![
+        // masonry, stone and what is laid or spread on them
+        m("precast-concrete", "prefab beton", "precast concrete", "Betonfertigteil", "béton préfabriqué", Concrete, [190, 190, 186]),
+        m("concrete-block", "betonsteen", "concrete block", "Betonstein", "bloc de béton", SandLime, [170, 170, 166]),
+        m("aerated-concrete", "cellenbeton", "aerated concrete", "Porenbeton", "béton cellulaire", SandLime, [240, 240, 235]),
+        m("natural-stone", "natuursteen", "natural stone", "Naturstein", "pierre naturelle", Generic, [150, 150, 145]),
+        m("ceramic-tile", "keramische tegels", "ceramic tiles", "keramische Fliesen", "carrelage céramique", Generic, [235, 232, 225]),
+        m("plaster", "stucwerk", "plaster", "Putz", "enduit", Gypsum, [245, 243, 238]),
+        // timber and boards
+        m("hardwood", "hardhout", "hardwood", "Hartholz", "bois feuillu", Timber, [150, 100, 65]),
+        m("parquet", "parket", "wood flooring", "Parkett", "parquet", Timber, [190, 150, 100]),
+        m("chipboard", "spaanplaat", "chipboard", "Spanplatte", "panneau de particules", Timber, [200, 175, 130]),
+        m("mdf", "MDF", "MDF", "MDF", "MDF", Timber, [190, 160, 120]),
+        m("laminate", "laminaat", "laminate", "Laminat", "stratifié", Generic, [205, 185, 150]),
+        m("fibre-cement", "vezelcement", "fibre cement", "Faserzement", "fibres-ciment", Generic, [200, 200, 195]),
+        // metals
+        m("stainless-steel", "roestvast staal", "stainless steel", "Edelstahl", "acier inoxydable", Steel, [200, 205, 210]),
+        m("cast-iron", "gietijzer", "cast iron", "Gusseisen", "fonte", Steel, [90, 90, 95]),
+        m("steel-deck", "staalplaat", "steel deck", "Stahltrapezblech", "bac acier", Steel, [170, 175, 180]),
+        m("lead", "lood", "lead", "Blei", "plomb", Steel, [120, 125, 135]),
+        m("brass", "messing", "brass", "Messing", "laiton", Steel, [200, 170, 90]),
+        // insulation
+        m("insulation-eps", "isolatie EPS", "EPS insulation", "EPS-Dämmung", "isolant PSE", Insulation, [240, 240, 240]),
+        m("insulation-xps", "isolatie XPS", "XPS insulation", "XPS-Dämmung", "isolant XPS", Insulation, [200, 225, 240]),
+        m("glass-wool", "glaswol", "glass wool", "Glaswolle", "laine de verre", Insulation, [255, 245, 160]),
+        // membranes and what keeps water out
+        m("epdm", "EPDM", "EPDM", "EPDM", "EPDM", Generic, [50, 50, 55]),
+        m("bitumen", "bitumen", "bitumen", "Bitumen", "bitume", Generic, [40, 40, 40]),
+        m("damp-proof-course", "waterkering", "damp-proof course", "Feuchtigkeitssperre", "barrière d'étanchéité", Generic, [30, 30, 30]),
+        m("sealant", "kit", "sealant", "Dichtstoff", "mastic", Generic, [110, 110, 110]),
+        // finishes
+        m("carpet", "tapijt", "carpet", "Teppich", "moquette", Generic, [150, 140, 130]),
+        m("vinyl", "vinyl", "vinyl flooring", "Vinylbelag", "revêtement vinyle", Generic, [190, 190, 185]),
+        m("linoleum", "linoleum", "linoleum", "Linoleum", "linoléum", Generic, [170, 160, 140]),
+        m("rubber", "rubber", "rubber", "Gummi", "caoutchouc", Generic, [60, 60, 60]),
+        m("paint", "verf", "paint", "Anstrich", "peinture", Generic, [250, 250, 250]),
+        m("textile", "textiel", "textile", "Textil", "textile", Generic, [200, 190, 175]),
+        // plastics and glass
+        m("plastic", "kunststof", "plastic", "Kunststoff", "plastique", Generic, [225, 225, 225]),
+        m("polycarbonate", "polycarbonaat", "polycarbonate", "Polycarbonat", "polycarbonate", Generic, [215, 230, 240]),
+        m("mirror", "spiegel", "mirror", "Spiegel", "miroir", Generic, [200, 215, 225]),
+        // the ground of a site
+        m("earth", "grond", "earth", "Erdreich", "terre", Generic, [150, 115, 80]),
+        m("sand", "zand", "sand", "Sand", "sable", Generic, [225, 205, 155]),
+        m("gravel", "grind", "gravel", "Kies", "gravier", Generic, [170, 165, 155]),
+        m("asphalt", "asfalt", "asphalt", "Asphalt", "enrobé", Generic, [70, 70, 72]),
+        m("grass", "gras", "grass", "Rasen", "gazon", Generic, [120, 160, 90]),
+        m("water", "water", "water", "Wasser", "eau", Generic, [150, 195, 225]),
+    ]
 }
 
 /// The materials a library starts with: Open BIM Studio's.
@@ -325,4 +409,31 @@ mod tests {
         assert_eq!(concrete.colour_f64(), [185.0 / 255.0; 3]);
         assert_eq!(concrete.name(Lang::De), "Beton");
     }
+    #[test]
+    fn the_common_kinds_of_material_are_in_the_general_library_each_once() {
+        let common = common();
+        assert_eq!(common.len(), 39);
+        let library = crate::Library::starter();
+        assert_eq!(library.materials.len(), starter().len() + common.len());
+        let mut keys: Vec<&str> = library.materials.iter().map(|m| m.key.as_str()).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), library.materials.len(), "no key twice");
+        for m in &common {
+            // named in every language, lower case but for names that are codes
+            for lang in Lang::ALL {
+                assert!(!m.name(lang).trim().is_empty(), "{} in {lang:?}", m.key);
+            }
+            assert!(m.name(Lang::Nl).chars().next().is_some_and(|c| c.is_lowercase()) || m.name(Lang::Nl).chars().all(|c| !c.is_lowercase()), "{}", m.key);
+            // a sign it names is one the catalogue has
+            assert!(m.sign.is_none() || m.catalogue_hatch().is_some(), "{}: {:?}", m.key, m.sign);
+        }
+        // what a model taken over usually has is there: masonry, boards, metals, finishes, a site
+        for key in ["concrete-block", "natural-stone", "hardwood", "mdf", "stainless-steel", "insulation-eps", "epdm", "carpet", "paint", "plastic", "earth", "asphalt", "water"] {
+            assert!(library.material(key).is_some(), "{key}");
+        }
+        assert_eq!(library.material("natural-stone").and_then(|m| m.catalogue_hatch()).map(|h| h.sign), Some(9));
+        assert_eq!(library.material("paint").and_then(|m| m.sign.clone()), None);
+    }
+
 }
