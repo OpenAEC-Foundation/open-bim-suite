@@ -1762,6 +1762,8 @@
     "detail by the scale": "détail selon l'échelle",
     "show": "afficher",
     "hatched where cut": "hachuré là où il est coupé",
-    "Remove the view template": "Supprimer le gabarit de vue"
+    "Remove the view template": "Supprimer le gabarit de vue",
+    "as the library chooses": "comme la bibliothèque le choisit",
+    "Hatches by": "Hachures selon"
   }
 }

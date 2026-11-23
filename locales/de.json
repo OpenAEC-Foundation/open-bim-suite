@@ -1762,6 +1762,8 @@
     "detail by the scale": "Detail nach Maßstab",
     "show": "zeigen",
     "hatched where cut": "schraffiert, wo geschnitten",
-    "Remove the view template": "Ansichtsvorlage entfernen"
+    "Remove the view template": "Ansichtsvorlage entfernen",
+    "as the library chooses": "wie die Bibliothek wählt",
+    "Hatches by": "Schraffuren nach"
   }
 }

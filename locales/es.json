@@ -1762,6 +1762,8 @@
     "detail by the scale": "detalle según la escala",
     "show": "mostrar",
     "hatched where cut": "rayado donde se corta",
-    "Remove the view template": "Quitar la plantilla de vista"
+    "Remove the view template": "Quitar la plantilla de vista",
+    "as the library chooses": "como elige la biblioteca",
+    "Hatches by": "Rayados según"
   }
 }

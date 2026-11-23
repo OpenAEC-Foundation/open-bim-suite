@@ -1762,6 +1762,8 @@
     "detail by the scale": "szczegółowość według skali",
     "show": "pokaż",
     "hatched where cut": "kreskowane w miejscu przekroju",
-    "Remove the view template": "Usuń szablon widoku"
+    "Remove the view template": "Usuń szablon widoku",
+    "as the library chooses": "tak jak wybiera biblioteka",
+    "Hatches by": "Kreskowania według"
   }
 }
