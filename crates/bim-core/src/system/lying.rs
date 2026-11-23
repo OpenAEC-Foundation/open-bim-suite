@@ -294,7 +294,7 @@ mod tests {
 
     /// A floor of type `id`, `length` along x from the origin and `width` to its left, its top at 3.0.
     fn floor(length: f64, width: f64, id: &str) -> SystemDef {
-        let generic = SystemDef { start: DVec2::ZERO, end: DVec2::new(length, 0.0), base: 3.0, height: width, spacing: DVec2::new(1.5, 1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new() };
+        let generic = SystemDef { start: DVec2::ZERO, end: DVec2::new(length, 0.0), base: 3.0, height: width, spacing: DVec2::new(1.5, 1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), grid: None };
         generic.laid(Library::starter().system_type(id).unwrap()).unwrap()
     }
 

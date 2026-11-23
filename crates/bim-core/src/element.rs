@@ -534,6 +534,60 @@ pub struct SystemDef {
     /// measured from its line's start. Empty: the rectangle its line and its `height` make.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outline: Vec<DVec2>,
+    /// A curtain wall's own grid, once its lines were moved, added or taken away, or a bay got a
+    /// panel of its own (see [`OwnGrid`]); none: equal bays about `spacing`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid: Option<OwnGrid>,
+}
+
+/// The grid of a curtain wall that is its own, in place of equal bays: where its lines stand
+/// between its edges, and the bays whose panel is not the glass of the rest. It counts for a
+/// system with members on a stacked grid (a curtain wall); a framed or a bonded system keeps the
+/// grid of its type.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct OwnGrid {
+    /// The vertical lines between its ends: how far along from its start, ascending.
+    #[serde(default)]
+    pub along: Vec<f64>,
+    /// The horizontal lines between its foot and its head: how far up from its base, ascending.
+    #[serde(default)]
+    pub up: Vec<f64>,
+    /// The bays with a panel of their own: the column (from its start) and the row (from its
+    /// foot), and what fills it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub panels: Vec<(usize, usize, BayPanel)>,
+}
+
+/// What fills a bay of a curtain wall in place of its glass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BayPanel {
+    /// Nothing: the bay is open.
+    Open,
+    /// A closed panel, of what the members are made of.
+    Solid,
+}
+
+impl OwnGrid {
+    /// The equal grid of a face `length` by `height` in bays about `spacing`, as lines of its own.
+    pub fn equal(length: f64, height: f64, spacing: DVec2) -> Self {
+        let lines = |extent: f64, pitch: f64| {
+            let n = ((extent / pitch).round().clamp(1.0, 1e6)) as usize;
+            (1..n).map(|k| extent * k as f64 / n as f64).collect::<Vec<_>>()
+        };
+        Self { along: lines(length, spacing.x), up: lines(height, spacing.y), panels: Vec::new() }
+    }
+
+    /// What fills bay (`column`, `row`), when it is not glass.
+    pub fn panel(&self, column: usize, row: usize) -> Option<BayPanel> {
+        self.panels.iter().find(|(c, r, _)| (*c, *r) == (column, row)).map(|(_, _, p)| *p)
+    }
+
+    /// Its lines with the edges, along and up: from 0 to `length` and to `height`.
+    pub fn stops(&self, length: f64, height: f64) -> (Vec<f64>, Vec<f64>) {
+        let with = |lines: &[f64], extent: f64| std::iter::once(0.0).chain(lines.iter().copied()).chain(std::iter::once(extent)).collect::<Vec<_>>();
+        (with(&self.along, length), with(&self.up, height))
+    }
 }
 
 /// How a connection joins its members.
@@ -1363,7 +1417,7 @@ mod tests {
 
     #[test]
     fn a_system_fills_its_domain_with_members_and_panels() {
-        let s = SystemDef { start: DVec2::ZERO, end: DVec2::new(3.0, 0.0), base: 0.0, height: 3.0, spacing: DVec2::new(1.5, 1.5), member: DVec2::new(0.05, 0.15), panel: 0.03, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new() };
+        let s = SystemDef { start: DVec2::ZERO, end: DVec2::new(3.0, 0.0), base: 0.0, height: 3.0, spacing: DVec2::new(1.5, 1.5), member: DVec2::new(0.05, 0.15), panel: 0.03, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), grid: None };
         let parts = system_parts(&s).unwrap();
         let members = parts.iter().filter(|p| p.class == "IfcMember").count();
         let panels = parts.iter().filter(|p| p.class == "IfcPlate").count();

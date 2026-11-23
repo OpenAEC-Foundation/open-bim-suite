@@ -167,6 +167,8 @@ struct Face<'a> {
     framing: Option<Framing>,
     gauge: Option<Gauge>,
     panel: (f64, Option<&'a str>),
+    /// The system's own grid, on a face with members on a stacked grid.
+    own: Option<&'a crate::element::OwnGrid>,
 }
 
 impl Face<'_> {
@@ -184,8 +186,26 @@ impl Face<'_> {
             let whole = |extent: f64, pitch: f64| count(((extent - LINEAR_TOLERANCE) / pitch).ceil());
             return (whole(length, self.spacing.x), whole(height, self.spacing.y), self.spacing.x, self.spacing.y);
         }
+        // lines of its own: as many bays as they make, and the narrowest of them
+        if let Some(own) = self.own {
+            let (us, vs) = own.stops(length, height);
+            let least = |stops: &[f64]| stops.windows(2).map(|p| p[1] - p[0]).fold(f64::INFINITY, f64::min);
+            return (us.len() - 1, vs.len() - 1, least(&us), least(&vs));
+        }
         let (bays, rows) = (count((length / self.spacing.x).round()), count((height / self.spacing.y).round()));
         (bays, rows, length / bays as f64, height / rows as f64)
+    }
+
+    /// Where its lines stand on a face `length` by `height`, the edges with them: its own, else
+    /// equal bays and rows.
+    fn stops(&self, length: f64, height: f64) -> (Vec<f64>, Vec<f64>) {
+        match self.own {
+            Some(own) => own.stops(length, height),
+            None => {
+                let (bays, rows, bay, row) = self.division(length, height);
+                ((0..=bays).map(|i| i as f64 * bay).collect(), (0..=rows).map(|j| j as f64 * row).collect())
+            }
+        }
     }
 
     /// At most how many parts it is generated as, with `openings` openings.
@@ -291,6 +311,8 @@ fn faces(s: &SystemDef) -> Vec<Face<'_>> {
         framing: t.and_then(|t| t.framing),
         gauge: t.and_then(|t| t.gauge),
         panel: (s.panel, t.map(|t| t.panel_material.as_str())),
+        // (a framed or a bonded face keeps the grid of its type)
+        own: s.grid.as_ref().filter(|_| !s.lies() && t.is_none_or(|t| t.framing.is_none() && t.pattern == Pattern::Stack)),
     };
     let layers = t.into_iter().flat_map(|t| &t.layers).map(|l| Face {
         offset: l.offset,
@@ -301,6 +323,7 @@ fn faces(s: &SystemDef) -> Vec<Face<'_>> {
         framing: l.members.as_ref().and_then(|m| m.framing),
         gauge: l.members.as_ref().and_then(|m| m.gauge),
         panel: (l.panels.thickness, Some(l.panels.material.as_str())),
+        own: None,
     });
     std::iter::once(own).chain(layers).collect()
 }
@@ -920,18 +943,20 @@ impl Line {
         let span = |edge: bool| if edge && mitred { (0.0, self.height) } else { (-w / 2.0, self.height + w / 2.0) };
         match f.pattern {
             Pattern::Stack => {
+                // with members the lines stand where the face has them (its own, or equal bays)
+                let (us, vs) = f.stops(self.length, self.height);
                 if let Some((size, _)) = f.member {
                     // the vertical members on every division along run through; the horizontal
                     // ones on every division up stop against them, a mitre at the corners
                     let mut verticals = Vec::with_capacity(bays + 1);
                     for i in 0..=bays {
                         let (from, to) = span(i == 0 || i == bays);
-                        pieces.push(self.vertical(f, size, i as f64 * bay, from, to)?);
+                        pieces.push(self.vertical(f, size, us[i], from, to)?);
                         verticals.push(pieces.len() - 1);
                     }
                     for i in 0..bays {
                         for j in 0..=rows {
-                            pieces.push(self.horizontal(f, size, j as f64 * row, i as f64 * bay, (i + 1) as f64 * bay)?);
+                            pieces.push(self.horizontal(f, size, vs[j], us[i], us[i + 1])?);
                             let h = pieces.len() - 1;
                             let edge_row = j == 0 || j == rows;
                             joins.push((if edge_row && i == 0 { corner } else { JoinKind::Butt }, verticals[i], h));
@@ -945,11 +970,21 @@ impl Line {
                         let whole = ((self.length - first - LINEAR_TOLERANCE) / bay).ceil().clamp(0.0, 1e12) as usize;
                         once((0.0, first)).chain((0..whole).map(|i| (first + i as f64 * bay, bay))).collect()
                     }
+                    None if f.member.is_some() => us.windows(2).map(|p| (p[0], p[1] - p[0])).collect(),
                     None => (0..bays).map(|i| (i as f64 * bay, bay)).collect(),
                 };
-                for (u, du) in columns {
+                for (i, (u, du)) in columns.into_iter().enumerate() {
                     for j in 0..rows {
-                        parts.extend(panel(u, j as f64 * row, du, row)?);
+                        let (v, dv) = if f.member.is_some() { (vs[j], vs[j + 1] - vs[j]) } else { (j as f64 * row, row) };
+                        // a bay with a panel of its own: open, or closed in the members' material
+                        match f.own.and_then(|own| own.panel(i, j)) {
+                            Some(crate::element::BayPanel::Open) => {}
+                            Some(crate::element::BayPanel::Solid) => {
+                                let material = f.member.and_then(|(_, m)| m).map(str::to_string);
+                                parts.extend(panel(u, v, du, dv)?.into_iter().map(|p| PartSolid { material: material.clone(), ..p }));
+                            }
+                            None => parts.extend(panel(u, v, du, dv)?),
+                        }
                     }
                 }
             }
@@ -1254,7 +1289,7 @@ mod tests {
     use super::*;
 
     fn system(length: f64, height: f64) -> SystemDef {
-        SystemDef { start: DVec2::ZERO, end: DVec2::new(length, 0.0), base: 0.0, height, spacing: DVec2::new(1.5, 1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new() }
+        SystemDef { start: DVec2::ZERO, end: DVec2::new(length, 0.0), base: 0.0, height, spacing: DVec2::new(1.5, 1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), grid: None }
     }
 
     fn typed(length: f64, height: f64, id: &str) -> SystemDef {
@@ -1805,6 +1840,39 @@ mod tests {
         let volume: f64 = parts.iter().filter(|p| p.class == "IfcMember").map(|p| p.solid.volume()).sum();
         let middle = (3.0 - w) * w * depth;
         assert!((volume - (ring(3.0, 3.0, w, depth) + middle)).abs() < 1e-9, "{volume}");
+    }
+
+    #[test]
+    fn a_curtain_wall_with_lines_of_its_own_has_its_members_there_and_bays_of_their_own() {
+        use crate::element::{BayPanel, OwnGrid};
+        // 6 by 3 in bays of 1.5: three lines along, one up, as lines of its own
+        let plain = system(6.0, 3.0);
+        let equal = OwnGrid::equal(6.0, 3.0, plain.spacing);
+        assert_eq!((equal.along.clone(), equal.up.clone()), (vec![1.5, 3.0, 4.5], vec![1.5]));
+        let same = SystemDef { grid: Some(equal.clone()), ..plain.clone() };
+        let volume = |s: &SystemDef| parts(s).unwrap().iter().map(|p| p.solid.volume()).sum::<f64>();
+        assert_eq!(parts(&same).unwrap().len(), parts(&plain).unwrap().len());
+        assert!((volume(&same) - volume(&plain)).abs() < 1e-9);
+        // a line moved, one taken away and one added: the members stand on them
+        let own = OwnGrid { along: vec![1.0, 4.5], up: vec![1.0, 2.0], panels: vec![(0, 0, BayPanel::Open), (1, 1, BayPanel::Solid)] };
+        let made = parts(&SystemDef { grid: Some(own.clone()), ..plain.clone() }).unwrap();
+        let members: Vec<_> = made.iter().filter(|p| p.class == "IfcMember").collect();
+        let panels: Vec<_> = made.iter().filter(|p| p.class == "IfcPlate").collect();
+        // four vertical lines and three bays of four horizontal ones; nine bays less the open one
+        assert_eq!((members.len(), panels.len()), (4 + 3 * 4, 9 - 1));
+        let at = |x: f64| members.iter().any(|m| {
+            let (lo, hi) = m.solid.bounds();
+            (lo.x + hi.x) / 2.0 - x < 1e-9 && ((lo.x + hi.x) / 2.0 - x).abs() < 1e-9 && hi.z - lo.z > 2.9
+        });
+        assert!(at(1.0) && at(4.5) && !at(1.5) && !at(3.0));
+        // lines out of order or closer than a member is wide are refused
+        let bad = |along: Vec<f64>| parts(&SystemDef { grid: Some(OwnGrid { along, ..own.clone() }), ..plain.clone() });
+        assert_eq!(bad(vec![4.5, 1.0]).err(), Some(Refusal::NotPositive));
+        assert_eq!(bad(vec![1.0, 1.03]).err(), Some(Refusal::NotPositive));
+        assert_eq!(bad(vec![1.0, 6.5]).err(), Some(Refusal::NotPositive));
+        // and it is kept in the file
+        let s = SystemDef { grid: Some(own), ..plain };
+        assert_eq!(serde_json::from_str::<SystemDef>(&serde_json::to_string(&s).unwrap()).unwrap(), s);
     }
 
     #[test]

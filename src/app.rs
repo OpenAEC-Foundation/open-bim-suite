@@ -922,6 +922,12 @@ pub enum Message {
     ToolDigit(char),
     /// The series field of the picked grid line.
     GridSeries(modeller::grids::SeriesMessage),
+    /// A tool on the grid of curtain walls: on, or off when it is on.
+    CurtainTool(modeller::curtain::CurtainTool),
+    /// Grid line `index` of the selected curtain wall goes: an upright one (true) or a level one.
+    RemoveGridLine(bool, usize),
+    /// The selected curtain wall gets its equal grid back.
+    EqualGrid,
     /// The angle typed for the turn under way (degrees), and Enter: the turn is made by it.
     TurnTyped(String),
     TurnApply,
@@ -2244,6 +2250,9 @@ impl App {
                 self.tool_digit(c);
             }
             Message::GridSeries(message) => self.series_message(message),
+            Message::CurtainTool(tool) => self.toggle_curtain_tool(tool),
+            Message::RemoveGridLine(upright, index) => self.remove_grid_line(upright, index),
+            Message::EqualGrid => self.equal_grid(),
             Message::TurnTyped(typed) => self.modeller.turn_typed = typed,
             Message::TurnApply => self.turn_by_typed(),
             Message::SnapToggle(snap) => self.modeller.snaps.toggle(snap),
@@ -3330,6 +3339,9 @@ impl App {
         }
         if self.modeller.grid_tool {
             return self.grid_click(x, y, width, height);
+        }
+        if self.modeller.curtain.is_some() {
+            return self.curtain_click(x, y, width, height, add);
         }
         if self.modeller.tool.is_some() {
             return self.model_click(x, y, width, height);
@@ -4679,6 +4691,8 @@ impl App {
         });
         let editing = self.modeller.edit.as_ref().and_then(|e| Some((e, self.modeller.model.get(e.element)?)));
         let banner = if let Some(hint) = self.grab_hint(l) {
+            Some(hint)
+        } else if let Some(hint) = self.curtain_hint(l) {
             Some(hint)
         } else if let Some(hint) = self.sketch_hint(l) {
             Some(hint)

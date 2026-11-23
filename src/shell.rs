@@ -1483,6 +1483,10 @@ impl Studio {
                 .shortcut(key('t'))
                 .enabled(app.collab.clash.is_some() || app.collab.open_group.is_some()),
         ]);
+        // the grid of curtain walls: a line added or taken away, a bay's panel
+        list.extend(crate::app::modeller::curtain::CurtainTool::ALL.map(|tool| {
+            Command::new(tool.id(), tool.label(l), go(Message::CurtainTool(tool))).icon(small(tool.icon()), large(tool.icon())).mode(app.modeller.curtain == Some(tool)).enabled(loaded)
+        }));
         // move, copy, turn and mirror what is selected
         list.extend(crate::app::transform::TransformKind::ALL.map(|kind| {
             Command::new(kind.id(), kind.label(l), go(Message::Transform(kind)))
@@ -2613,7 +2617,7 @@ impl Studio {
                 (l.text("Stramien", "Grid"), vec![large("project.grid"), large("project.level")]),
                 (l.text("Vlak", "Planar"), vec![large("model.wall"), large("model.slab")]),
                 (l.text("Lijnvormig", "Linear"), vec![large("model.column"), large("model.beam")]),
-                (l.text("Systeem", "System"), vec![large("model.system")]),
+                (l.text("Systeem", "System"), vec![large("model.system"), smalls(&["model.curtain-line", "model.curtain-panel"])]),
                 (l.text("Puntvormig", "Point"), vec![large("model.point")]),
                 (l.text("Openingen", "Openings"), vec![large("model.door"), large("model.window")]),
                 (l.text("Verbinding", "Connection"), vec![smalls(&["model.butt", "model.mitre", "model.cut"]), smalls(&["model.end-plate", "model.apart"])]),

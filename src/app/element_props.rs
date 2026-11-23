@@ -55,6 +55,10 @@ pub enum ElementField {
     /// A joint between two prefab units of a timber frame that the user asked for: how far from
     /// the frame's start it lies.
     Break(usize),
+    /// A grid line of a curtain wall's own grid: an upright one's distance from its start, a
+    /// level one's height above its base.
+    GridAlong(usize),
+    GridUp(usize),
     /// An end plate's thickness, its margin past the profile, its bolts' and holes' diameter, and
     /// how many bolts in each row.
     PlateThickness,
@@ -129,6 +133,8 @@ fn value(shape: &Shape, field: ElementField) -> Option<f64> {
         (Shape::System(s), F::OpeningKings(i)) => opening(&s.openings, i).map(|o| f64::from(o.studs_beside().0)),
         (Shape::System(s), F::OpeningTrimmers(i)) => opening(&s.openings, i).map(|o| f64::from(o.studs_beside().1)),
         (Shape::System(s), F::Break(i)) => s.breaks.get(i).copied(),
+        (Shape::System(s), F::GridAlong(i)) => s.grid.as_ref()?.along.get(i).copied(),
+        (Shape::System(s), F::GridUp(i)) => s.grid.as_ref()?.up.get(i).copied(),
         (Shape::Connection(ConnectionDef { kind: ConnectionKind::FinPlate(e), .. }), f) => match f {
             F::PlateThickness => Some(e.thickness),
             F::PlateMargin => Some(e.edge),
@@ -224,6 +230,8 @@ fn with_value(shape: &Shape, field: ElementField, v: f64) -> Option<Shape> {
         (Shape::System(s), F::OpeningKings(i)) if v == 1.0 || v == 2.0 => s.openings.get_mut(i)?.framing.get_or_insert_with(Default::default).kings = Some(v as u8).filter(|n| *n > 1),
         (Shape::System(s), F::OpeningTrimmers(i)) if v == 1.0 || v == 2.0 => s.openings.get_mut(i)?.framing.get_or_insert_with(Default::default).trimmers = Some(v as u8).filter(|n| *n > 1),
         (Shape::System(s), F::Break(i)) => set(s.breaks.get_mut(i)?),
+        (Shape::System(s), F::GridAlong(i)) => set(s.grid.as_mut()?.along.get_mut(i)?),
+        (Shape::System(s), F::GridUp(i)) => set(s.grid.as_mut()?.up.get_mut(i)?),
         (Shape::Connection(ConnectionDef { kind: ConnectionKind::FinPlate(e), .. }), f) => match f {
             F::PlateThickness => set(&mut e.thickness),
             F::PlateMargin => set(&mut e.edge),
@@ -429,7 +437,7 @@ impl App {
     }
 
     /// Gives element `e` a new definition (scene coordinates), if the kernel can make it.
-    fn change_shape(&mut self, e: &Element, shape: Shape) {
+    pub(super) fn change_shape(&mut self, e: &Element, shape: Shape) {
         let grid = self.modeller.model.grid;
         let mut changed = e.reshaped(&grid, shape);
         changed.id = e.id;
@@ -655,6 +663,23 @@ impl App {
             let add = |label: &str, door: bool| a11y::named(button(text(label.to_string()).size(12)).padding([3, 10]).style(move |_, s| p.row_button(s)).on_press(Message::AddOpening(door)), a11y::Role::Button, label);
             rows = rows.push(row![add(l.text("Deur toevoegen", "Add door"), true), add(l.text("Raam toevoegen", "Add window"), false)].spacing(6));
         }
+        // a curtain wall with a grid of its own: its lines, each typed where it stands or removed
+        if let Shape::System(s) = &shape {
+            if let Some(own) = s.grid.as_ref().filter(|_| super::modeller::curtain::has_grid(s)) {
+                let small = |label: &'static str, message: Message| a11y::named(button(text(label).size(11)).padding([2, 8]).style(move |_, s| p.row_button(s)).on_press(message), a11y::Role::Button, label);
+                for i in 0..own.along.len() {
+                    rows = rows
+                        .push(row![text(format!("{} {}", l.text("Staande rasterlijn", "Upright grid line"), i + 1)).size(12).width(Length::Fill), small(l.text("Verwijderen", "Remove"), Message::RemoveGridLine(true, i))].align_y(Center))
+                        .push(field(l.text("Vanaf begin (m)", "From start (m)"), F::GridAlong(i)));
+                }
+                for i in 0..own.up.len() {
+                    rows = rows
+                        .push(row![text(format!("{} {}", l.text("Liggende rasterlijn", "Level grid line"), i + 1)).size(12).width(Length::Fill), small(l.text("Verwijderen", "Remove"), Message::RemoveGridLine(false, i))].align_y(Center))
+                        .push(field(l.text("Boven de voet (m)", "Above its foot (m)"), F::GridUp(i)));
+                }
+                rows = rows.push(small(l.text("Gelijke vakken", "Equal bays"), Message::EqualGrid));
+            }
+        }
         // a timber frame: the joints between its prefab units that were asked for
         if let Shape::System(s) = &shape {
             if s.system_type.as_ref().is_some_and(|t| t.framing.is_some()) {
@@ -834,7 +859,7 @@ mod tests {
         use bim_core::SystemDef;
         let mut app = App::default();
         app.new_model("Level 0");
-        let s = SystemDef { start: DVec2::ZERO, end: DVec2::new(5.0, 0.0), base: 0.0, height: 2.7, spacing: DVec2::splat(1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new() };
+        let s = SystemDef { start: DVec2::ZERO, end: DVec2::new(5.0, 0.0), base: 0.0, height: 2.7, spacing: DVec2::splat(1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), grid: None };
         let id = app.add_element("Curtain wall", None, Shape::System(s)).unwrap();
         app.select_modelled(id);
         let system = |app: &App| match app.modeller.model.get(id).unwrap().shape_in_project(&app.modeller.model.grid) {
@@ -878,7 +903,7 @@ mod tests {
         let mut app = App::default();
         app.new_model("Level 0");
         let frame = |app: &App, start: DVec2, end: DVec2, id: &str| {
-            let s = SystemDef { start, end, base: 0.0, height: 2.7, spacing: DVec2::splat(1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new() };
+            let s = SystemDef { start, end, base: 0.0, height: 2.7, spacing: DVec2::splat(1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), grid: None };
             Shape::System(s.typed_from(&app.library, id).unwrap())
         };
         let outer = frame(&app, DVec2::ZERO, DVec2::new(4.8, 0.0), "system.timber-frame-140");
@@ -927,7 +952,7 @@ mod tests {
         let mut app = App::default();
         app.new_model("Level 0");
         let frame = |app: &App, start: DVec2, end: DVec2| {
-            let s = SystemDef { start, end, base: 0.0, height: 2.7, spacing: DVec2::splat(1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new() };
+            let s = SystemDef { start, end, base: 0.0, height: 2.7, spacing: DVec2::splat(1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), grid: None };
             Shape::System(s.typed_from(&app.library, "system.timber-frame-140").unwrap())
         };
         let (long, short) = (frame(&app, DVec2::ZERO, DVec2::new(4.8, 0.0)), frame(&app, DVec2::new(4.8, 0.0), DVec2::new(4.8, 3.0)));
@@ -1011,7 +1036,7 @@ mod tests {
         let mut app = App::default();
         app.new_model("Level 0");
         let window = Opening { along: 1.2, sill: 0.9, width: 1.2, height: 1.2, framing: None };
-        let generic = bim_core::SystemDef { start: DVec2::ZERO, end: DVec2::new(7.2, 0.0), base: 0.0, height: 2.7, spacing: DVec2::new(1.5, 1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: vec![window], breaks: Vec::new(), outline: Vec::new() };
+        let generic = bim_core::SystemDef { start: DVec2::ZERO, end: DVec2::new(7.2, 0.0), base: 0.0, height: 2.7, spacing: DVec2::new(1.5, 1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: vec![window], breaks: Vec::new(), outline: Vec::new(), grid: None };
         let frame = generic.typed_from(&bim_library::Library::starter(), "system.timber-frame-140").unwrap();
         app.add_element("Frame", None, Shape::System(frame)).unwrap();
         app.select_modelled(ElementId(1));
@@ -1072,7 +1097,7 @@ mod tests {
         use crate::app::transform::{transformed, Map};
         let mut app = App::default();
         app.new_model("Level 0");
-        let generic = bim_core::SystemDef { start: DVec2::ZERO, end: DVec2::new(4.8, 0.0), base: 3.0, height: 6.0, spacing: DVec2::splat(1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new() };
+        let generic = bim_core::SystemDef { start: DVec2::ZERO, end: DVec2::new(4.8, 0.0), base: 3.0, height: 6.0, spacing: DVec2::splat(1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), grid: None };
         let floor = generic.laid(app.library.system_type("system.hollow-core-200").unwrap()).unwrap();
         let id = app.add_element("Floor", None, Shape::System(floor)).unwrap();
         app.select_modelled(id);
