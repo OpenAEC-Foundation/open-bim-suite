@@ -1831,6 +1831,16 @@
     "Level of detail of the project": "Nível de detalhe do projeto",
     "design element: the outline alone": "elemento de projeto: só o contorno",
     "as it is built: layers, parts and hatches": "tal como é construído: camadas, peças e tramas",
-    "everything there is: every part and all the data": "tudo o que há: cada peça e todos os dados"
+    "everything there is: every part and all the data": "tudo o que há: cada peça e todos os dados",
+    "Line patterns": "Padrões de linha",
+    "+ Line pattern": "+ Padrão de linha",
+    "Line pattern": "Padrão de linha",
+    "Line weight": "Espessura de linha",
+    "At a scale": "Por escala",
+    "Another width at a scale: 100=0.35 200=0.25. Empty is the same width at every scale.": "Outra largura numa escala: 100=0.35 200=0.25. Vazio é a mesma largura em todas as escalas.",
+    "A colour as #rrggbb. Empty is the colour of what is drawn.": "Uma cor como #rrggbb. Vazio é a cor do que é desenhado.",
+    "Read AutoCAD linetypes (.lin)": "Ler tipos de linha do AutoCAD (.lin)",
+    "Save as AutoCAD linetypes (.lin)": "Guardar como tipos de linha do AutoCAD (.lin)",
+    "AutoCAD linetypes": "Tipos de linha do AutoCAD"
   }
 }
