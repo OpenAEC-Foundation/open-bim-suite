@@ -952,6 +952,15 @@ impl App {
             return container(text(l.text("Dit staat niet meer in de bibliotheek.", "This is no longer in the library.")).size(12).color(p.text_muted)).padding(8).into();
         };
         let mut pane = column![text(name).size(14).font(FONT_BOLD).color(p.text).wrapping(Wrapping::Word), detail].spacing(10);
+        // what else is known of it: its costs and its other aspects, each with its source
+        let node = match item {
+            Item::Material(shelf, key) => Some((self.shelf(*shelf), bim_library::ifcx::material_path(key))),
+            Item::BuildUp(shelf, id) => Some((self.shelf(*shelf), bim_library::ifcx::buildup_path(id))),
+            _ => None,
+        };
+        if let Some((library, path)) = node {
+            pane = pane.extend(aspects_detail(p, l, library, &path));
+        }
         if let Some((label, message)) = copy {
             pane = pane.push(button(text(label).size(12)).padding([5, 10]).style(move |_, s| p.primary_button(s)).on_press(message));
         }
@@ -1407,6 +1416,41 @@ fn component_about(c: bim_library::component::Item<'_>) -> String {
 }
 
 /// A component on a tile: the shape of its drawing (its width to its height) and its IFC class.
+/// The aspects of the item at `path`: the costs with the price, its parts and its index, any
+/// other with its properties, and each with its source, its day and its region.
+fn aspects_detail<'a>(p: Palette, l: Language, library: &Library, path: &str) -> Vec<Element<'a, Message>> {
+    use bim_library::aspect::Kind;
+    let small = |s: String| -> Element<'a, Message> { text(s).size(11).color(p.text_secondary).wrapping(Wrapping::WordOrGlyph).into() };
+    let mut out: Vec<Element<'a, Message>> = Vec::new();
+    for aspect in library.aspects_of(path) {
+        let (nl, en) = aspect.kind.names();
+        let mut lines = Column::new().spacing(2).push(text(l.text(nl, en)).size(12).color(p.text));
+        match (aspect.kind, bim_library::cost::Cost::of(aspect)) {
+            (Kind::Cost, Ok(cost)) => {
+                lines = lines.push(text(cost.label()).size(12).color(p.text));
+                let parts: Vec<String> = cost.parts().map(|(resource, price)| format!("{} {price:.2}", l.text(resource.names().0, resource.names().1))).collect();
+                lines = lines.push(small(parts.join(" · ")));
+                if let Some(index) = &cost.index {
+                    lines = lines.push(small(format!("{} {}", index.name, index.value)));
+                }
+                if !cost.verified {
+                    lines = lines.push(small(l.text("Niet gecontroleerd: een richtprijs.", "Not verified: a reference price.").to_string()));
+                }
+            }
+            _ => {
+                for (name, value) in &aspect.properties {
+                    let value = value.as_str().map_or_else(|| value.to_string(), str::to_string);
+                    lines = lines.push(small(format!("{name}: {value}")));
+                }
+            }
+        }
+        let origin = &aspect.origin;
+        lines = lines.push(small([Some(origin.source.as_str()), Some(origin.date.as_str()), origin.region.as_deref()].into_iter().flatten().collect::<Vec<_>>().join(" · ")));
+        out.push(lines.into());
+    }
+    out
+}
+
 /// The drawing itself is not in the library yet.
 fn component_look<'a>(p: Palette, c: bim_library::component::Item<'_>) -> Element<'a, Message> {
     let [w, h] = c.component.size.map(|v| v.max(1.0) as f32);
@@ -1709,6 +1753,28 @@ mod tests {
         let _ = app.libraries_update(LibrariesMessage::Source(Source::General));
         let general = app.category_code(l, Category::Planar(Role::Wall));
         assert!(matches!(general[0].1, Some(Message::Libraries(LibrariesMessage::Look(Item::BuildUp(Shelf::General, _))))));
+    }
+
+    #[test]
+    fn an_item_shows_its_costs_and_its_other_aspects_with_their_source() {
+        use bim_library::aspect::{Aspect, Kind, Origin};
+        use bim_library::cost::{Cost, Index, Unit};
+        let mut app = App::default();
+        let l = Language::English;
+        let palette = app.theme.palette();
+        let wall = app.library.buildups[0].id.clone();
+        let path = bim_library::ifcx::buildup_path(&wall);
+        let origin = Origin { source: "an offer".into(), date: "2026-03-12".into(), region: Some("NL".into()) };
+        let cost = Cost { unit: Unit::SquareMetre, currency: "EUR".into(), material: 48.0, labour: 31.5, index: Some(Index { name: "BDB".into(), value: 120.0 }), ..Cost::default() };
+        app.library.set_cost(&path, &cost, origin.clone()).unwrap();
+        app.library.set_aspect(Aspect { item: path, kind: Kind::Maker, origin, properties: [("gtin".to_string(), serde_json::json!("8712345678906"))].into() }).unwrap();
+        let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 1200.0), app.look_pane(palette, l, &Item::BuildUp(Shelf::Project, wall)));
+        assert!(pane.find("Costs").is_ok() && pane.find("79.50 EUR/m²").is_ok() && pane.find("material 48.00 · labour 31.50").is_ok() && pane.find("BDB 120").is_ok());
+        assert!(pane.find("Not verified: a reference price.").is_ok() && pane.find("Maker").is_ok() && pane.find("gtin: 8712345678906").is_ok());
+        // an item without aspects shows none
+        let key = app.library.materials[0].key.clone();
+        let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 1200.0), app.look_pane(palette, l, &Item::Material(Shelf::Project, key)));
+        assert!(pane.find("Costs").is_err());
     }
 
     #[test]

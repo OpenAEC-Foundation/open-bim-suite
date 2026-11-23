@@ -1743,6 +1743,16 @@
     "Levels of detail": "Níveis de detalhe",
     "Data per level of detail": "Dados por nível de detalhe",
     "data": "dados",
-    "Strength class": "Classe de resistência"
+    "Strength class": "Classe de resistência",
+    "Costs": "Custos",
+    "Environment": "Ambiente",
+    "Physics": "Física",
+    "Planning": "Planeamento",
+    "Maintenance": "Manutenção",
+    "labour": "mão de obra",
+    "equipment": "equipamento",
+    "subcontractor": "subempreiteiro",
+    "other": "outros",
+    "Not verified: a reference price.": "Não verificado: um preço de referência."
   }
 }

@@ -1743,6 +1743,16 @@
     "Levels of detail": "Detaillierungsgrade",
     "Data per level of detail": "Daten je Detaillierungsgrad",
     "data": "Daten",
-    "Strength class": "Festigkeitsklasse"
+    "Strength class": "Festigkeitsklasse",
+    "Costs": "Kosten",
+    "Environment": "Umwelt",
+    "Physics": "Bauphysik",
+    "Planning": "Planung",
+    "Maintenance": "Instandhaltung",
+    "labour": "Arbeit",
+    "equipment": "Gerät",
+    "subcontractor": "Nachunternehmer",
+    "other": "Sonstiges",
+    "Not verified: a reference price.": "Nicht geprüft: ein Richtpreis."
   }
 }

@@ -1743,6 +1743,16 @@
     "Levels of detail": "Detaljnivåer",
     "Data per level of detail": "Data per detaljnivå",
     "data": "data",
-    "Strength class": "Hållfasthetsklass"
+    "Strength class": "Hållfasthetsklass",
+    "Costs": "Kostnader",
+    "Environment": "Miljö",
+    "Physics": "Byggfysik",
+    "Planning": "Planering",
+    "Maintenance": "Underhåll",
+    "labour": "arbete",
+    "equipment": "utrustning",
+    "subcontractor": "underentreprenör",
+    "other": "övrigt",
+    "Not verified: a reference price.": "Inte kontrollerat: ett riktpris."
   }
 }

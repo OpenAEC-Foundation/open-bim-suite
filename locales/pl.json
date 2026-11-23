@@ -1743,6 +1743,16 @@
     "Levels of detail": "Poziomy szczegółowości",
     "Data per level of detail": "Dane według poziomu szczegółowości",
     "data": "dane",
-    "Strength class": "Klasa wytrzymałości"
+    "Strength class": "Klasa wytrzymałości",
+    "Costs": "Koszty",
+    "Environment": "Środowisko",
+    "Physics": "Fizyka",
+    "Planning": "Planowanie",
+    "Maintenance": "Utrzymanie",
+    "labour": "robocizna",
+    "equipment": "sprzęt",
+    "subcontractor": "podwykonawca",
+    "other": "inne",
+    "Not verified: a reference price.": "Niezweryfikowane: cena orientacyjna."
   }
 }

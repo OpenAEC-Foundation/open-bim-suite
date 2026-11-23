@@ -180,6 +180,8 @@ pub fn nodes(library: &Library) -> Vec<Value> {
     nodes.extend(library.codes.iter().map(nlsfb::code_node));
     nodes.extend(library.drawing_sets.iter().map(crate::annotate::node));
     nodes.extend(library.view_templates.iter().map(crate::template::node));
+    // the aspects last: each a node with its item's path, composed onto the item's own
+    nodes.extend(library.aspects.iter().map(crate::aspect::Aspect::node));
     nodes
 }
 
@@ -227,8 +229,14 @@ pub fn read(file: &Value) -> Result<Library, LibraryError> {
     let mut connection_types: Vec<crate::connection::ConnectionType> = Vec::new();
     let mut service_types: Vec<crate::service::ServiceType> = Vec::new();
     let mut cover_types: Vec<crate::service::CoverType> = Vec::new();
+    let mut aspects: Vec<crate::aspect::Aspect> = Vec::new();
     for path in order {
         let attributes = &composed[path];
+        for (name, value) in attributes {
+            if let Some(kind) = crate::aspect::Kind::of_attribute(name) {
+                aspects.push(crate::aspect::Aspect::read(path, kind, value)?);
+            }
+        }
         if let Some(own) = attributes.get(MATERIAL) {
             let material: Material = serde_json::from_value(own.clone()).map_err(|e| LibraryError::Unreadable(format!("material {path}: {e}")))?;
             library.add_material(material)?;
@@ -346,6 +354,12 @@ pub fn read(file: &Value) -> Result<Library, LibraryError> {
     }
     for c in cover_types {
         library.add_cover_type(c)?;
+    }
+    // an aspect on a node that is no item of the library (a material without the library's own
+    // data is one) is left out
+    let items = library.item_paths();
+    for a in aspects.into_iter().filter(|a| items.contains(&a.item)) {
+        library.set_aspect(a)?;
     }
     Ok(library)
 }
