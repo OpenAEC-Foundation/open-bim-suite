@@ -20,6 +20,8 @@ use std::sync::Arc;
 /// a slider at every move: what is typed or dragged there in one go is one step to take back.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum Typing {
+    /// The classes typed for a rule (its key) of a view template (its key).
+    ViewTemplateClasses(String, String),
     /// The fire rating typed for an object type (its id).
     ObjectRating(String),
     /// The fire rating typed for a system type (its id).
@@ -78,6 +80,7 @@ impl App {
             Message::Material(MaterialMessage::StandardNamed(_)) => Some(Typing::HatchStandard(self.library.hatch_standard()?.key.clone())),
             Message::Code(super::codes::CodeMessage::Named(lang, _)) => Some(Typing::CodeName(self.code_view.picked.clone()?, *lang)),
             Message::Connection(super::connections::ConnectionMessage::Typed(field, _)) => Some(Typing::Connection(self.connection_view.picked.clone()?, *field)),
+            Message::ViewTemplate(super::view_templates::ViewTemplateMessage::Classes(rule, _)) => Some(Typing::ViewTemplateClasses(self.view_template_view.picked.clone()?, rule.clone())),
             Message::ViewTemplate(super::view_templates::ViewTemplateMessage::Typed(field, _)) => Some(Typing::ViewTemplate(self.view_template_view.picked.clone()?, *field)),
             Message::DrawingSet(super::drawing_sets::DrawingSetMessage::Typed(field, _)) => Some(Typing::DrawingSet(self.drawing_set_view.picked.clone()?, field.clone())),
             Message::Service(super::services::ServiceMessage::Typed(super::services::Field::Cover, _)) => Some(Typing::Service(self.service_view.cover.clone()?, super::services::Field::Cover)),
