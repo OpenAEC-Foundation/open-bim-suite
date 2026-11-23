@@ -46,6 +46,8 @@ const DRAG_ROUND: f64 = 0.01;
 /// were when the drag began, and where on the work plane it began.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GridDrag {
+    /// The one the drag took hold of: it is the one that lands on a wall's line.
+    held: usize,
     indices: Vec<usize>,
     before: Vec<bim_core::GridDef>,
     origin: DVec2,
@@ -193,11 +195,15 @@ impl App {
                 return false;
             }
             let Some(origin) = self.plane_point(from.0, from.1, width, height, z) else { return false };
-            self.modeller.grid_drag = Some(GridDrag { indices, before: self.modeller.model.grids().to_vec(), origin: origin.truncate() });
+            let held = self.model.as_ref().and_then(|m| m.project.grids.get(under)).and_then(|line| self.modelled_grid_lines().iter().position(|g| g == line)).unwrap_or(indices[0]);
+            self.modeller.grid_drag = Some(GridDrag { held, indices, before: self.modeller.model.grids().to_vec(), origin: origin.truncate() });
         }
         let Some(drag) = self.modeller.grid_drag.clone() else { return false };
         if let Some(at) = self.plane_point(to.0, to.1, width, height, z) {
             let by = ((at.truncate() - drag.origin) / DRAG_ROUND).round() * DRAG_ROUND;
+            // near the axis or a side of a wall that runs its way (or the edge of a floor), the
+            // line held lands on it
+            let by = by + drag.before.get(drag.held).map_or(DVec2::ZERO, |line| self.onto_parallel(line, by, width, height, z));
             for &index in &drag.indices {
                 let Some(line) = drag.before.get(index).cloned() else { continue };
                 let _ = self.modeller.model.set_grid(index, bim_core::GridDef { start: line.start + by, end: line.end + by, ..line });
@@ -210,6 +216,30 @@ impl App {
             self.modeller.touched = true;
         }
         true
+    }
+
+    /// How much further grid line `line`, moved by `by`, goes to lie on the nearest line of an
+    /// element that runs its way: the axis or a side of a wall or a curtain wall, the edge of a
+    /// floor. Nothing when none is within the snap's reach on the screen.
+    fn onto_parallel(&self, line: &bim_core::GridDef, by: DVec2, width: f32, height: f32, z: f64) -> DVec2 {
+        let Some(along) = (line.end - line.start).try_normalize() else { return DVec2::ZERO };
+        let across = along.perp();
+        let at = (line.start + line.end) / 2.0 + by;
+        let mut best: Option<(f64, f32)> = None;
+        for (a, b, _) in self.outline_lines(bim_core::ElementId(0)) {
+            let Some(way) = (b - a).try_normalize() else { continue };
+            if way.perp_dot(along).abs() > 1e-6 {
+                continue;
+            }
+            // how far across the grid line's way that line lies from it, and that on the screen
+            let off = (a - at).dot(across);
+            let (Some(p), Some(q)) = (self.on_screen(at.extend(z), width, height), self.on_screen((at + across * off).extend(z), width, height)) else { continue };
+            let pixels = (p.0 - q.0).hypot(p.1 - q.1);
+            if pixels <= super::SNAP_PIXELS && best.is_none_or(|(_, least)| pixels < least) {
+                best = Some((off, pixels));
+            }
+        }
+        best.map_or(DVec2::ZERO, |(off, _)| across * off)
     }
 
     /// The middle of what the turn under way takes: of its grid lines, else of its elements'
@@ -577,6 +607,22 @@ mod tests {
         let _ = app.update(Message::Undo);
         assert_eq!(app.modeller.model.grids()[0].start.x, 2.0, "one step back");
         let _ = app.update(Message::Redo);
+        // dragged to near the side of a wall that runs its way, the line held lands on that side
+        use bim_core::element::PlanarForm;
+        let form = PlanarForm::Wall { start: DVec2::new(12.0, -1.0), end: DVec2::new(12.0, 8.0), base: 0.0, height: 3.0 };
+        app.add_element("Wall", None, Shape::Planar(bim_core::PlanarDef { form, thickness: 0.3, openings: Vec::new(), build_up: None })).unwrap();
+        app.set_picked_grids(vec![2]);
+        let (from, to) = (at(&app, 8.0, 3.0), at(&app, 11.6, 3.0));
+        for done in [false, true] {
+            let _ = app.update(Message::Navigate(Navigate::Box { x0: from.0, y0: from.1, x1: to.0, y1: to.1, width: w, height: h, done, add: false }));
+        }
+        assert!((app.modeller.model.grids()[2].start.x - 11.85).abs() < 1e-9, "{:?}", app.modeller.model.grids()[2]);
+        // and near its middle, on its axis
+        let (from, to) = (at(&app, 11.85, 3.0), at(&app, 12.04, 3.0));
+        for done in [false, true] {
+            let _ = app.update(Message::Navigate(Navigate::Box { x0: from.0, y0: from.1, x1: to.0, y1: to.1, width: w, height: h, done, add: false }));
+        }
+        assert!((app.modeller.model.grids()[2].start.x - 12.0).abs() < 1e-9, "{:?}", app.modeller.model.grids()[2]);
         // Delete takes both
         app.set_picked_grids(vec![0, 1]);
         let _ = app.update(Message::DeletePicked);
