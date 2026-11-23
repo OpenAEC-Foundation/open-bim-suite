@@ -19,8 +19,12 @@
 //!   one place to change when it has.
 //! - The source and the licence stand with every item ([`Item::source`], [`LICENCE`]).
 //!
-//! Not yet: the drawings themselves. The catalogue points at a component's DXF in Ocondat; a
-//! view cannot place one until the lines are read into the library.
+//! - The drawing of a component ([`drawing`], `data/ocondat-drawings.json`, made by
+//!   `tools/ocondat-components/drawings.py`) is its lines and arcs in millimetres, its lower left
+//!   corner at the origin. The drawings of at most 400 numbers are compiled in (1178 of 1307);
+//!   the larger ones stay in Ocondat, where the catalogue points at their DXF.
+//!
+//! Not yet: a view placing a component; hatches, texts and the larger drawings.
 
 use crate::material::Names;
 use crate::{nlsfb, uuid, Lang};
@@ -29,6 +33,105 @@ use serde_json::{json, Value};
 use std::sync::OnceLock;
 
 const CATALOGUE: &str = include_str!("../data/ocondat-components.json");
+const DRAWINGS: &str = include_str!("../data/ocondat-drawings.json");
+
+/// An arc of a drawing: its centre, its radius, and from where to where it runs, in degrees
+/// anticlockwise from the x axis. A circle runs from 0 to 360.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Arc {
+    pub centre: [f64; 2],
+    pub radius: f64,
+    pub from: f64,
+    pub to: f64,
+}
+
+/// The drawing of a component: its lines as runs of points, and its arcs, in millimetres.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Drawing {
+    pub lines: Vec<Vec<[f64; 2]>>,
+    pub arcs: Vec<Arc>,
+}
+
+impl Arc {
+    /// The angle it runs through, in degrees: above 0, at most 360.
+    pub fn sweep(&self) -> f64 {
+        let sweep = (self.to - self.from).rem_euclid(360.0);
+        if sweep == 0.0 {
+            360.0
+        } else {
+            sweep
+        }
+    }
+
+    /// The arc as a run of points, one every `step` degrees at most.
+    pub fn points(&self, step: f64) -> Vec<[f64; 2]> {
+        let sweep = self.sweep();
+        let parts = (sweep / step.max(1.0)).ceil().max(1.0) as usize;
+        (0..=parts)
+            .map(|k| {
+                let angle = (self.from + sweep * k as f64 / parts as f64).to_radians();
+                [self.centre[0] + self.radius * angle.cos(), self.centre[1] + self.radius * angle.sin()]
+            })
+            .collect()
+    }
+}
+
+impl Drawing {
+    /// Every line of it as a run of points, its arcs drawn as runs with a point every `step`
+    /// degrees at most.
+    pub fn runs(&self, step: f64) -> Vec<Vec<[f64; 2]>> {
+        self.lines.iter().cloned().chain(self.arcs.iter().map(|arc| arc.points(step))).collect()
+    }
+
+    /// The size of what it draws: the largest x and y of its lines and of its arcs' circles.
+    pub fn size(&self) -> [f64; 2] {
+        let mut size = [0.0f64; 2];
+        for p in self.lines.iter().flatten() {
+            size = [size[0].max(p[0]), size[1].max(p[1])];
+        }
+        for arc in &self.arcs {
+            for p in arc.points(15.0) {
+                size = [size[0].max(p[0]), size[1].max(p[1])];
+            }
+        }
+        size
+    }
+}
+
+#[derive(Deserialize)]
+struct DrawingFile {
+    drawings: std::collections::HashMap<String, RawDrawing>,
+    left_out: usize,
+}
+
+#[derive(Deserialize)]
+struct RawDrawing {
+    lines: Vec<Vec<f64>>,
+    #[serde(default)]
+    arcs: Vec<[f64; 5]>,
+}
+
+fn drawings() -> &'static (std::collections::HashMap<String, Drawing>, usize) {
+    static READ: OnceLock<(std::collections::HashMap<String, Drawing>, usize)> = OnceLock::new();
+    READ.get_or_init(|| {
+        let file: DrawingFile = serde_json::from_str(DRAWINGS).expect("the drawings are compiled in");
+        let read = |raw: RawDrawing| Drawing {
+            lines: raw.lines.iter().map(|line| line.chunks_exact(2).map(|p| [p[0], p[1]]).collect()).collect(),
+            arcs: raw.arcs.iter().map(|&[x, y, radius, from, to]| Arc { centre: [x, y], radius, from, to }).collect(),
+        };
+        (file.drawings.into_iter().map(|(id, raw)| (id, read(raw))).collect(), file.left_out)
+    })
+}
+
+/// The drawing of the component `id`, where it is compiled in.
+pub fn drawing(id: &str) -> Option<&'static Drawing> {
+    drawings().0.get(id)
+}
+
+/// How many components have a drawing compiled in, and how many were left out as too large.
+pub fn drawn() -> (usize, usize) {
+    (drawings().0.len(), drawings().1)
+}
 
 /// The attribute of a component's node with the component itself.
 pub const COMPONENT: &str = "openaec::component";
@@ -279,4 +382,37 @@ mod tests {
         paths.dedup();
         assert_eq!(paths.len(), 1307);
     }
+    #[test]
+    fn a_component_has_its_drawing_in_millimetres() {
+        let (have, left) = drawn();
+        assert_eq!((have, left), (1178, 128));
+        // every drawing is of a component of the catalogue, and has something to draw
+        for (id, d) in &drawings().0 {
+            assert!(item(id).is_some(), "{id}");
+            assert!(d.lines.iter().all(|line| line.len() >= 2) && (!d.lines.is_empty() || !d.arcs.is_empty()), "{id}");
+            assert!(d.lines.iter().flatten().all(|p| p[0] >= -0.05 && p[1] >= -0.05), "{id}: its corner is at the origin");
+            assert!(d.arcs.iter().all(|a| a.radius > 0.0 && a.sweep() > 0.0 && a.sweep() <= 360.0), "{id}");
+        }
+        // a concrete anchor M10: its axis and its two flanks, 145 by 10 mm as the catalogue says
+        let anchor = drawing("gen-betonanker-m10").expect("the anchor's drawing");
+        assert_eq!(anchor.lines, [vec![[0.0, 5.0], [145.0, 5.0]], vec![[35.0, 10.0], [125.0, 10.0], [135.0, 0.0]], vec![[35.0, 0.0], [125.0, 0.0], [135.0, 10.0]]]);
+        assert_eq!((anchor.size(), item("gen-betonanker-m10").unwrap().component.size), ([145.0, 10.0], [145.0, 10.0]));
+        assert!(drawing("no-such-component").is_none());
+        // most drawings are as large as the catalogue says their component is
+        let close = items().filter(|c| drawing(&c.component.id).is_some_and(|d| (d.size()[0] - c.component.size[0]).abs() <= 1.0 && (d.size()[1] - c.component.size[1]).abs() <= 1.0)).count();
+        assert!(close * 10 >= have * 8, "{close} of {have}");
+    }
+
+    #[test]
+    fn an_arc_is_a_run_of_points() {
+        let quarter = Arc { centre: [10.0, 10.0], radius: 10.0, from: 0.0, to: 90.0 };
+        let points = quarter.points(30.0);
+        assert_eq!((quarter.sweep(), points.len()), (90.0, 4));
+        assert!((points[0][0] - 20.0).abs() < 1e-9 && (points[0][1] - 10.0).abs() < 1e-9 && (points[3][0] - 10.0).abs() < 1e-9 && (points[3][1] - 20.0).abs() < 1e-9);
+        // across 0 degrees, and a whole circle
+        assert_eq!((Arc { from: 350.0, to: 10.0, ..quarter }.sweep(), Arc { from: 0.0, to: 360.0, ..quarter }.sweep(), Arc { from: 45.0, to: 45.0, ..quarter }.sweep()), (20.0, 360.0, 360.0));
+        let drawing = Drawing { lines: vec![vec![[0.0, 0.0], [5.0, 0.0]]], arcs: vec![quarter] };
+        assert_eq!((drawing.runs(30.0).len(), drawing.size()), (2, [20.0, 20.0]));
+    }
+
 }

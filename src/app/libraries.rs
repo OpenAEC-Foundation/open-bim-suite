@@ -405,7 +405,7 @@ pub struct Found {
 }
 
 /// The library every project starts with.
-fn general() -> &'static Library {
+pub(super) fn general() -> &'static Library {
     static GENERAL: OnceLock<Library> = OnceLock::new();
     GENERAL.get_or_init(Library::starter)
 }
@@ -568,6 +568,8 @@ impl App {
         let library = &self.library;
         let material = &mut self.material_view;
         (material.name, material.hex, material.in_use, material.from, material.standard) = (None, None, None, None, None);
+        (material.props, material.props_refused) = (None, None);
+        (material.price, material.price_refused) = (None, None);
         material.picked = material.picked.take().filter(|key| library.material(key).is_some());
         let buildup = &mut self.buildup_view;
         (buildup.draft, buildup.refused) = (None, None);
@@ -575,6 +577,12 @@ impl App {
         let profile = &mut self.profile_view;
         (profile.draft, profile.refused) = (None, None);
         profile.picked = profile.picked.take().filter(|id| library.linear_type(id).is_some());
+        self.view_template_view.typing = None;
+        self.view_template_view.classes = None;
+        self.view_template_view.picked = self.view_template_view.picked.take().filter(|key| self.libraries.source != Source::Project || library.view_template(key).is_some());
+        // (a drawing set's typed fields are its values again; one taken back is not picked)
+        self.drawing_set_view.typing = None;
+        self.drawing_set_view.picked = self.drawing_set_view.picked.take().filter(|key| self.libraries.source != Source::Project || library.drawing_set(key).is_some());
         let system = &mut self.system_view;
         (system.draft, system.refused) = (None, None);
         system.picked = system.picked.take().filter(|id| library.system_type(id).is_some());
@@ -606,7 +614,7 @@ impl App {
 
     /// The shelf of types the source shown has, if it has one: the general library, the Dutch
     /// template's, or the project's.
-    fn shown_shelf(&self) -> Option<Shelf> {
+    pub(super) fn shown_shelf(&self) -> Option<Shelf> {
         match (self.libraries.source, self.libraries.country) {
             (Source::General, _) => Some(Shelf::General),
             (Source::Country, Country::Netherlands) => Some(Shelf::Netherlands),
@@ -925,7 +933,7 @@ impl App {
         let lang = super::library::lang(l);
         let copy_label = l.text("Bewerk een kopie in het project", "Edit a copy in the project");
         let found: Option<(String, Element<'_, Message>, Option<(&'static str, Message)>)> = match item {
-            Item::Material(shelf, key) => self.shelf(*shelf).material(key).map(|m| (m.name(lang).to_string(), material_detail(p, m), Some((copy_label, Message::Material(MaterialMessage::Copy(*shelf, key.clone())))))),
+            Item::Material(shelf, key) => self.shelf(*shelf).material(key).map(|m| (m.name(lang).to_string(), material_detail(p, l, m), Some((copy_label, Message::Material(MaterialMessage::Copy(*shelf, key.clone())))))),
             Item::BuildUp(shelf, id) => {
                 let library = self.shelf(*shelf);
                 library.buildup(id).map(|b| (library.name(id, lang).unwrap_or_default(), buildup_detail(p, l, library, b), Some((copy_label, Message::BuildUp(BuildUpMessage::Copy(*shelf, id.clone()))))))
@@ -952,6 +960,15 @@ impl App {
             return container(text(l.text("Dit staat niet meer in de bibliotheek.", "This is no longer in the library.")).size(12).color(p.text_muted)).padding(8).into();
         };
         let mut pane = column![text(name).size(14).font(FONT_BOLD).color(p.text).wrapping(Wrapping::Word), detail].spacing(10);
+        // what else is known of it: its costs and its other aspects, each with its source
+        let node = match item {
+            Item::Material(shelf, key) => Some((self.shelf(*shelf), bim_library::ifcx::material_path(key))),
+            Item::BuildUp(shelf, id) => Some((self.shelf(*shelf), bim_library::ifcx::buildup_path(id))),
+            _ => None,
+        };
+        if let Some((library, path)) = node {
+            pane = pane.extend(aspects_detail(p, l, library, &path));
+        }
         if let Some((label, message)) = copy {
             pane = pane.push(button(text(label).size(12)).padding([5, 10]).style(move |_, s| p.primary_button(s)).on_press(message));
         }
@@ -1407,13 +1424,92 @@ fn component_about(c: bim_library::component::Item<'_>) -> String {
 }
 
 /// A component on a tile: the shape of its drawing (its width to its height) and its IFC class.
+/// The aspects of the item at `path`: the costs with the price, its parts and its index, any
+/// other with its properties, and each with its source, its day and its region.
+fn aspects_detail<'a>(p: Palette, l: Language, library: &Library, path: &str) -> Vec<Element<'a, Message>> {
+    use bim_library::aspect::Kind;
+    let small = |s: String| -> Element<'a, Message> { text(s).size(11).color(p.text_secondary).wrapping(Wrapping::WordOrGlyph).into() };
+    let mut out: Vec<Element<'a, Message>> = Vec::new();
+    for aspect in library.aspects_of(path) {
+        let (nl, en) = aspect.kind.names();
+        let mut lines = Column::new().spacing(2).push(text(l.text(nl, en)).size(12).color(p.text));
+        match (aspect.kind, bim_library::cost::Cost::of(aspect)) {
+            (Kind::Cost, Ok(cost)) => {
+                lines = lines.push(text(cost.label()).size(12).color(p.text));
+                let parts: Vec<String> = cost.parts().map(|(resource, price)| format!("{} {price:.2}", l.text(resource.names().0, resource.names().1))).collect();
+                lines = lines.push(small(parts.join(" · ")));
+                if let Some(index) = &cost.index {
+                    lines = lines.push(small(format!("{} {}", index.name, index.value)));
+                }
+                if !cost.verified {
+                    lines = lines.push(small(l.text("Niet gecontroleerd: een richtprijs.", "Not verified: a reference price.").to_string()));
+                }
+            }
+            _ => {
+                for (name, value) in &aspect.properties {
+                    let value = value.as_str().map_or_else(|| value.to_string(), str::to_string);
+                    lines = lines.push(small(format!("{name}: {value}")));
+                }
+            }
+        }
+        let origin = &aspect.origin;
+        lines = lines.push(small([Some(origin.source.as_str()), Some(origin.date.as_str()), origin.region.as_deref()].into_iter().flatten().collect::<Vec<_>>().join(" · ")));
+        out.push(lines.into());
+    }
+    out
+}
+
 /// The drawing itself is not in the library yet.
 fn component_look<'a>(p: Palette, c: bim_library::component::Item<'_>) -> Element<'a, Message> {
-    let [w, h] = c.component.size.map(|v| v.max(1.0) as f32);
-    let most = w.max(h);
-    let (w, h) = ((w / most * 64.0).max(3.0), (h / most * 48.0).max(3.0));
-    let frame = container(iced::widget::Space::new().width(w).height(h)).style(move |_| container::Style { border: iced::Border { color: p.text_secondary, width: 1.0, radius: 0.0.into() }, ..container::Style::default() });
-    column![frame, text(c.series.class.clone()).size(10).color(p.text_muted)].spacing(4).align_x(Center).into()
+    // its drawing where the library has it, else a frame of its size
+    let look: Element<'a, Message> = match bim_library::component::drawing(&c.component.id) {
+        Some(drawing) => canvas_widget(ComponentLook { runs: drawing.runs(12.0), size: drawing.size(), line: p.text }).width(Fill).height(52).into(),
+        None => {
+            let [w, h] = c.component.size.map(|v| v.max(1.0) as f32);
+            let most = w.max(h);
+            let (w, h) = ((w / most * 64.0).max(3.0), (h / most * 48.0).max(3.0));
+            container(iced::widget::Space::new().width(w).height(h)).style(move |_| container::Style { border: iced::Border { color: p.text_secondary, width: 1.0, radius: 0.0.into() }, ..container::Style::default() }).into()
+        }
+    };
+    column![look, text(c.series.class.clone()).size(10).color(p.text_muted)].spacing(4).align_x(Center).into()
+}
+
+/// The drawing of a component, fitted in its canvas with its proportions kept, y up.
+struct ComponentLook {
+    runs: Vec<Vec<[f64; 2]>>,
+    size: [f64; 2],
+    line: Color,
+}
+
+impl ComponentLook {
+    /// The points of its runs on a canvas of `bounds`: fitted with a margin of 3, centred, y down.
+    fn fitted(&self, bounds: Size) -> Vec<Vec<Point>> {
+        let (w, h) = (self.size[0].max(1e-6) as f32, self.size[1].max(1e-6) as f32);
+        let scale = ((bounds.width - 6.0) / w).min((bounds.height - 6.0) / h).max(0.0);
+        let (left, bottom) = ((bounds.width - w * scale) / 2.0, (bounds.height + h * scale) / 2.0);
+        self.runs.iter().map(|run| run.iter().map(|p| Point::new(left + p[0] as f32 * scale, bottom - p[1] as f32 * scale)).collect()).collect()
+    }
+}
+
+impl<M> canvas::Program<M> for ComponentLook {
+    type State = ();
+
+    fn draw(&self, _state: &(), renderer: &iced::Renderer, _theme: &iced::Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<canvas::Geometry> {
+        let mut frame = Frame::new(renderer, bounds.size());
+        for run in self.fitted(bounds.size()) {
+            let path = Path::new(|b| {
+                for (k, point) in run.iter().enumerate() {
+                    if k == 0 {
+                        b.move_to(*point);
+                    } else {
+                        b.line_to(*point);
+                    }
+                }
+            });
+            frame.stroke(&path, Stroke::default().with_color(self.line).with_width(1.0));
+        }
+        vec![frame.into_geometry()]
+    }
 }
 
 /// A component in the right pane: how it is categorised, its layer, and where it is from.
@@ -1709,6 +1805,92 @@ mod tests {
         let _ = app.libraries_update(LibrariesMessage::Source(Source::General));
         let general = app.category_code(l, Category::Planar(Role::Wall));
         assert!(matches!(general[0].1, Some(Message::Libraries(LibrariesMessage::Look(Item::BuildUp(Shelf::General, _))))));
+    }
+
+    #[test]
+    fn an_item_shows_its_costs_and_its_other_aspects_with_their_source() {
+        use bim_library::aspect::{Aspect, Kind, Origin};
+        use bim_library::cost::{Cost, Index, Unit};
+        let mut app = App::default();
+        let l = Language::English;
+        let palette = app.theme.palette();
+        let wall = app.library.buildups[0].id.clone();
+        let path = bim_library::ifcx::buildup_path(&wall);
+        let origin = Origin { source: "an offer".into(), date: "2026-03-12".into(), region: Some("NL".into()) };
+        let cost = Cost { unit: Unit::SquareMetre, currency: "EUR".into(), material: 48.0, labour: 31.5, index: Some(Index { name: "BDB".into(), value: 120.0 }), ..Cost::default() };
+        app.library.set_cost(&path, &cost, origin.clone()).unwrap();
+        app.library.set_aspect(Aspect { item: path, kind: Kind::Maker, origin, properties: [("gtin".to_string(), serde_json::json!("8712345678906"))].into() }).unwrap();
+        let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 1200.0), app.look_pane(palette, l, &Item::BuildUp(Shelf::Project, wall)));
+        assert!(pane.find("Costs").is_ok() && pane.find("79.50 EUR/m²").is_ok() && pane.find("material 48.00 · labour 31.50").is_ok() && pane.find("BDB 120").is_ok());
+        assert!(pane.find("Not verified: a reference price.").is_ok() && pane.find("Maker").is_ok() && pane.find("gtin: 8712345678906").is_ok());
+        // an item without aspects shows none
+        let key = app.library.materials[0].key.clone();
+        let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 1200.0), app.look_pane(palette, l, &Item::Material(Shelf::Project, key)));
+        assert!(pane.find("Costs").is_err());
+    }
+
+    #[test]
+    fn a_build_up_and_a_material_show_their_levels_of_detail() {
+        let app = App::default();
+        let l = Language::English;
+        let palette = app.theme.palette();
+        // a layered build-up of the general library: the three levels side by side
+        let layered = general().buildups.iter().find(|b| b.layers.len() >= 3).expect("a layered build-up");
+        let id = layered.id.clone();
+        {
+            let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 900.0), app.look_pane(palette, l, &Item::BuildUp(Shelf::General, id)));
+            assert!(pane.find("Levels of detail").is_ok() && pane.find("LOD 200").is_ok() && pane.find("LOD 350").is_ok() && pane.find("LOD 500").is_ok());
+            // at 200 only the names of its materials are filled in
+            let materials = layered.layers.iter().map(|layer| layer.material.as_str()).collect::<std::collections::BTreeSet<_>>().len();
+            assert!(pane.find(format!("{materials} data")).is_ok());
+        }
+        // a graded material: what is known of it, and from which level
+        let (shelf, graded) = [Shelf::General, Shelf::Netherlands].into_iter().find_map(|shelf| app.shelf(shelf).materials.iter().find(|m| m.class().is_some()).map(|m| (shelf, m))).expect("a material with a strength class");
+        let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 900.0), app.look_pane(palette, l, &Item::Material(shelf, graded.key.clone())));
+        assert!(pane.find("Data per level of detail").is_ok() && pane.find("Strength class").is_ok() && pane.find("Source").is_ok() && pane.find("Grade").is_ok());
+    }
+
+    #[test]
+    fn a_build_up_shows_its_price_and_its_resistance_from_its_materials() {
+        use bim_library::aspect::Origin;
+        use bim_library::cost::{Cost, Unit};
+        use bim_library::physics::Physics;
+        let mut app = App::default();
+        let l = Language::English;
+        let palette = app.theme.palette();
+        let wall = app.library.buildups[0].clone();
+        let origin = Origin { source: "an offer".into(), date: "2026-03-12".into(), region: None };
+        let item = Item::BuildUp(Shelf::Project, wall.id.clone());
+        {
+            let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 1400.0), app.look_pane(palette, l, &item));
+            assert!(pane.find("the layers alone").is_err());
+        }
+        for layer in &wall.layers {
+            let path = bim_library::ifcx::material_path(&layer.material);
+            app.library.set_cost(&path, &Cost { unit: Unit::CubicMetre, currency: "EUR".into(), material: 200.0, labour: 100.0, ..Cost::default() }, origin.clone()).unwrap();
+            app.library.set_physics(&layer.material, &Physics { conductivity: Some(1.0), ..Physics::default() }, origin.clone()).unwrap();
+        }
+        let price = wall.thickness() * 300.0;
+        let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 1400.0), app.look_pane(palette, l, &item));
+        assert!(pane.find(format!("{price:.2} EUR/m² (from its materials, a reference price)")).is_ok());
+        assert!(pane.find(format!("R {:.2} m²K/W (the layers alone)", wall.thickness())).is_ok());
+    }
+
+    #[test]
+    fn a_component_is_drawn_fitted_in_its_tile() {
+        let drawing = bim_library::component::drawing("gen-betonanker-m10").expect("the anchor's drawing");
+        let look = ComponentLook { runs: drawing.runs(12.0), size: drawing.size(), line: Color::BLACK };
+        let fitted = look.fitted(Size::new(151.0, 52.0));
+        // 145 by 10 mm in 145 by 46: one pixel a millimetre, centred, y down
+        assert_eq!(fitted.len(), 3);
+        assert_eq!((fitted[0][0], fitted[0][1]), (Point::new(3.0, 26.0), Point::new(148.0, 26.0)));
+        assert_eq!(fitted[1][2], Point::new(138.0, 31.0), "the flank ends at the bottom of the drawing, below on the canvas");
+        // every point of every compiled drawing stays inside its canvas
+        for c in bim_library::component::items().filter(|c| bim_library::component::drawing(&c.component.id).is_some()).take(300) {
+            let d = bim_library::component::drawing(&c.component.id).unwrap();
+            let look = ComponentLook { runs: d.runs(12.0), size: d.size(), line: Color::BLACK };
+            assert!(look.fitted(Size::new(120.0, 52.0)).iter().flatten().all(|p| p.x >= 2.0 && p.x <= 118.0 && p.y >= 2.0 && p.y <= 50.0), "{}", c.component.id);
+        }
     }
 
     #[test]

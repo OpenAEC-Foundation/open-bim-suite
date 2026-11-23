@@ -238,6 +238,10 @@ pub struct HouseStyle {
     pub sheets: Vec<SheetFormat>,
     pub title_block: TitleBlock,
     pub dimensions: DimensionStyle,
+    /// The key of the hatch standard it hatches by ([`crate::standard`]: "nen47", "openaec");
+    /// none: the one the project's library has chosen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hatch_standard: Option<String>,
 }
 
 impl HouseStyle {
@@ -275,8 +279,51 @@ impl HouseStyle {
                     row(8.0, &[(Field::DrawnBy, 1.0), (Field::CheckedBy, 1.0)]),
                 ],
             },
-            dimensions: DimensionStyle { terminator: Terminator::Tick, terminator_size: 2.0, text_height: 2.5, gap: 1.5, overshoot: 1.5 },
+            dimensions: DimensionStyle { terminator: Terminator::Tick, terminator_size: 2.0, text_height: 2.5, gap: 1.5, overshoot: 1.5 },            hatch_standard: None,
         }
+    }
+
+    /// The house style as a `brand.yaml` of the OpenAEC Blueprint (its `openaec-huisstijl`): the
+    /// office's name, its colours as hexadecimal and its typefaces, under Blueprint's keys
+    /// (`text_dark`, `text_muted`, `background_light`, `body`), so a report of another OpenAEC
+    /// tool takes the same style.
+    pub fn brand(&self) -> String {
+        let mut out = format!("brand:\n  name: \"{}\"\n\ncolors:\n", self.company.name.replace('"', "'"));
+        for colour in &self.colours {
+            let [r, g, b] = colour.rgb;
+            out.push_str(&format!("  {}: \"#{r:02X}{g:02X}{b:02X}\"\n", brand_key(&colour.key).replace('-', "_")));
+        }
+        out.push_str(&format!("\nfonts:\n  heading: \"{}\"\n  body: \"{}\"\n", self.fonts.heading, self.fonts.text));
+        out
+    }
+
+    /// Takes what a `brand.yaml` of the OpenAEC Blueprint says: the name, the colours (those
+    /// of a role into that role, any other as a colour of the office's own) and the two
+    /// typefaces, a weight after a hyphen left off ("SpaceGrotesk-Bold" is "SpaceGrotesk"). How
+    /// many things it took; refused, and nothing changed, when the style would not hold together.
+    pub fn take_brand(&mut self, yaml: &str) -> Result<usize, LibraryError> {
+        let mut next = self.clone();
+        let mut taken = 0;
+        for (section, key, value) in brand_lines(yaml) {
+            match (section.as_str(), key.as_str()) {
+                ("brand", "name") => next.company.name = value,
+                ("colors", key) => {
+                    let Some(rgb) = hex_rgb(&value) else { continue };
+                    let own = own_key(key);
+                    match next.colours.iter_mut().find(|c| c.key == own) {
+                        Some(colour) => colour.rgb = rgb,
+                        None => next.colours.push(Colour { key: own.clone(), names: Names::same(&own.replace('-', " ")), rgb }),
+                    }
+                }
+                ("fonts", "heading") => next.fonts.heading = family(&value),
+                ("fonts", "body") => next.fonts.text = family(&value),
+                _ => continue,
+            }
+            taken += 1;
+        }
+        next.check()?;
+        *self = next;
+        Ok(taken)
     }
 
     /// The colour of role `key`.
@@ -336,6 +383,60 @@ impl HouseStyle {
         }
         Ok(())
     }
+}
+
+/// The key Blueprint has for a role of a colour here, and back.
+const BRAND_KEYS: [(&str, &str); 3] = [("text", "text_dark"), ("muted", "text_muted"), ("background", "background_light")];
+
+fn brand_key(own: &str) -> &str {
+    BRAND_KEYS.iter().find(|(key, _)| *key == own).map_or(own, |(_, brand)| brand)
+}
+
+fn own_key(brand: &str) -> String {
+    BRAND_KEYS.iter().find(|(_, key)| *key == brand).map_or_else(|| brand.replace('_', "-"), |(own, _)| own.to_string())
+}
+
+/// A typeface without its weight: "Inter-SemiBold" is "Inter".
+fn family(font: &str) -> String {
+    font.split('-').next().unwrap_or(font).trim().to_string()
+}
+
+/// A colour as "#RRGGBB".
+fn hex_rgb(hex: &str) -> Option<[u8; 3]> {
+    let digits = hex.trim().strip_prefix('#')?;
+    (digits.len() == 6 && digits.is_ascii()).then(|| [0, 2, 4].map(|at| u8::from_str_radix(&digits[at..at + 2], 16).ok())).and_then(|[r, g, b]| Some([r?, g?, b?]))
+}
+
+/// The plain values of a `brand.yaml`: for each `key: value` one level under a section, the
+/// section, the key and the value without its quotes and its comment. Lists and deeper levels
+/// are left out.
+fn brand_lines(yaml: &str) -> Vec<(String, String, String)> {
+    let mut section = String::new();
+    let mut out = Vec::new();
+    for line in yaml.lines() {
+        let indent = line.len() - line.trim_start().len();
+        let Some((key, rest)) = line.trim().split_once(':') else { continue };
+        if key.starts_with('#') || key.starts_with('-') {
+            continue;
+        }
+        if indent == 0 {
+            section = key.trim().to_string();
+            continue;
+        }
+        if indent != 2 {
+            continue;
+        }
+        let rest = rest.trim();
+        // a quoted value ends at its closing quote; an unquoted one at a comment
+        let value = match rest.strip_prefix('"') {
+            Some(quoted) => quoted.split('"').next().unwrap_or_default().to_string(),
+            None => rest.split(" #").next().unwrap_or_default().trim().to_string(),
+        };
+        if !value.is_empty() && !value.starts_with('[') {
+            out.push((section.clone(), key.trim().to_string(), value));
+        }
+    }
+    out
 }
 
 /// The path of the node of house style `key`.
@@ -466,4 +567,44 @@ mod tests {
         bad.fonts.text.clear();
         assert!(read(&file(&bad, "x", "t", "2026-11-19T00:00:00Z")).is_err());
     }
+    #[test]
+    fn a_house_style_takes_and_gives_a_brand_of_the_blueprint() {
+        let brand = "brand:\n  name: \"OpenAEC Foundation\"\n  tagline: \"Build free.\"\n\ncolors:\n  primary: \"#D97706\"          # Construction Amber\n  text_dark: \"#36363E\"\n  text_muted: \"#6B6B75\"\n  background_light: \"#FAFAF9\" # Blueprint White\n  warm_gold: \"#F59E0B\"\n  broken: \"amber\"\n\nfonts:\n  heading: \"SpaceGrotesk-Bold\"\n  body: \"Inter-Regular\"\n  mono: \"JetBrainsMono-Regular\"\n\nmargins:\n  top_mm: 20\n\ngradient:\n  accent_strip: [\"#D97706\", \"#F59E0B\"]\n";
+        let mut style = HouseStyle::starter();
+        let secondary = style.colour("secondary");
+        // the name, five colours and two typefaces
+        assert_eq!(style.take_brand(brand), Ok(8));
+        assert_eq!((style.company.name.as_str(), style.fonts.heading.as_str(), style.fonts.text.as_str()), ("OpenAEC Foundation", "SpaceGrotesk", "Inter"));
+        assert_eq!((style.colour("primary"), style.colour("text"), style.colour("muted"), style.colour("background")), (Some([0xD9, 0x77, 0x06]), Some([0x36, 0x36, 0x3E]), Some([0x6B, 0x6B, 0x75]), Some([0xFA, 0xFA, 0xF9])));
+        // a colour Blueprint has and the style had not is one of the office's own; what it does not name stays
+        assert_eq!((style.colour("warm-gold"), style.colour("secondary"), style.colour("broken")), (Some([0xF5, 0x9E, 0x0B]), secondary, None));
+        assert!(style.check().is_ok());
+        // and back, under Blueprint's keys
+        let out = style.brand();
+        assert!(out.starts_with("brand:\n  name: \"OpenAEC Foundation\"\n\ncolors:\n  primary: \"#D97706\"\n"), "{out}");
+        assert!(out.contains("  text_dark: \"#36363E\"\n") && out.contains("  background_light: \"#FAFAF9\"\n") && out.contains("  warm_gold: \"#F59E0B\"\n") && out.ends_with("fonts:\n  heading: \"SpaceGrotesk\"\n  body: \"Inter\"\n"));
+        let mut again = HouseStyle::starter();
+        again.take_brand(&out).unwrap();
+        assert_eq!((again.colours.iter().map(|c| (c.key.clone(), c.rgb)).collect::<Vec<_>>(), again.fonts.clone(), again.company.name.clone()), (style.colours.iter().map(|c| (c.key.clone(), c.rgb)).collect::<Vec<_>>(), style.fonts.clone(), style.company.name.clone()));
+        // a brand without a name leaves the style as it was
+        let before = style.clone();
+        assert!(style.take_brand("brand:\n  name: \" \"\n").is_err());
+        assert_eq!(style, before);
+        assert_eq!(style.take_brand("nothing here"), Ok(0));
+    }
+
+    #[test]
+    fn a_house_style_names_the_hatch_standard_it_hatches_by() {
+        let mut style = HouseStyle::starter();
+        assert_eq!(style.hatch_standard, None);
+        assert!(node(&style)["attributes"][HOUSE_STYLE].get("hatch_standard").is_none());
+        style.hatch_standard = Some("nen47".into());
+        let back = read(&file(&style, "test", "test", "2026-11-23T00:00:00Z")).unwrap();
+        assert_eq!(back, vec![style]);
+        // a file written before the style named one reads as none
+        let mut old = serde_json::to_value(HouseStyle::starter()).unwrap();
+        old.as_object_mut().unwrap().remove("hatch_standard");
+        assert_eq!(serde_json::from_value::<HouseStyle>(old).unwrap().hatch_standard, None);
+    }
+
 }

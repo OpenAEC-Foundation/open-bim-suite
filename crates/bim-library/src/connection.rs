@@ -230,11 +230,14 @@ pub struct ConnectionType {
     /// An NL-SfB code of its own, in place of its family's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
+    /// One an office reaches for first: a picker lists its favourites before the others.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub favourite: bool,
 }
 
 impl ConnectionType {
     pub fn new(id: &str, family: Family, between: Between, recipe: Recipe) -> Self {
-        Self { id: id.into(), family, between, recipe, names: None, material: None, code: None }
+        Self { id: id.into(), family, between, recipe, names: None, material: None, code: None, favourite: false }
     }
 
     /// Its name: its own, else the rule's for its recipe.
@@ -307,6 +310,22 @@ pub fn node(connection: &ConnectionType) -> Value {
 }
 
 /// The connection types a library starts with: the recipes the kernel makes, for steel and
+/// The order a picker lists types in: the favourites first, then those used last (the latest
+/// first), then the others; within each as the library has them.
+pub fn pick_order<'a>(types: impl Iterator<Item = &'a ConnectionType>, recent: &[String]) -> Vec<&'a ConnectionType> {
+    let mut all: Vec<&ConnectionType> = types.collect();
+    let used = |t: &ConnectionType| recent.iter().position(|id| *id == t.id).unwrap_or(usize::MAX);
+    all.sort_by_key(|t| (!t.favourite, used(t)));
+    all
+}
+
+/// What is typed to find a type: every word of it is in the type's name, its key or its
+/// family's name, whatever its case. Nothing typed finds every type.
+pub fn found(connection: &ConnectionType, typed: &str, lang: Lang) -> bool {
+    let text = format!("{} {} {}", connection.name(lang), connection.id, connection.family.name(lang)).to_lowercase();
+    typed.split_whitespace().all(|word| text.contains(&word.to_lowercase()))
+}
+
 /// timber members and for what goes through a wall or a floor, with the usual plate sizes.
 pub fn starter() -> Vec<ConnectionType> {
     let steel = |key: &str, recipe: Recipe| ConnectionType { material: recipe.has_parts().then(|| "steel".to_string()), ..ConnectionType::new(&format!("steel.{key}"), Family::Steel, Between::Members, recipe) };
@@ -433,4 +452,28 @@ mod tests {
         spaced.names = Some(Names::new("stomp", "butt", "", "bout"));
         assert!(spaced.check().is_err(), "a name in every language");
     }
+    #[test]
+    fn a_picker_lists_favourites_first_then_the_last_used_and_finds_by_words() {
+        let mut library = crate::Library::starter();
+        let ids: Vec<String> = library.connection_types.iter().map(|t| t.id.clone()).collect();
+        assert!(ids.len() >= 4);
+        let order = |library: &crate::Library, recent: &[String]| pick_order(library.connection_types.iter(), recent).into_iter().map(|t| t.id.clone()).collect::<Vec<_>>();
+        assert_eq!(order(&library, &[]), ids, "as the library has them");
+        // the last used first, the latest before the one before
+        let recent = vec![ids[3].clone(), ids[1].clone()];
+        assert_eq!(order(&library, &recent)[..3], [ids[3].clone(), ids[1].clone(), ids[0].clone()]);
+        // a favourite before those
+        library.connection_types[2].favourite = true;
+        assert_eq!(order(&library, &recent)[..3], [ids[2].clone(), ids[3].clone(), ids[1].clone()]);
+        // kept in a file; one that is none writes nothing
+        let file = crate::ifcx::file(&library, "test", "test", "2026-11-23T00:00:00Z");
+        let read = crate::ifcx::read(&file).unwrap();
+        assert_eq!(read.connection_types.iter().filter(|t| t.favourite).map(|t| t.id.clone()).collect::<Vec<_>>(), [ids[2].clone()]);
+        assert!(serde_json::to_value(&library.connection_types[0]).unwrap().get("favourite").is_none());
+        // found by words of its name, its key or its family
+        let fin = library.connection_type("steel.fin-plate.m20-3").unwrap();
+        assert!(found(fin, "", Lang::En) && found(fin, "FIN m20", Lang::En) && found(fin, "steel plate", Lang::En) && found(fin, "staal", Lang::Nl));
+        assert!(!found(fin, "end plate", Lang::En) && !found(fin, "timber", Lang::En));
+    }
+
 }

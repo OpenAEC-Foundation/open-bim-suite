@@ -44,6 +44,8 @@ use serde_json::{json, Map, Value};
 
 /// The attribute of a material node with the library's own data.
 pub const MATERIAL: &str = "openaec::material";
+/// The attribute of the node that says the level of detail a library's drawings show at.
+pub const DETAIL: &str = "openaec::detail";
 /// The attribute of a type node with its build-up.
 pub const BUILDUP: &str = "openaec::buildup";
 /// The attribute of a type node with its linear type.
@@ -130,6 +132,14 @@ pub fn profile_of(value: &Value) -> Option<ProfileShape> {
 /// types.
 pub fn nodes(library: &Library) -> Vec<Value> {
     let mut nodes: Vec<Value> = library.materials.iter().map(material_node).collect();
+    // IFC's own properties of a material's physics, on its node (over those of its class)
+    for (node, material) in nodes.iter_mut().zip(&library.materials) {
+        if let (Some((physics, _)), Some(attributes)) = (library.physics(&material.key), node["attributes"].as_object_mut()) {
+            for (name, value) in physics.ifc_properties() {
+                attributes.insert(format!("bsi::ifc::prop::{name}"), json!(value));
+            }
+        }
+    }
     for b in &library.buildups {
         let name = library.name(&b.id, Lang::En).unwrap_or_default();
         nodes.push(json!({
@@ -142,6 +152,12 @@ pub fn nodes(library: &Library) -> Vec<Value> {
                 BUILDUP: b,
             }
         }));
+        // what a delivery asks of it, as IFC's own properties (`Pset_WallCommon` and its likes)
+        if let Some(attributes) = nodes.last_mut().and_then(|node| node["attributes"].as_object_mut()) {
+            for (name, value) in b.delivery_properties(&library.materials) {
+                attributes.insert(format!("bsi::ifc::prop::{name}"), value);
+            }
+        }
     }
     for t in &library.linear_types {
         let name = library.linear_name(&t.id, Lang::En).unwrap_or_default();
@@ -157,6 +173,11 @@ pub fn nodes(library: &Library) -> Vec<Value> {
                 PROFILE: profile_value(&t.profile, t.designation.as_deref()),
             }
         }));
+        if let Some(attributes) = nodes.last_mut().and_then(|node| node["attributes"].as_object_mut()) {
+            for (name, value) in t.delivery_properties() {
+                attributes.insert(format!("bsi::ifc::prop::{name}"), value);
+            }
+        }
     }
     for t in &library.system_types {
         let name = library.system_name(&t.id, Lang::En).unwrap_or_default();
@@ -171,6 +192,11 @@ pub fn nodes(library: &Library) -> Vec<Value> {
                 SYSTEM_TYPE: t,
             }
         }));
+        if let Some(attributes) = nodes.last_mut().and_then(|node| node["attributes"].as_object_mut()) {
+            for (name, value) in t.delivery_properties() {
+                attributes.insert(format!("bsi::ifc::prop::{name}"), value);
+            }
+        }
     }
     nodes.extend(library.object_types.iter().map(crate::object::node));
     nodes.extend(library.connection_types.iter().map(crate::connection::node));
@@ -180,6 +206,12 @@ pub fn nodes(library: &Library) -> Vec<Value> {
     nodes.extend(library.codes.iter().map(nlsfb::code_node));
     nodes.extend(library.drawing_sets.iter().map(crate::annotate::node));
     nodes.extend(library.view_templates.iter().map(crate::template::node));
+    // the level of detail its drawings show at, where it says one: a node of its own
+    if let Some(detail) = library.detail {
+        nodes.push(json!({"path": uuid("openaec-library/detail"), "attributes": {"bsi::ifc::prop::Name": "Level of detail", DETAIL: detail}}));
+    }
+    // the aspects last: each a node with its item's path, composed onto the item's own
+    nodes.extend(library.aspects.iter().map(crate::aspect::Aspect::node));
     nodes
 }
 
@@ -227,8 +259,17 @@ pub fn read(file: &Value) -> Result<Library, LibraryError> {
     let mut connection_types: Vec<crate::connection::ConnectionType> = Vec::new();
     let mut service_types: Vec<crate::service::ServiceType> = Vec::new();
     let mut cover_types: Vec<crate::service::CoverType> = Vec::new();
+    let mut aspects: Vec<crate::aspect::Aspect> = Vec::new();
     for path in order {
         let attributes = &composed[path];
+        if let Some(detail) = attributes.get(DETAIL) {
+            library.detail = serde_json::from_value(detail.clone()).ok();
+        }
+        for (name, value) in attributes {
+            if let Some(kind) = crate::aspect::Kind::of_attribute(name) {
+                aspects.push(crate::aspect::Aspect::read(path, kind, value)?);
+            }
+        }
         if let Some(own) = attributes.get(MATERIAL) {
             let material: Material = serde_json::from_value(own.clone()).map_err(|e| LibraryError::Unreadable(format!("material {path}: {e}")))?;
             library.add_material(material)?;
@@ -346,6 +387,12 @@ pub fn read(file: &Value) -> Result<Library, LibraryError> {
     }
     for c in cover_types {
         library.add_cover_type(c)?;
+    }
+    // an aspect on a node that is no item of the library (a material without the library's own
+    // data is one) is left out
+    let items = library.item_paths();
+    for a in aspects.into_iter().filter(|a| items.contains(&a.item)) {
+        library.set_aspect(a)?;
     }
     Ok(library)
 }
