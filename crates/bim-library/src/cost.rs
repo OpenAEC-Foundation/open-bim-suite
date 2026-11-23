@@ -230,6 +230,28 @@ impl Library {
         self.set_aspect(cost.aspect(item, origin)?)
     }
 
+    /// The price of a build-up per square metre as its materials make it: each layer its
+    /// thickness times the price of its material per cubic metre, part by part. None while a
+    /// layer's material has no price per cubic metre, or the prices are in different currencies.
+    /// It is verified only when every price it is made of is; it has no index of its own.
+    pub fn buildup_cost(&self, buildup: &crate::BuildUp) -> Option<Cost> {
+        let mut total = Cost { unit: Unit::SquareMetre, verified: true, ..Cost::default() };
+        for layer in &buildup.layers {
+            let (price, _) = self.cost(&crate::ifcx::material_path(&layer.material))?;
+            if price.unit != Unit::CubicMetre || (!total.currency.is_empty() && total.currency != price.currency) {
+                return None;
+            }
+            total.currency = price.currency.clone();
+            total.material += price.material * layer.thickness;
+            total.labour += price.labour * layer.thickness;
+            total.equipment += price.equipment * layer.thickness;
+            total.subcontractor += price.subcontractor * layer.thickness;
+            total.other += price.other * layer.thickness;
+            total.verified &= price.verified;
+        }
+        (!buildup.layers.is_empty()).then_some(total)
+    }
+
     /// The English name of the item at `item`, as its node has it.
     fn item_name(&self, item: &str) -> Option<String> {
         crate::ifcx::nodes(self).iter().find(|n| n["path"] == item).and_then(|n| n["attributes"]["bsi::ifc::prop::Name"].as_str().map(str::to_string))
@@ -362,4 +384,29 @@ mod tests {
         let kg = resources.iter().find(|r| r["unit"] == "kg").unwrap();
         assert_eq!((kg["defaultUnitPrice"].as_f64(), kg["referenceUnitPrice"].is_null(), kg["resourceType"].as_str(), kg.get("region")), (Some(1.4), true, Some("materiaal"), None));
     }
+    #[test]
+    fn a_build_up_costs_what_its_layers_cost() {
+        let mut library = Library::starter();
+        let keys: Vec<String> = library.materials.iter().take(3).map(|m| m.key.clone()).collect();
+        let wall = crate::BuildUp { layers: vec![crate::Layer { material: keys[0].clone(), thickness: 0.1 }, crate::Layer { material: keys[1].clone(), thickness: 0.2 }], ..library.buildups[0].clone() };
+        let per_m3 = |material: f64, labour: f64, verified: bool| Cost { unit: Unit::CubicMetre, currency: "EUR".into(), material, labour, verified, ..Cost::default() };
+        let price = |library: &mut Library, key: &str, cost: &Cost| library.set_cost(&crate::ifcx::material_path(key), cost, origin()).unwrap();
+        assert_eq!(library.buildup_cost(&wall), None);
+        price(&mut library, &keys[0], &per_m3(300.0, 100.0, true));
+        assert_eq!(library.buildup_cost(&wall), None, "one layer has no price");
+        price(&mut library, &keys[1], &per_m3(150.0, 50.0, true));
+        let cost = library.buildup_cost(&wall).unwrap();
+        assert_eq!((cost.unit, cost.currency.as_str(), cost.material, cost.labour, cost.unit_price(), cost.verified), (Unit::SquareMetre, "EUR", 60.0, 20.0, 80.0, true));
+        assert_eq!(cost.label(), "80.00 EUR/m²");
+        // one price that is not verified, and the whole is not
+        price(&mut library, &keys[1], &per_m3(150.0, 50.0, false));
+        assert!(!library.buildup_cost(&wall).unwrap().verified);
+        // a price per kilogram, or in another currency, makes no price per square metre
+        price(&mut library, &keys[1], &Cost { unit: Unit::Kilogram, ..per_m3(1.0, 0.0, true) });
+        assert_eq!(library.buildup_cost(&wall), None);
+        price(&mut library, &keys[1], &Cost { currency: "USD".into(), ..per_m3(150.0, 50.0, true) });
+        assert_eq!(library.buildup_cost(&wall), None);
+        assert_eq!(library.buildup_cost(&crate::BuildUp { layers: Vec::new(), ..wall }), None);
+    }
+
 }

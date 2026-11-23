@@ -459,6 +459,12 @@ pub(super) fn buildup_detail<'a>(p: Palette, l: Language, lib: &Library, b: &Bui
     }
     let class = b.role.ifc_type_class();
     list = list.push(small(format!("{} mm · {class} {}", mm(total, l), b.role.predefined_type()), p));
+    // what it costs per square metre, once each of its materials has a price per cubic metre
+    if let Some(cost) = lib.buildup_cost(b) {
+        let parts: Vec<String> = cost.parts().map(|(resource, price)| format!("{} {price:.2}", l.text(resource.names().0, resource.names().1))).collect();
+        let checked = if cost.verified { "" } else { l.text(", richtprijs", ", a reference price") };
+        list = list.push(small(format!("{} ({}{checked})", cost.label(), l.text("uit zijn materialen", "from its materials")), p)).push(small(parts.join(" · "), p));
+    }
     // the thermal resistance of its layers together, once each of its materials says how it conducts
     if let Some(r) = lib.resistance(b) {
         list = list.push(small(format!("R {r:.2} m²K/W ({})", l.text("alleen de lagen", "the layers alone")), p));
