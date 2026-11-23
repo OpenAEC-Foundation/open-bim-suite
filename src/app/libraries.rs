@@ -1460,11 +1460,55 @@ fn aspects_detail<'a>(p: Palette, l: Language, library: &Library, path: &str) ->
 
 /// The drawing itself is not in the library yet.
 fn component_look<'a>(p: Palette, c: bim_library::component::Item<'_>) -> Element<'a, Message> {
-    let [w, h] = c.component.size.map(|v| v.max(1.0) as f32);
-    let most = w.max(h);
-    let (w, h) = ((w / most * 64.0).max(3.0), (h / most * 48.0).max(3.0));
-    let frame = container(iced::widget::Space::new().width(w).height(h)).style(move |_| container::Style { border: iced::Border { color: p.text_secondary, width: 1.0, radius: 0.0.into() }, ..container::Style::default() });
-    column![frame, text(c.series.class.clone()).size(10).color(p.text_muted)].spacing(4).align_x(Center).into()
+    // its drawing where the library has it, else a frame of its size
+    let look: Element<'a, Message> = match bim_library::component::drawing(&c.component.id) {
+        Some(drawing) => canvas_widget(ComponentLook { runs: drawing.runs(12.0), size: drawing.size(), line: p.text }).width(Fill).height(52).into(),
+        None => {
+            let [w, h] = c.component.size.map(|v| v.max(1.0) as f32);
+            let most = w.max(h);
+            let (w, h) = ((w / most * 64.0).max(3.0), (h / most * 48.0).max(3.0));
+            container(iced::widget::Space::new().width(w).height(h)).style(move |_| container::Style { border: iced::Border { color: p.text_secondary, width: 1.0, radius: 0.0.into() }, ..container::Style::default() }).into()
+        }
+    };
+    column![look, text(c.series.class.clone()).size(10).color(p.text_muted)].spacing(4).align_x(Center).into()
+}
+
+/// The drawing of a component, fitted in its canvas with its proportions kept, y up.
+struct ComponentLook {
+    runs: Vec<Vec<[f64; 2]>>,
+    size: [f64; 2],
+    line: Color,
+}
+
+impl ComponentLook {
+    /// The points of its runs on a canvas of `bounds`: fitted with a margin of 3, centred, y down.
+    fn fitted(&self, bounds: Size) -> Vec<Vec<Point>> {
+        let (w, h) = (self.size[0].max(1e-6) as f32, self.size[1].max(1e-6) as f32);
+        let scale = ((bounds.width - 6.0) / w).min((bounds.height - 6.0) / h).max(0.0);
+        let (left, bottom) = ((bounds.width - w * scale) / 2.0, (bounds.height + h * scale) / 2.0);
+        self.runs.iter().map(|run| run.iter().map(|p| Point::new(left + p[0] as f32 * scale, bottom - p[1] as f32 * scale)).collect()).collect()
+    }
+}
+
+impl<M> canvas::Program<M> for ComponentLook {
+    type State = ();
+
+    fn draw(&self, _state: &(), renderer: &iced::Renderer, _theme: &iced::Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<canvas::Geometry> {
+        let mut frame = Frame::new(renderer, bounds.size());
+        for run in self.fitted(bounds.size()) {
+            let path = Path::new(|b| {
+                for (k, point) in run.iter().enumerate() {
+                    if k == 0 {
+                        b.move_to(*point);
+                    } else {
+                        b.line_to(*point);
+                    }
+                }
+            });
+            frame.stroke(&path, Stroke::default().with_color(self.line).with_width(1.0));
+        }
+        vec![frame.into_geometry()]
+    }
 }
 
 /// A component in the right pane: how it is categorised, its layer, and where it is from.
@@ -1803,6 +1847,23 @@ mod tests {
         let (shelf, graded) = [Shelf::General, Shelf::Netherlands].into_iter().find_map(|shelf| app.shelf(shelf).materials.iter().find(|m| m.class().is_some()).map(|m| (shelf, m))).expect("a material with a strength class");
         let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 900.0), app.look_pane(palette, l, &Item::Material(shelf, graded.key.clone())));
         assert!(pane.find("Data per level of detail").is_ok() && pane.find("Strength class").is_ok() && pane.find("Source").is_ok() && pane.find("Grade").is_ok());
+    }
+
+    #[test]
+    fn a_component_is_drawn_fitted_in_its_tile() {
+        let drawing = bim_library::component::drawing("gen-betonanker-m10").expect("the anchor's drawing");
+        let look = ComponentLook { runs: drawing.runs(12.0), size: drawing.size(), line: Color::BLACK };
+        let fitted = look.fitted(Size::new(151.0, 52.0));
+        // 145 by 10 mm in 145 by 46: one pixel a millimetre, centred, y down
+        assert_eq!(fitted.len(), 3);
+        assert_eq!((fitted[0][0], fitted[0][1]), (Point::new(3.0, 26.0), Point::new(148.0, 26.0)));
+        assert_eq!(fitted[1][2], Point::new(138.0, 31.0), "the flank ends at the bottom of the drawing, below on the canvas");
+        // every point of every compiled drawing stays inside its canvas
+        for c in bim_library::component::items().filter(|c| bim_library::component::drawing(&c.component.id).is_some()).take(300) {
+            let d = bim_library::component::drawing(&c.component.id).unwrap();
+            let look = ComponentLook { runs: d.runs(12.0), size: d.size(), line: Color::BLACK };
+            assert!(look.fitted(Size::new(120.0, 52.0)).iter().flatten().all(|p| p.x >= 2.0 && p.x <= 118.0 && p.y >= 2.0 && p.y <= 50.0), "{}", c.component.id);
+        }
     }
 
     #[test]

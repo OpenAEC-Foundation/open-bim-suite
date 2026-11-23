@@ -86,8 +86,9 @@ the one place to change when it has.
 
 ## Not yet
 
-- The drawings themselves: the catalogue points at a component's DXF in Ocondat. A plan, a
-  section or a detail cannot place a component until its lines are read into the library.
+- A view placing a component. The drawings of 1,178 of the 1,307 generic components are in the
+  library since (`tools/ocondat-components/drawings.py`: their lines and arcs, at most 400 numbers
+  each); the 128 larger ones, and every drawing's hatches and texts, are not.
 - The components as the 2D views of a 3D element.
 - The makers' and the community's components, until their terms are checked.
 - The Revit families and templates, the IFC template, and the pages under `Libraries/`.
