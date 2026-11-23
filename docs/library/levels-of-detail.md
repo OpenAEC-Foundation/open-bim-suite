@@ -44,6 +44,13 @@ built.
 
 Not yet compared with what the Dutch sector's own documents say of these levels.
 
+## The level of a project
+
+A project says the level its drawings show at (`Library::detail`, set in the material editor and
+kept in the project's library file). At 200 what is cut through a material of the library is an
+outline alone: no hatch and no fill. At 350 and 500 it is hatched as before. An element that is
+not of a material of the library keeps the hatch of its layer.
+
 ## Not yet
 
 - A view template names the level it asks (`ViewTemplate::level`: an outline is 200, one hatch

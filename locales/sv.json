@@ -1818,6 +1818,10 @@
     " (off)": " (av)",
     "House style of OpenAEC Blueprint (brand.yaml)": "Husstil från OpenAEC Blueprint (brand.yaml)",
     "Take from a file": "Hämta från en fil",
-    "Save as a file": "Spara som fil"
+    "Save as a file": "Spara som fil",
+    "Level of detail of the project": "Projektets detaljnivå",
+    "design element: the outline alone": "designelement: endast konturen",
+    "as it is built: layers, parts and hatches": "som det byggs: skikt, delar och skrafferingar",
+    "everything there is: every part and all the data": "allt som finns: varje del och all data"
   }
 }
