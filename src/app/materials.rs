@@ -471,6 +471,20 @@ impl App {
             let stiffness = format!("E0,mean {} · Gmean {} N/mm² · ρk {} kg/m³", class.e_0_mean, class.g_mean, class.density());
             fields = fields.push(text(strength).size(11).color(p.text_secondary).wrapping(Wrapping::Word)).push(text(stiffness).size(11).color(p.text_secondary).wrapping(Wrapping::Word));
         }
+        // what any other class says of it, its partial factors, and the standard it is from
+        match m.class() {
+            Some(class) => {
+                let lines = class.lines();
+                let skip = if m.timber_grade().is_some() { lines.len().saturating_sub(2) } else { 0 };
+                for line in lines.into_iter().skip(skip) {
+                    fields = fields.push(text(line).size(11).color(p.text_secondary).wrapping(Wrapping::Word));
+                }
+            }
+            None if m.grade.is_some() => {
+                fields = fields.push(text(l.text("Geen sterkteklasse van een norm: er zijn geen waarden bij.", "No strength class of a standard: it has no values.")).size(11).color(p.text_secondary).wrapping(Wrapping::Word));
+            }
+            None => {}
+        }
         // its own hatch of the catalogue: the sign of its kind of material, in its colour
         let own_hatch = l.text("Eigen arcering", "Hatch of its own");
         let by_kind = SignChoice { key: None, label: l.text("volgens soort", "by its kind").to_string() };
@@ -660,6 +674,24 @@ mod tests {
         {
             let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 1200.0), app.material_pane(app.theme.palette(), Language::English));
             assert!(pane.find("Grade").is_ok() && pane.find("fm,k 24 · ft,0,k 14 · fc,0,k 21 · fv,k 4 N/mm²").is_ok() && pane.find("E0,mean 11000 · Gmean 690 N/mm² · ρk 350 kg/m³").is_ok());
+        }
+        // of a timber class the pane also has the factor and the standard
+        {
+            let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 1200.0), app.material_pane(app.theme.palette(), Language::English));
+            assert!(pane.find("γM 1.3").is_ok() && pane.find("EN 338, as Project Ocondat has it").is_ok());
+        }
+        // a class of concrete, of steel: its values, its factor, the standard and the table
+        let _ = app.material_update(MaterialMessage::Graded("c20/25".into()));
+        {
+            let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 1200.0), app.material_pane(app.theme.palette(), Language::English));
+            assert!(pane.find("fck 20 · fck,cube 25 · fcm 28 · fctm 2.2 · fctk,0.05 1.5 · fctk,0.95 2.9 · Ecm 30000 N/mm²").is_ok() && pane.find("γC 1.5").is_ok() && pane.find("EN 1992-1-1:2004, table 3.1").is_ok());
+            assert!(pane.find("No strength class of a standard: it has no values.").is_err());
+        }
+        // a grade no standard has is kept as it is typed, and the pane says it has no values
+        let _ = app.material_update(MaterialMessage::Graded("C25/35".into()));
+        {
+            let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 1200.0), app.material_pane(app.theme.palette(), Language::English));
+            assert!(pane.find("No strength class of a standard: it has no values.").is_ok());
         }
         // a grade that is no timber class is kept as it is typed; an empty one is none
         let _ = app.material_update(MaterialMessage::Graded("S355".into()));
