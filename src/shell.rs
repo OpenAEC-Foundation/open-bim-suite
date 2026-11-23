@@ -1483,6 +1483,9 @@ impl Studio {
                 .shortcut(key('t'))
                 .enabled(app.collab.clash.is_some() || app.collab.open_group.is_some()),
         ]);
+        // a roof by its footprint: the Slab tool making a roof, in its sketch
+        let roofing = app.modeller.sketch.as_ref().is_some_and(|s| s.new.is_some() && !s.stair) && app.modeller.placement.of(crate::app::modeller::ModelTool::Slab).role == bim_core::SlabRole::Roof;
+        list.push(Command::new("model.roof", l.text("Dak", "Roof"), go(Message::RoofTool(l.text("Dak", "Roof")))).icon(small("curtain.new"), large("curtain.new")).mode(roofing).enabled(loaded));
         // the grid of curtain walls: a line added or taken away, a bay's panel
         list.extend(crate::app::modeller::curtain::CurtainTool::ALL.map(|tool| {
             Command::new(tool.id(), tool.label(l), go(Message::CurtainTool(tool))).icon(small(tool.icon()), large(tool.icon())).mode(app.modeller.curtain == Some(tool)).enabled(loaded)
@@ -2096,7 +2099,7 @@ impl Studio {
                 let sketching = self.app.modeller.sketch.is_some();
                 if self.dialog.is_none() && sketching && !press.modifiers.control() && !press.modifiers.alt() {
                     if let Key::Character(c) = &press.key {
-                        if let Some(c) = c.chars().next().filter(|c| "lrcaotpLRCAOTP".contains(*c)) {
+                        if let Some(c) = c.chars().next().filter(|c| "lrcaotphLRCAOTPH".contains(*c)) {
                             return self.update(Msg::App(Message::EditKey(c)));
                         }
                     }
@@ -2618,7 +2621,7 @@ impl Studio {
                 (l.text("Vlak", "Planar"), vec![large("model.wall"), large("model.slab")]),
                 (l.text("Lijnvormig", "Linear"), vec![large("model.column"), large("model.beam")]),
                 (l.text("Systeem", "System"), vec![large("model.system"), smalls(&["model.curtain-line", "model.curtain-panel"])]),
-                (l.text("Trap", "Stair"), vec![large("model.stair")]),
+                (l.text("Trap en dak", "Stair and roof"), vec![large("model.stair"), large("model.roof")]),
                 (l.text("Puntvormig", "Point"), vec![large("model.point")]),
                 (l.text("Openingen", "Openings"), vec![large("model.door"), large("model.window")]),
                 (l.text("Verbinding", "Connection"), vec![smalls(&["model.butt", "model.mitre", "model.cut"]), smalls(&["model.end-plate", "model.apart"])]),

@@ -345,6 +345,83 @@ pub struct Slope {
     pub angle: f64,
 }
 
+/// The planes of a roof over `outline`, as a roof by footprint has them: every edge with an angle
+/// above zero in `angles` (radians, an entry per edge) is an eave a plane rises from at that
+/// angle, and each plane covers the part of the outline where it is the lowest. An edge without
+/// an angle is a gable: the planes beside it run on to it. Gives each plane's outline in plan
+/// (anticlockwise) with its slope, the eave being the edge the slope names. With no angle at all
+/// the roof is flat: the outline itself, without a slope.
+///
+/// The outline must not turn inwards (it is convex): the planes of a roof round an inner corner
+/// are those of its wings, each drawn as a roof of its own.
+pub fn roof_planes(outline: &[DVec2], angles: &[f64]) -> Result<Vec<(Vec<DVec2>, Option<Slope>)>, Refusal> {
+    let n = outline.len();
+    if n < 3 || outline.iter().any(|p| !p.is_finite()) {
+        return Err(Refusal::NotPositive);
+    }
+    let area: f64 = (0..n).map(|k| outline[k].perp_dot(outline[(k + 1) % n])).sum();
+    let ring: Vec<DVec2> = if area >= 0.0 { outline.to_vec() } else { outline.iter().rev().copied().collect() };
+    // edge i of the ring, as it was numbered in the outline
+    let angle_of = |i: usize| angles.get(if area >= 0.0 { i } else { (2 * n - 2 - i) % n }).copied().unwrap_or(0.0);
+    if (0..n).any(|i| !(0.0..=STEEPEST).contains(&angle_of(i))) {
+        return Err(Refusal::NotPositive);
+    }
+    let eaves: Vec<usize> = (0..n).filter(|i| angle_of(*i) > 1e-9).collect();
+    if eaves.is_empty() {
+        return Ok(vec![(ring, None)]);
+    }
+    let tol = LINEAR_TOLERANCE;
+    if (0..n).any(|i| (ring[(i + 1) % n] - ring[i]).perp_dot(ring[(i + 2) % n] - ring[(i + 1) % n]) < -tol) {
+        return Err(Refusal::NotConvex);
+    }
+    // how high the plane of eave i is over point p, the eave at 0
+    let rise = |i: usize, p: DVec2| {
+        let (a, b) = (ring[i], ring[(i + 1) % n]);
+        (p - a).dot((b - a).normalize_or_zero().perp()) * angle_of(i).tan()
+    };
+    let mut planes = Vec::new();
+    for &i in &eaves {
+        // the outline, cut to where this plane lies under every other
+        let mut part = ring.clone();
+        for &j in eaves.iter().filter(|j| **j != i) {
+            let over = |p: DVec2| rise(j, p) - rise(i, p);
+            let mut cut: Vec<DVec2> = Vec::with_capacity(part.len() + 2);
+            for k in 0..part.len() {
+                let (a, b) = (part[k], part[(k + 1) % part.len()]);
+                let (da, db) = (over(a), over(b));
+                if da >= -tol {
+                    cut.push(a);
+                }
+                if (da > tol && db < -tol) || (da < -tol && db > tol) {
+                    cut.push(a + (b - a) * (da / (da - db)));
+                }
+            }
+            cut.dedup_by(|a, b| a.distance(*b) <= tol);
+            if cut.len() > 1 && cut[0].distance(cut[cut.len() - 1]) <= tol {
+                cut.pop();
+            }
+            part = cut;
+            if part.len() < 3 {
+                break;
+            }
+        }
+        let size: f64 = (0..part.len()).map(|k| part[k].perp_dot(part[(k + 1) % part.len()])).sum::<f64>() / 2.0;
+        if part.len() < 3 || size <= tol {
+            continue;
+        }
+        // its eave: the edge of the part that lies on the outline's edge i
+        let (a, b) = (ring[i], ring[(i + 1) % n]);
+        let across = (b - a).normalize_or_zero().perp();
+        let on = |p: DVec2| (p - a).dot(across).abs() <= 10.0 * tol;
+        let Some(edge) = (0..part.len()).find(|k| on(part[*k]) && on(part[(*k + 1) % part.len()]) && part[*k].distance(part[(*k + 1) % part.len()]) > tol) else { continue };
+        planes.push((part, Some(Slope { edge, angle: angle_of(i) })));
+    }
+    if planes.is_empty() {
+        return Err(Refusal::Degenerate);
+    }
+    Ok(planes)
+}
+
 /// The steepest a slab rises (radians): 85°.
 pub const STEEPEST: f64 = 1.4835298641951802;
 
@@ -1752,5 +1829,42 @@ mod tests {
         assert!(solids.iter().all(|s| s.check().is_ok()));
         let (lo, hi) = solids[9].bounds();
         assert!((hi.z - (1.0 + 2.0)).abs() < 1e-9 && (lo.x - 2.7).abs() < 1e-9, "{lo} {hi}");
+    }
+
+    #[test]
+    fn a_roof_by_footprint_has_a_plane_from_every_eave() {
+        let p = DVec2::new;
+        let area = |ring: &[DVec2]| (0..ring.len()).map(|i| ring[i].perp_dot(ring[(i + 1) % ring.len()])).sum::<f64>() / 2.0;
+        let rect = [p(0.0, 0.0), p(10.0, 0.0), p(10.0, 6.0), p(0.0, 6.0)];
+        let deg = |d: f64| d.to_radians();
+        // every edge an eave at 40 degrees: a hip roof, two trapezia and two triangles
+        let hip = roof_planes(&rect, &[deg(40.0); 4]).unwrap();
+        let mut sizes: Vec<f64> = hip.iter().map(|(ring, _)| area(ring)).collect();
+        sizes.sort_by(f64::total_cmp);
+        assert_eq!(hip.len(), 4);
+        assert!((sizes[0] - 9.0).abs() < 1e-9 && (sizes[1] - 9.0).abs() < 1e-9 && (sizes[2] - 21.0).abs() < 1e-9 && (sizes[3] - 21.0).abs() < 1e-9, "{sizes:?}");
+        // each plane's eave is the edge of the outline it rises from, and it makes a slab that holds
+        for (ring, slope) in &hip {
+            let slope = slope.unwrap();
+            let (a, b) = (ring[slope.edge], ring[(slope.edge + 1) % ring.len()]);
+            assert!(rect.iter().zip(rect.iter().cycle().skip(1)).any(|(c, d)| (a.distance(*c) < 1e-9 && b.distance(*d) < 1e-9)), "{ring:?} {slope:?}");
+            let slab = PlanarDef { form: PlanarForm::Slab { outline: ring.clone(), holes: Vec::new(), top: 3.0, bulges: Vec::new(), role: SlabRole::Roof, slope: Some(slope) }, thickness: 0.2, openings: Vec::new(), build_up: None };
+            assert!(planar_solids(&slab).unwrap().iter().all(|s| s.check().is_ok()));
+        }
+        // the short sides without an angle: gables, and two planes that meet on the ridge
+        let gable = roof_planes(&rect, &[deg(40.0), 0.0, deg(40.0), 0.0]).unwrap();
+        assert_eq!(gable.len(), 2);
+        assert!(gable.iter().all(|(ring, _)| (area(ring) - 30.0).abs() < 1e-9));
+        // one eave: a single pitch over the whole outline; none: flat
+        let mono = roof_planes(&rect, &[deg(15.0), 0.0, 0.0, 0.0]).unwrap();
+        assert_eq!((mono.len(), mono[0].1), (1, Some(Slope { edge: 0, angle: deg(15.0) })));
+        assert_eq!(roof_planes(&rect, &[]).unwrap(), vec![(rect.to_vec(), None)]);
+        // two different angles: the ridge lies nearer the steeper eave
+        let uneven = roof_planes(&rect, &[deg(30.0), 0.0, deg(60.0), 0.0]).unwrap();
+        assert!(area(&uneven[0].0) > area(&uneven[1].0) * 2.9, "{uneven:?}");
+        // an outline that turns inwards is refused for a sloped roof, and taken for a flat one
+        let ell = [p(0.0, 0.0), p(10.0, 0.0), p(10.0, 4.0), p(4.0, 4.0), p(4.0, 10.0), p(0.0, 10.0)];
+        assert_eq!(roof_planes(&ell, &[deg(40.0); 6]).err(), Some(Refusal::NotConvex));
+        assert_eq!(roof_planes(&ell, &[]).unwrap().len(), 1);
     }
 }

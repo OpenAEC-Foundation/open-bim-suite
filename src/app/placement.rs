@@ -191,6 +191,11 @@ impl Placement {
         self.settings.get(&tool).cloned().unwrap_or_else(|| Settings::default_for(tool))
     }
 
+    /// Puts `settings` in the place of `tool`'s.
+    pub(super) fn set_tool(&mut self, tool: ModelTool, settings: Settings) {
+        self.set(tool, settings);
+    }
+
     fn set(&mut self, tool: ModelTool, settings: Settings) {
         self.settings.insert(tool, settings);
     }
@@ -609,7 +614,12 @@ impl App {
             bar = bar.push(pair(label(l.text("Type", "Type")), pick));
         }
         let typing = self.modeller.placement.typing.clone();
-        for (field, name) in fields(tool, l) {
+        let mut listed = fields(tool, l);
+        // a roof: the angle its eaves rise at (0: flat)
+        if tool == ModelTool::Slab && s.role == bim_core::SlabRole::Roof {
+            listed.push((PlaceField::Sill, l.text("Helling (°)", "Slope (°)")));
+        }
+        for (field, name) in listed {
             // a typed element's thickness is its type's
             let fixed = field == PlaceField::Width && s.kind.is_some() && matches!(tool, ModelTool::Wall | ModelTool::Slab | ModelTool::Column | ModelTool::Beam);
             let fixed = fixed || (field == PlaceField::Depth && s.kind.is_some() && matches!(tool, ModelTool::Column | ModelTool::Beam));

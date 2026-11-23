@@ -931,6 +931,10 @@ pub enum Message {
     RemoveGridLine(bool, usize),
     /// The selected curtain wall gets its equal grid back.
     EqualGrid,
+    /// The Roof tool, named as its roofs are: the Slab tool making a roof, its sketch open.
+    RoofTool(&'static str),
+    /// The angle typed for the picked line of a roof's sketch.
+    SketchSlope(String),
     /// The Stair tool's Sketch: opens the sketch of a new stair, or closes it.
     StairSketch,
     /// The angle typed for the turn under way (degrees), and Enter: the turn is made by it.
@@ -2260,6 +2264,8 @@ impl App {
             Message::RemoveGridLine(upright, index) => self.remove_grid_line(upright, index),
             Message::EqualGrid => self.equal_grid(),
             Message::StairSketch => self.toggle_stair_sketch(),
+            Message::RoofTool(name) => self.start_roof_tool(name),
+            Message::SketchSlope(typed) => self.sketch_slope_typed(typed),
             Message::TurnTyped(typed) => self.modeller.turn_typed = typed,
             Message::TurnApply => self.turn_by_typed(),
             Message::SnapToggle(snap) => self.modeller.snaps.toggle(snap),

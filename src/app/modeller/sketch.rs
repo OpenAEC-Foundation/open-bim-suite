@@ -5,6 +5,11 @@
 //! - **A new floor.** The Slab tool draws no rectangle of its own: it opens the sketch with the
 //!   Line tool on, at the height its strip gives. What is drawn is a floor (or a roof, or a
 //!   ceiling: the strip says which) of the strip's type and thickness once it is finished.
+//! - **A roof.** The Roof tool opens the sketch with the Slab tool making a roof. Every line of
+//!   the outline is an eave the roof rises from at the angle of the strip; a picked line can be
+//!   given an angle of its own, and **H** takes its slope away or gives it back: a line without
+//!   a slope is a gable (or, with none sloping, the roof is flat). Finished, the roof is a roof
+//!   slab for every plane, each rising from its eave (see `bim_core::element::roof_planes`).
 //! - **A stair.** The Stair tool's Sketch opens the same sketch for a stair. **P** draws the line
 //!   it climbs along, from its foot: each click a point. With an outline drawn, the stair is the
 //!   outline cut into treads across that line, from its first point to its last. With no outline
@@ -41,6 +46,9 @@ use glam::{DVec2, DVec3};
 use iced::Color;
 use openaec_ui::Language;
 use std::f64::consts::{PI, TAU};
+
+/// The pitch the Roof tool starts with (degrees).
+pub const ROOF_PITCH: f64 = 30.0;
 
 /// Points this close are one point (metres).
 const MEET: f64 = 1e-4;
@@ -223,6 +231,9 @@ pub struct Sketch {
     pub stair: bool,
     /// A stair's line: where it climbs along, from its foot.
     pub path: Vec<DVec2>,
+    /// The lines of a roof's outline with an angle of their own (degrees; 0: no slope, a gable),
+    /// each by its two ends.
+    pub slopes: Vec<(DVec2, DVec2, f64)>,
     /// The height the sketch lies at: the floor's top (scene coordinates).
     pub top: f64,
     pub segments: Vec<Segment>,
@@ -332,6 +343,11 @@ fn circle(centre: DVec2, on: DVec2) -> [Segment; 4] {
 /// the sides of two walls that meet end short of their corner or run past it by a wall's
 /// thickness.
 const CORNER: f64 = 1.0;
+
+/// Whether `line` runs between `a` and `b`, either way.
+fn same_line(a: DVec2, b: DVec2, line: &Segment) -> bool {
+    (line.a.distance(a) <= MEET && line.b.distance(b) <= MEET) || (line.a.distance(b) <= MEET && line.b.distance(a) <= MEET)
+}
 
 /// The four sides of the rectangle between corners `a` and `b`.
 fn rectangle(a: DVec2, b: DVec2) -> [Segment; 4] {
@@ -463,7 +479,7 @@ impl App {
         self.modeller.points.clear();
         self.modeller.refusal = None;
         self.measure.tool = None;
-        self.modeller.sketch = Some(Sketch { element: Some(element), new: None, stair: false, path: Vec::new(), top, segments, tool: SketchTool::Pick, first: None, second: None, cursor: None, picked: None, held: None, error: None });
+        self.modeller.sketch = Some(Sketch { element: Some(element), new: None, stair: false, path: Vec::new(), slopes: Vec::new(), top, segments, tool: SketchTool::Pick, first: None, second: None, cursor: None, picked: None, held: None, error: None });
     }
 
     /// A tool of the Modeller is chosen (from the ribbon or by its keys): as
@@ -480,7 +496,7 @@ impl App {
     fn open_new_sketch(&mut self, name: &'static str) {
         let (z, _, level) = self.work_plane();
         let top = z + self.modeller.placement.of(super::ModelTool::Slab).offset;
-        self.modeller.sketch = Some(Sketch { element: None, new: Some((name, level)), stair: false, path: Vec::new(), top, segments: Vec::new(), tool: SketchTool::Line, first: None, second: None, cursor: None, picked: None, held: None, error: None });
+        self.modeller.sketch = Some(Sketch { element: None, new: Some((name, level)), stair: false, path: Vec::new(), slopes: Vec::new(), top, segments: Vec::new(), tool: SketchTool::Line, first: None, second: None, cursor: None, picked: None, held: None, error: None });
     }
 
     /// The Stair tool's Sketch: opens an empty sketch for a new stair, with the Line tool on, or
@@ -494,7 +510,7 @@ impl App {
         let (z, _, level) = self.work_plane();
         let top = z + self.modeller.placement.of(super::ModelTool::Stair).offset;
         self.modeller.points.clear();
-        self.modeller.sketch = Some(Sketch { element: None, new: Some((name, level)), stair: true, path: Vec::new(), top, segments: Vec::new(), tool: SketchTool::Line, first: None, second: None, cursor: None, picked: None, held: None, error: None });
+        self.modeller.sketch = Some(Sketch { element: None, new: Some((name, level)), stair: true, path: Vec::new(), slopes: Vec::new(), top, segments: Vec::new(), tool: SketchTool::Line, first: None, second: None, cursor: None, picked: None, held: None, error: None });
     }
 
     /// The sketch of a new floor or stair leaves, and its tool with it.
@@ -632,6 +648,17 @@ impl App {
             'o' => SketchTool::Trace,
             'p' if sketch.stair => SketchTool::Path,
             't' => SketchTool::Trim,
+            // H: the picked line of a roof's outline loses its slope, or gets it back
+            'h' => {
+                if let Some(line) = sketch.picked.and_then(|k| sketch.segments.get(k)).copied() {
+                    match sketch.slopes.iter().position(|(a, b, _)| same_line(*a, *b, &line)) {
+                        Some(k) if sketch.slopes[k].2 == 0.0 => drop(sketch.slopes.remove(k)),
+                        Some(k) => sketch.slopes[k].2 = 0.0,
+                        None => sketch.slopes.push((line.a, line.b, 0.0)),
+                    }
+                }
+                return;
+            }
             _ => return,
         };
         sketch.tool = if sketch.tool == tool { SketchTool::Pick } else { tool };
@@ -697,6 +724,52 @@ impl App {
             let _ = top;
             let (z, ..) = self.work_plane();
             let mut shape = self.shape_for(super::ModelTool::Slab, lo.extend(z), hi.extend(z));
+            // a roof: a plane from every line of the outline that slopes, each a roof slab
+            let settings = self.modeller.placement.of(super::ModelTool::Slab);
+            if settings.role == bim_core::SlabRole::Roof {
+                let ring = bowed(&corners, &bows);
+                let own = self.modeller.sketch.as_ref().map(|s| s.slopes.clone()).unwrap_or_default();
+                let angles: Vec<f64> = (0..ring.len())
+                    .map(|k| {
+                        let edge = Segment::line(ring[k], ring[(k + 1) % ring.len()]);
+                        own.iter().find(|(a, b, _)| same_line(*a, *b, &edge)).map_or(settings.sill, |(_, _, degrees)| *degrees).to_radians()
+                    })
+                    .collect();
+                if angles.iter().any(|a| *a > 1e-9) {
+                    let planes = match bim_core::element::roof_planes(&ring, &angles) {
+                        Ok(planes) => planes,
+                        Err(refusal) => {
+                            self.modeller.refusal = Some(refusal);
+                            return;
+                        }
+                    };
+                    let name = self.placed_name(super::ModelTool::Slab, name);
+                    let before = self.modeller.model.clone();
+                    let mut made = Vec::new();
+                    for (plane, slope) in planes {
+                        let mut part = shape.clone();
+                        let Shape::Planar(PlanarDef { form: PlanarForm::Slab { outline, holes, bulges, slope: rises, .. }, .. }) = &mut part else { return };
+                        (*outline, *rises) = (plane, slope);
+                        holes.clear();
+                        bulges.clear();
+                        match self.add_element(name, level.clone(), part) {
+                            Ok(id) => made.push(id),
+                            // a plane the kernel cannot make: none of the roof is made
+                            Err(refusal) => {
+                                self.modeller.model = before;
+                                self.show_modelled();
+                                self.modeller.refusal = Some(refusal);
+                                return;
+                            }
+                        }
+                    }
+                    self.leave_sketch();
+                    if let Some(first) = made.first() {
+                        self.select_modelled(*first);
+                    }
+                    return;
+                }
+            }
             match &mut shape {
                 Shape::System(s) => s.outline = bowed(&corners, &bows),
                 Shape::Planar(PlanarDef { form: PlanarForm::Slab { outline, holes, bulges, .. }, .. }) => {
@@ -883,9 +956,60 @@ impl App {
             .push(tool(l.text("Overnemen (O)", "Pick lines (O)"), 'o', is(SketchTool::Trace)))
             .push(tool(l.text("Trimmen (T)", "Trim (T)"), 't', is(SketchTool::Trim)))
             .push(sketch.stair.then(|| tool(l.text("Looplijn (P)", "Climb line (P)"), 'p', is(SketchTool::Path))))
+            .push(self.sketch_slope_row(p, l))
             .push(button(text(l.text("Klaar (Tab)", "Finish (Tab)")).size(12)).padding([3, 10]).style(move |_, s| p.ribbon_button(false, s)).on_press(Message::EditMode))
             .push(button(text(l.text("Annuleren", "Cancel")).size(12)).padding([3, 10]).style(move |_, s| p.ribbon_button(false, s)).on_press(Message::SketchCancel));
         Some(container(bar.wrap()).padding([2, 8]).into())
+    }
+
+    /// Whether the sketch open is a new roof's: the Slab tool makes a roof.
+    fn sketching_roof(&self) -> bool {
+        self.modeller.sketch.as_ref().is_some_and(|s| s.new.is_some() && !s.stair) && self.modeller.placement.of(super::ModelTool::Slab).role == bim_core::SlabRole::Roof
+    }
+
+    /// The slope of the picked line of a roof's outline: a field for its angle, and a button
+    /// that takes its slope away or gives it back (H).
+    fn sketch_slope_row(&self, p: crate::theme::Palette, l: Language) -> Option<iced::Element<'_, crate::app::Message>> {
+        use crate::app::Message;
+        use iced::widget::{button, row, text, text_input};
+        let sketch = self.modeller.sketch.as_ref().filter(|_| self.sketching_roof())?;
+        let line = sketch.picked.and_then(|k| sketch.segments.get(k))?;
+        let own = sketch.slopes.iter().find(|(a, b, _)| same_line(*a, *b, line)).map(|(_, _, degrees)| *degrees);
+        let angle = own.unwrap_or(self.modeller.placement.of(super::ModelTool::Slab).sill);
+        let field = text_input("", &format!("{angle}")).on_input(Message::SketchSlope).size(12).padding([2, 6]).width(60);
+        let none = angle == 0.0;
+        let toggle = button(text(l.text("Geen helling (H)", "No slope (H)")).size(12)).padding([3, 10]).style(move |_, s| p.ribbon_button(none, s)).on_press(Message::EditKey('h'));
+        Some(row![text(l.text("Helling van deze rand (°)", "Slope of this edge (°)")).size(12).color(p.text_secondary), field, toggle].spacing(6).align_y(iced::Center).into())
+    }
+
+    /// The angle typed for the picked line of a roof's outline (degrees, 0 to 85).
+    pub(in crate::app) fn sketch_slope_typed(&mut self, typed: String) {
+        let Ok(degrees) = typed.trim().replace(',', ".").parse::<f64>() else { return };
+        if !(0.0..=85.0).contains(&degrees) || !self.sketching_roof() {
+            return;
+        }
+        let Some(sketch) = self.modeller.sketch.as_mut() else { return };
+        let Some(line) = sketch.picked.and_then(|k| sketch.segments.get(k)).copied() else { return };
+        match sketch.slopes.iter_mut().find(|(a, b, _)| same_line(*a, *b, &line)) {
+            Some(own) => own.2 = degrees,
+            None => sketch.slopes.push((line.a, line.b, degrees)),
+        }
+    }
+
+    /// The Roof tool: the Slab tool making a roof, its sketch open; a roof that would be flat
+    /// gets the usual pitch.
+    pub(in crate::app) fn start_roof_tool(&mut self, name: &'static str) {
+        let mut s = self.modeller.placement.of(super::ModelTool::Slab);
+        s.role = bim_core::SlabRole::Roof;
+        s.kind = None;
+        if s.sill <= 0.0 {
+            s.sill = ROOF_PITCH;
+        }
+        self.modeller.placement.set_tool(super::ModelTool::Slab, s);
+        if self.modeller.tool.is_some_and(|(t, _)| t == super::ModelTool::Slab) {
+            self.set_model_tool(None);
+        }
+        self.start_model_tool(Some((super::ModelTool::Slab, name)));
     }
 
     /// Cancel: the sketch leaves with the floor unchanged, whatever tool is on.
@@ -1360,5 +1484,78 @@ mod tests {
         // one step takes it back
         let _ = app.update(Message::Undo);
         assert_eq!(stairs(&app).len(), 1);
+    }
+
+    fn roofs(app: &App) -> Vec<(f64, Option<bim_core::Slope>)> {
+        let grid = app.modeller.model.grid;
+        let area = |ring: &[DVec2]| (0..ring.len()).map(|i| ring[i].perp_dot(ring[(i + 1) % ring.len()])).sum::<f64>().abs() / 2.0;
+        app.modeller
+            .model
+            .iter()
+            .filter(|e| e.class() == "IfcRoof")
+            .filter_map(|e| match e.shape_in_project(&grid) {
+                Shape::Planar(PlanarDef { form: PlanarForm::Slab { outline, slope, .. }, .. }) => Some(((area(&outline) * 1e6).round() / 1e6, slope)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_roof_tool_makes_a_plane_from_every_eave_and_a_gable_where_a_line_has_no_slope() {
+        use crate::app::placement::{PlaceField, PlaceMessage};
+        let mut app = modelling();
+        let _ = app.update(Message::RoofTool("Roof"));
+        assert!(app.modeller.sketch.as_ref().is_some_and(|s| s.new.is_some()) && app.sketching_roof());
+        assert_eq!(app.modeller.placement.of(crate::app::modeller::ModelTool::Slab).sill, ROOF_PITCH);
+        // a rectangle of 10 by 6, every line an eave at 30 degrees: a hip roof of four planes
+        app.sketch_key('r');
+        click(&mut app, 0.0, 0.0);
+        click(&mut app, 10.0, 6.0);
+        let _ = app.update(Message::EditMode);
+        let mut made = roofs(&app);
+        made.sort_by(|a, b| a.0.total_cmp(&b.0));
+        assert_eq!(made.iter().map(|r| r.0).collect::<Vec<_>>(), [9.0, 9.0, 21.0, 21.0], "{:?}", app.modeller.refusal);
+        assert!(made.iter().all(|r| r.1.is_some_and(|s| (s.angle.to_degrees() - 30.0).abs() < 1e-9)));
+        assert!(app.modeller.sketch.is_none() && app.modeller.tool.is_none());
+        // one step takes the whole roof back
+        let _ = app.update(Message::Undo);
+        assert!(roofs(&app).is_empty());
+        // the short sides without a slope (H on the picked line), the long ones at 45: a gable roof
+        let _ = app.update(Message::RoofTool("Roof"));
+        app.place_message(PlaceMessage::Field(PlaceField::Sill, "45".into()));
+        app.sketch_key('r');
+        click(&mut app, 0.0, 0.0);
+        click(&mut app, 10.0, 6.0);
+        app.sketch_key('r');
+        for (x, y) in [(0.0, 3.0), (10.0, 3.0)] {
+            click(&mut app, x, y);
+            assert!(app.modeller.sketch.as_ref().unwrap().picked.is_some());
+            app.sketch_key('h');
+        }
+        let _ = app.update(Message::EditMode);
+        let made = roofs(&app);
+        assert_eq!(made.iter().map(|r| r.0).collect::<Vec<_>>(), [30.0, 30.0], "{:?}", app.modeller.refusal);
+        // every line without a slope, or the strip's angle at 0: one flat roof
+        let _ = app.update(Message::RoofTool("Roof"));
+        app.place_message(PlaceMessage::Field(PlaceField::Sill, "0".into()));
+        app.sketch_key('r');
+        click(&mut app, 20.0, 0.0);
+        click(&mut app, 24.0, 4.0);
+        let _ = app.update(Message::EditMode);
+        let made = roofs(&app);
+        assert_eq!((made.len(), made[2]), (3, (16.0, None)));
+        // a picked line gets an angle of its own: a single pitch of 10 degrees from that eave
+        let _ = app.update(Message::RoofTool("Roof"));
+        app.place_message(PlaceMessage::Field(PlaceField::Sill, "0".into()));
+        app.sketch_key('r');
+        click(&mut app, 30.0, 0.0);
+        click(&mut app, 34.0, 4.0);
+        app.sketch_key('r');
+        click(&mut app, 32.0, 0.0);
+        let _ = app.update(Message::SketchSlope("10".into()));
+        let _ = app.update(Message::EditMode);
+        let made = roofs(&app);
+        assert_eq!(made.len(), 4, "{:?}", app.modeller.refusal);
+        assert!(made[3].0 == 16.0 && made[3].1.is_some_and(|s| (s.angle.to_degrees() - 10.0).abs() < 1e-9), "{:?}", made[3]);
     }
 }

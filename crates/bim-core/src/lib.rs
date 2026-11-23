@@ -102,6 +102,8 @@ pub enum Refusal {
     /// A run is too short to stop clear of the fitting at its end.
     TooShortForFitting,
     NotInLine,
+    /// A sloped roof over an outline that turns inwards.
+    NotConvex,
 }
 
 impl Refusal {
@@ -138,6 +140,7 @@ impl Refusal {
             Refusal::SystemJoin => "Two framed systems are joined butt or kept apart.",
             Refusal::TooShortForFitting => "A run is too short for the fitting at its end.",
             Refusal::NotInLine => "The two runs do not lie in one line.",
+            Refusal::NotConvex => "A sloped roof needs an outline without inward corners: draw each wing as a roof of its own.",
         }
     }
 }
