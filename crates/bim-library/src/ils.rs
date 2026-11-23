@@ -115,6 +115,45 @@ impl BuildUp {
     }
 }
 
+/// What a library holds of one kind of type, and how much of it a delivery still lacks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stock {
+    /// What it counts ("walls", "beams"), in English, as data.
+    pub of: String,
+    pub count: usize,
+    /// How many of them are complete for a delivery.
+    pub complete: usize,
+    /// How many lack a code of four digits, whether they bear, and a fire rating.
+    pub lacking: [usize; 3],
+}
+
+/// The stock of a library's build-ups by role and its linear types by role: how many, how many
+/// complete for a delivery, and what the others lack. A role it has none of is listed with 0:
+/// that is what a library still misses.
+pub fn stock(library: &crate::Library) -> Vec<Stock> {
+    let count = |of: &str, all: Vec<Vec<Missing>>| Stock {
+        of: of.to_string(),
+        count: all.len(),
+        complete: all.iter().filter(|missing| missing.is_empty()).count(),
+        lacking: [Missing::FourDigits, Missing::LoadBearing, Missing::FireRating].map(|what| all.iter().filter(|missing| missing.contains(&what)).count()),
+    };
+    let mut out: Vec<Stock> = Role::ALL.into_iter().map(|role| count(&format!("{} build-ups", role.name().to_lowercase()), library.buildups_of(role).map(|b| b.missing(&library.materials)).collect())).collect();
+    for (role, name) in [
+        (LinearRole::Column, "columns"),
+        (LinearRole::Beam, "beams"),
+        (LinearRole::Member, "members"),
+        (LinearRole::Pile, "piles"),
+        (LinearRole::Mullion, "mullions"),
+        (LinearRole::Skirting, "skirting boards"),
+        (LinearRole::Pipe, "pipes"),
+        (LinearRole::Duct, "ducts"),
+        (LinearRole::CableTray, "cable trays"),
+    ] {
+        out.push(count(name, library.linear_types.iter().filter(|t| t.role == role).map(LinearType::missing).collect()));
+    }
+    out
+}
+
 impl LinearType {
     /// Whether it is of the services: a pipe, a duct, a cable tray.
     fn of_services(&self) -> bool {
@@ -247,6 +286,39 @@ mod tests {
         let node = file["data"].as_array().unwrap().iter().find(|n| n["path"] == path.as_str()).unwrap();
         assert_eq!((node["attributes"]["bsi::ifc::prop::FireRating"].as_str(), node["attributes"]["bsi::ifc::prop::LoadBearing"].as_bool()), (Some("R 30"), Some(true)));
         assert_eq!(crate::ifcx::read(&file).unwrap().linear_type(&id).map(|t| t.delivery.fire_rating.clone()), Some(Some("R 30".to_string())));
+    }
+
+    #[test]
+    fn the_stock_of_a_library_says_what_it_holds_and_what_a_delivery_lacks() {
+        let library = Library::starter();
+        let all = stock(&library);
+        assert_eq!(all.len(), 13);
+        assert_eq!(all.iter().filter(|s| s.of.ends_with("build-ups")).map(|s| s.count).sum::<usize>(), library.buildups.len());
+        assert_eq!(all.iter().filter(|s| !s.of.ends_with("build-ups")).map(|s| s.count).sum::<usize>(), library.linear_types.len());
+        for s in &all {
+            assert!(s.complete <= s.count && s.lacking.iter().all(|n| *n <= s.count), "{}", s.of);
+        }
+        // nothing of the starter library has a fire rating yet, so nothing is complete
+        assert!(all.iter().all(|s| s.complete == 0));
+        let walls = all.iter().find(|s| s.of == "wall build-ups").unwrap();
+        assert_eq!(walls.lacking[2], walls.count);
+        // one made complete is counted as such
+        let mut library = library;
+        let wall = library.buildups.iter_mut().find(|b| b.role == Role::Wall).unwrap();
+        wall.code = Some("22.21".into());
+        wall.delivery.fire_rating = Some("60".into());
+        assert_eq!(stock(&library).iter().find(|s| s.of == "wall build-ups").map(|s| s.complete), Some(1));
+    }
+
+    #[test]
+    #[ignore = "prints the stock of the libraries, for docs/library/dutch-library-stock.md"]
+    fn print_the_stock() {
+        for (name, library) in [("starter", Library::starter()), ("dutch", crate::dutch::library()), ("ocondat", crate::ocondat::library()), ("inb", crate::inb::library())] {
+            println!("== {name}: materials {}, build-ups {}, linear {}, systems {}, objects {}, connections {}, services {}, covers {}", library.materials.len(), library.buildups.len(), library.linear_types.len(), library.system_types.len(), library.object_types.len(), library.connection_types.len(), library.service_types.len(), library.cover_types.len());
+            for s in stock(&library) {
+                println!("{} | {} | {} | {} | {} | {}", s.of, s.count, s.complete, s.lacking[0], s.lacking[1], s.lacking[2]);
+            }
+        }
     }
 
 }
