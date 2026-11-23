@@ -1740,6 +1740,13 @@
     "An opening in a wall is a rectangle, level and plumb": "Un'apertura in una parete è un rettangolo, in piano e a piombo",
     "Wall sketch": "Schizzo della parete",
     "Pick (S)": "Scegli (S)",
-    "An opening in a system floor is a rectangle along its laying direction": "Un'apertura in un solaio di sistema è un rettangolo lungo la direzione di posa"
+    "An opening in a system floor is a rectangle along its laying direction": "Un'apertura in un solaio di sistema è un rettangolo lungo la direzione di posa",
+    "2D components": "Componenti 2D",
+    "detail": "dettaglio",
+    "component": "componente",
+    "Maker": "Produttore",
+    "Licence": "Licenza",
+    "Source": "Fonte",
+    "The drawing itself is not in the library yet: a view cannot place it yet.": "Il disegno stesso non è ancora nella libreria: una vista non può ancora posizionarlo."
   }
 }

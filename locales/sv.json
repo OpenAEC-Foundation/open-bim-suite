@@ -1740,6 +1740,13 @@
     "An opening in a wall is a rectangle, level and plumb": "En öppning i en vägg är en rektangel, i våg och i lod",
     "Wall sketch": "Väggskiss",
     "Pick (S)": "Välj (S)",
-    "An opening in a system floor is a rectangle along its laying direction": "En öppning i ett systembjälklag är en rektangel längs läggningsriktningen"
+    "An opening in a system floor is a rectangle along its laying direction": "En öppning i ett systembjälklag är en rektangel längs läggningsriktningen",
+    "2D components": "2D-komponenter",
+    "detail": "detalj",
+    "component": "komponent",
+    "Maker": "Tillverkare",
+    "Licence": "Licens",
+    "Source": "Källa",
+    "The drawing itself is not in the library yet: a view cannot place it yet.": "Själva ritningen finns ännu inte i biblioteket: en vy kan inte placera den än."
   }
 }

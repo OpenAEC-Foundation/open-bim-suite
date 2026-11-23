@@ -1740,6 +1740,13 @@
     "An opening in a wall is a rectangle, level and plumb": "Duvardaki bir boşluk, terazisinde ve şakülünde bir dikdörtgendir",
     "Wall sketch": "Duvar eskizi",
     "Pick (S)": "Seç (S)",
-    "An opening in a system floor is a rectangle along its laying direction": "Sistem döşemesindeki bir boşluk, döşeme yönü boyunca bir dikdörtgendir"
+    "An opening in a system floor is a rectangle along its laying direction": "Sistem döşemesindeki bir boşluk, döşeme yönü boyunca bir dikdörtgendir",
+    "2D components": "2B bileşenler",
+    "detail": "detay",
+    "component": "bileşen",
+    "Maker": "Üretici",
+    "Licence": "Lisans",
+    "Source": "Kaynak",
+    "The drawing itself is not in the library yet: a view cannot place it yet.": "Çizimin kendisi henüz kitaplıkta değil: bir görünüm onu henüz yerleştiremez."
   }
 }

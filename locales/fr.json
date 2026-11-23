@@ -1740,6 +1740,13 @@
     "An opening in a wall is a rectangle, level and plumb": "Une ouverture dans un mur est un rectangle, de niveau et d'aplomb",
     "Wall sketch": "Esquisse du mur",
     "Pick (S)": "Choisir (S)",
-    "An opening in a system floor is a rectangle along its laying direction": "Une ouverture dans un plancher système est un rectangle dans le sens de pose"
+    "An opening in a system floor is a rectangle along its laying direction": "Une ouverture dans un plancher système est un rectangle dans le sens de pose",
+    "2D components": "Composants 2D",
+    "detail": "détail",
+    "component": "composant",
+    "Maker": "Fabricant",
+    "Licence": "Licence",
+    "Source": "Source",
+    "The drawing itself is not in the library yet: a view cannot place it yet.": "Le dessin lui-même n'est pas encore dans la bibliothèque : une vue ne peut pas encore le placer."
   }
 }

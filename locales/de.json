@@ -1740,6 +1740,13 @@
     "An opening in a wall is a rectangle, level and plumb": "Eine Öffnung in einer Wand ist ein Rechteck, waagerecht und lotrecht",
     "Wall sketch": "Wandskizze",
     "Pick (S)": "Wählen (S)",
-    "An opening in a system floor is a rectangle along its laying direction": "Eine Öffnung in einer Systemdecke ist ein Rechteck in Verlegerichtung"
+    "An opening in a system floor is a rectangle along its laying direction": "Eine Öffnung in einer Systemdecke ist ein Rechteck in Verlegerichtung",
+    "2D components": "2D-Bauteile",
+    "detail": "Detail",
+    "component": "Bauteil",
+    "Maker": "Hersteller",
+    "Licence": "Lizenz",
+    "Source": "Quelle",
+    "The drawing itself is not in the library yet: a view cannot place it yet.": "Die Zeichnung selbst ist noch nicht in der Bibliothek: eine Ansicht kann sie noch nicht platzieren."
   }
 }

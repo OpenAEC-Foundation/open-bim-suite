@@ -1740,6 +1740,13 @@
     "An opening in a wall is a rectangle, level and plumb": "Otwór w ścianie jest prostokątem, w poziomie i w pionie",
     "Wall sketch": "Szkic ściany",
     "Pick (S)": "Wybierz (S)",
-    "An opening in a system floor is a rectangle along its laying direction": "Otwór w stropie systemowym jest prostokątem wzdłuż kierunku układania"
+    "An opening in a system floor is a rectangle along its laying direction": "Otwór w stropie systemowym jest prostokątem wzdłuż kierunku układania",
+    "2D components": "Komponenty 2D",
+    "detail": "detal",
+    "component": "komponent",
+    "Maker": "Producent",
+    "Licence": "Licencja",
+    "Source": "Źródło",
+    "The drawing itself is not in the library yet: a view cannot place it yet.": "Samego rysunku nie ma jeszcze w bibliotece: widok nie może go jeszcze umieścić."
   }
 }
