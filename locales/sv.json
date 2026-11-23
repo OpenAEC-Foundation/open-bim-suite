@@ -1806,6 +1806,13 @@
     "☆ Favourite": "☆ Favorit",
     "Find a type": "Sök en typ",
     ", a reference price": ", ett riktpris",
-    "from its materials": "från dess material"
+    "from its materials": "från dess material",
+    "at the centre": "i mitten",
+    "along the element": "längs elementet",
+    "above": "ovanför",
+    "below": "nedanför",
+    "left": "vänster",
+    "right": "höger",
+    "leader": "hänvisningslinje"
   }
 }

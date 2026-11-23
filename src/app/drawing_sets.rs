@@ -11,14 +11,18 @@
 //! gives them, a rule added or taken away. A set of another library is taken into the project
 //! as a copy.
 //!
-//! Not yet: changing a label type here, giving a changed set back to a library, and the
+//! A label type of a set of the project is changed too: what it reads (the fields typed as
+//! words between commas: `name, profile, grade`, a property as `prop:Key`, a fixed text between
+//! quotes), its text style, its frame, its place and whether it has a leader.
+//!
+//! Not yet: adding or removing a label type, giving a changed set back to a library, and the
 //! Modeller applying one to a view.
 
 use super::{App, Message, FONT_BOLD};
 use crate::theme::Palette;
-use bim_library::annotate::{Described, DrawingSet, Frame, Gives, LabelField, LabelType, Measure, Rule};
+use bim_library::annotate::{Described, DrawingSet, Frame, Gives, LabelField, LabelType, Measure, Place, Rule};
 use iced::widget::text::Wrapping;
-use iced::widget::{button, column, container, pick_list, row, text, text_input, Column, Space};
+use iced::widget::{button, checkbox, column, container, pick_list, row, text, text_input, Column, Space};
 use iced::{Center, Element, Fill};
 use openaec_ui::Language;
 
@@ -31,6 +35,8 @@ pub enum Field {
     Classes(String),
     /// The NL-SfB codes a rule (its key) takes.
     Codes(String),
+    /// The fields a label type (its key) reads, as words.
+    Fields(String),
 }
 
 /// What a rule gives, as it is picked: a label of the set or a dimension.
@@ -60,6 +66,11 @@ pub enum DrawingSetMessage {
     RuleRemove(String),
     RuleAdd,
     Gives(String, GivesChoice),
+    /// The frame, the place, the text style (its key) and the leader of a label type (its key).
+    LabelFrame(String, Frame),
+    LabelPlace(String, Place),
+    LabelStyle(String, String),
+    LabelLeader(String, bool),
 }
 
 /// Which drawing set the right pane shows.
@@ -127,6 +138,27 @@ fn frame_name(frame: Frame, l: Language) -> &'static str {
         Frame::Rounded => l.text("afgeronde rechthoek", "rounded rectangle"),
         Frame::Circle => l.text("cirkel", "circle"),
         Frame::Hexagon => l.text("zeshoek", "hexagon"),
+    }
+}
+
+fn place_name(place: Place, l: Language) -> &'static str {
+    match place {
+        Place::Centre => l.text("in het midden", "at the centre"),
+        Place::Along => l.text("langs het element", "along the element"),
+        Place::Above => l.text("boven", "above"),
+        Place::Below => l.text("onder", "below"),
+        Place::Left => l.text("links", "left"),
+        Place::Right => l.text("rechts", "right"),
+    }
+}
+
+/// Something to pick, with the text it shows.
+#[derive(Debug, Clone, PartialEq)]
+struct Named<T>(T, String);
+
+impl<T> std::fmt::Display for Named<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.1)
     }
 }
 
@@ -212,6 +244,12 @@ impl App {
                                 rule.filter.classes = bim_library::annotate::list(&typed);
                             }
                         }
+                        Field::Fields(label) => {
+                            // (words that name no field change nothing: they stay in the field)
+                            if let (Some(fields), Some(label)) = (LabelField::list(&typed), set.labels.iter_mut().find(|l| l.key == *label)) {
+                                label.fields = fields;
+                            }
+                        }
                         Field::Codes(rule) => {
                             if let Some(rule) = set.rules.iter_mut().find(|r| r.key == *rule) {
                                 rule.filter.codes = bim_library::annotate::list(&typed);
@@ -238,6 +276,28 @@ impl App {
                 if let Some(set) = own(self) {
                     set.add_rule(names);
                     self.drawing_set_view.typing = None;
+                }
+            }
+            DrawingSetMessage::LabelFrame(label, frame) => {
+                if let Some(label) = own(self).and_then(|set| set.labels.iter_mut().find(|l| l.key == label)) {
+                    label.frame = frame;
+                }
+            }
+            DrawingSetMessage::LabelPlace(label, place) => {
+                if let Some(label) = own(self).and_then(|set| set.labels.iter_mut().find(|l| l.key == label)) {
+                    label.place = place;
+                }
+            }
+            DrawingSetMessage::LabelStyle(label, style) => {
+                // (a text style the drawing standard does not have is not named)
+                let has = self.standard.text_styles.iter().any(|t| t.key == style);
+                if let Some(label) = own(self).and_then(|set| set.labels.iter_mut().find(|l| l.key == label)).filter(|_| has) {
+                    label.text_style = style;
+                }
+            }
+            DrawingSetMessage::LabelLeader(label, leader) => {
+                if let Some(label) = own(self).and_then(|set| set.labels.iter_mut().find(|l| l.key == label)) {
+                    label.leader = leader;
                 }
             }
             DrawingSetMessage::Gives(rule, choice) => {
@@ -306,6 +366,22 @@ impl App {
         pane = pane.push(caption(l.text("Labeltypen", "Label types")));
         for label in &set.labels {
             pane = pane.push(named(label.names.get(lang).to_string())).push(line(label_line(label, l)));
+            if project {
+                let key = label.key.clone();
+                let words = label.fields.iter().map(LabelField::word).collect::<Vec<_>>().join(", ");
+                pane = pane.push(input(Field::Fields(key.clone()), words, "name, profile, grade"));
+                let frames: Vec<Named<Frame>> = Frame::ALL.map(|f| Named(f, frame_name(f, l).to_string())).to_vec();
+                let frame_key = key.clone();
+                let frame = pick_list(frames.clone(), frames.iter().find(|n| n.0 == label.frame).cloned(), move |n: Named<Frame>| Message::DrawingSet(DrawingSetMessage::LabelFrame(frame_key.clone(), n.0))).text_size(11).padding([2, 6]).width(Fill);
+                let places: Vec<Named<Place>> = Place::ALL.map(|at| Named(at, place_name(at, l).to_string())).to_vec();
+                let place_key = key.clone();
+                let place = pick_list(places.clone(), places.iter().find(|n| n.0 == label.place).cloned(), move |n: Named<Place>| Message::DrawingSet(DrawingSetMessage::LabelPlace(place_key.clone(), n.0))).text_size(11).padding([2, 6]).width(Fill);
+                let styles: Vec<Named<String>> = self.standard.text_styles.iter().map(|t| Named(t.key.clone(), format!("{} mm", t.key))).collect();
+                let style_key = key.clone();
+                let style = pick_list(styles.clone(), styles.iter().find(|n| n.0 == label.text_style).cloned(), move |n: Named<String>| Message::DrawingSet(DrawingSetMessage::LabelStyle(style_key.clone(), n.0))).text_size(11).padding([2, 6]).width(84);
+                let leader = checkbox(label.leader).label(l.text("aanhaallijn", "leader")).on_toggle(move |on| Message::DrawingSet(DrawingSetMessage::LabelLeader(key.clone(), on))).size(14).text_size(12);
+                pane = pane.push(row![frame, place].spacing(4)).push(row![style, leader].spacing(8).align_y(Center));
+            }
         }
         pane = pane.push(caption(l.text("Regels, in volgorde", "Rules, in order")));
         let choices = gives_choices(set, lang, l);
@@ -434,6 +510,38 @@ mod tests {
         // taken away again
         app.drawing_set_update(DrawingSetMessage::Remove);
         assert_eq!((app.library.drawing_sets.len(), app.drawing_set_view.picked.clone()), (5, None));
+    }
+
+    #[test]
+    fn a_label_type_of_the_project_is_changed() {
+        use crate::app::libraries::{LibrariesMessage, Source};
+        let mut app = App::default();
+        let p = app.theme.palette();
+        let l = Language::English;
+        let _ = app.libraries_update(LibrariesMessage::Source(Source::Project));
+        let key = "structural-plan-100".to_string();
+        app.drawing_set_update(DrawingSetMessage::Pick(key.clone()));
+        let label = |app: &App| app.library.drawing_set(&key).unwrap().label("member").cloned().expect("the member label");
+        assert_eq!(label(&app).fields, [LabelField::Name, LabelField::Profile, LabelField::Grade]);
+        // what it reads, typed as words; a word that names no field changes nothing and stays typed
+        app.drawing_set_update(DrawingSetMessage::Typed(Field::Fields("member".into()), "profile, \"-\", grade, prop:Finish".into()));
+        assert_eq!(label(&app).fields, [LabelField::Profile, LabelField::Text("-".into()), LabelField::Grade, LabelField::Property("Finish".into())]);
+        app.drawing_set_update(DrawingSetMessage::Typed(Field::Fields("member".into()), "profile, colour".into()));
+        assert_eq!((label(&app).fields.len(), app.drawing_set_view.typing.clone()), (4, Some((Field::Fields("member".into()), "profile, colour".to_string()))));
+        // its frame, place, leader and text style; a style the standard lacks is not named
+        app.drawing_set_update(DrawingSetMessage::LabelFrame("member".into(), Frame::Rounded));
+        app.drawing_set_update(DrawingSetMessage::LabelPlace("member".into(), Place::Below));
+        app.drawing_set_update(DrawingSetMessage::LabelLeader("member".into(), true));
+        app.drawing_set_update(DrawingSetMessage::LabelStyle("member".into(), "3.5".into()));
+        app.drawing_set_update(DrawingSetMessage::LabelStyle("member".into(), "99".into()));
+        let member = label(&app);
+        assert_eq!((member.frame, member.place, member.leader, member.text_style.as_str()), (Frame::Rounded, Place::Below, true, "3.5"));
+        assert!(app.library.drawing_set(&key).unwrap().check().is_ok());
+        // what a beam gets follows at once
+        let beam = Described { class: "IfcBeam".into(), name: "L1".into(), props: vec![("Profile".into(), "HEA 200".into()), ("Grade".into(), "S355".into())], ..Described::default() };
+        assert_eq!(app.library.drawing_set(&key).unwrap().annotate(&beam).label.map(|l| l.1).as_deref(), Some("HEA 200 -S355"));
+        let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 2400.0), app.drawing_set_pane(p, l, &app.library));
+        assert!(pane.find("leader").is_ok());
     }
 
 }
