@@ -1813,6 +1813,8 @@
     "below": "poniżej",
     "left": "po lewej",
     "right": "po prawej",
-    "leader": "linia odniesienia"
+    "leader": "linia odniesienia",
+    "on": "włączona",
+    " (off)": " (wyłączona)"
   }
 }

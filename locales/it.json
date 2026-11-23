@@ -1813,6 +1813,8 @@
     "below": "sotto",
     "left": "a sinistra",
     "right": "a destra",
-    "leader": "linea di richiamo"
+    "leader": "linea di richiamo",
+    "on": "attiva",
+    " (off)": " (disattivata)"
   }
 }

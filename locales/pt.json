@@ -1813,6 +1813,8 @@
     "below": "abaixo",
     "left": "à esquerda",
     "right": "à direita",
-    "leader": "linha de chamada"
+    "leader": "linha de chamada",
+    "on": "ativa",
+    " (off)": " (desativada)"
   }
 }

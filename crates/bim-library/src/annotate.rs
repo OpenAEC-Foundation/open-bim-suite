@@ -222,6 +222,10 @@ pub struct Rule {
     pub filter: Filter,
     #[serde(flatten)]
     pub gives: Gives,
+    /// Off: the rule takes nothing until it is turned on. A rule that is added starts off, so
+    /// it changes no drawing before its filter is set.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub off: bool,
 }
 
 /// A drawing set.
@@ -340,7 +344,7 @@ impl DrawingSet {
     pub fn annotate(&self, element: &Described) -> Annotation {
         let mut out = Annotation::default();
         let mut labelled = false;
-        for rule in self.rules.iter().filter(|rule| rule.filter.takes(element)) {
+        for rule in self.rules.iter().filter(|rule| !rule.off && rule.filter.takes(element)) {
             match &rule.gives {
                 Gives::Label { label } if !labelled => {
                     labelled = true;
@@ -367,12 +371,12 @@ impl DrawingSet {
         self.rules.len() != before
     }
 
-    /// Adds a rule at the end that takes every element and gives the set's first label (or,
-    /// without labels, a dimension of the length); its key.
+    /// Adds a rule at the end that is off: turned on it takes every element and gives the set's
+    /// first label (or, without labels, a dimension of the length); its key.
     pub fn add_rule(&mut self, names: Names) -> String {
         let key = (1..).map(|n| format!("rule-{n}")).find(|key| self.rules.iter().all(|r| r.key != *key)).unwrap_or_default();
         let gives = self.labels.first().map_or(Gives::Dimension { measure: Measure::Length, chain: false }, |label| Gives::Label { label: label.key.clone() });
-        self.rules.push(Rule { key: key.clone(), names, filter: Filter::default(), gives });
+        self.rules.push(Rule { key: key.clone(), names, filter: Filter::default(), gives, off: true });
         key
     }
 
@@ -410,7 +414,7 @@ impl DrawingSet {
 pub fn starter() -> Vec<DrawingSet> {
     let label = |key: &str, nl: &str, en: &str, de: &str, fr: &str, fields: Vec<LabelField>, text_style: &str, frame, leader, place| LabelType { key: key.into(), names: Names::new(nl, en, de, fr), fields, separator: " ".into(), text_style: text_style.into(), frame, leader, place };
     let filter = |classes: &[&str], codes: &[&str]| Filter { classes: classes.iter().map(|c| c.to_string()).collect(), codes: codes.iter().map(|c| c.to_string()).collect(), ..Filter::default() };
-    let rule = |key: &str, nl: &str, en: &str, de: &str, fr: &str, filter: Filter, gives| Rule { key: key.into(), names: Names::new(nl, en, de, fr), filter, gives };
+    let rule = |key: &str, nl: &str, en: &str, de: &str, fr: &str, filter: Filter, gives| Rule { key: key.into(), names: Names::new(nl, en, de, fr), filter, gives, off: false };
     let labelled = |label: &str| Gives::Label { label: label.into() };
     let measured = |measure, chain| Gives::Dimension { measure, chain };
     use LabelField::*;
@@ -683,6 +687,28 @@ mod tests {
         // a word that names no field, or nothing at all, is no list
         assert_eq!((LabelField::list("name, colour"), LabelField::list(" , "), LabelField::list("prop:"), LabelField::list("\"\"")), (None, None, None, None));
         assert_eq!((Frame::ALL.len(), Place::ALL.len()), (5, 6));
+    }
+
+    #[test]
+    fn a_rule_added_is_off_and_changes_nothing_until_it_is_turned_on() {
+        let mut set = starter().into_iter().find(|s| s.key == "structural-plan-100").unwrap();
+        let wall = Described { class: "IfcWall".into(), name: "W1".into(), ..Described::default() };
+        let beam = Described { class: "IfcBeam".into(), name: "L1".into(), ..Described::default() };
+        let before = (set.annotate(&wall), set.annotate(&beam));
+        assert_eq!(before.0.label, None, "a wall has no label on a structural plan");
+        let key = set.add_rule(Names::same("New rule"));
+        assert!(set.rules.last().is_some_and(|r| r.key == key && r.off) && set.check().is_ok());
+        assert_eq!((set.annotate(&wall), set.annotate(&beam)), before);
+        // turned on, it gives what no label rule took the set's first label; what had one keeps it
+        set.rules.last_mut().unwrap().off = false;
+        assert_eq!(set.annotate(&wall).label.map(|l| l.0).as_deref(), Some("member"));
+        assert_eq!(set.annotate(&beam), before.1);
+        // written only where it is off, and read back
+        let on = serde_json::to_value(&set.rules[0]).unwrap();
+        assert!(on.get("off").is_none());
+        set.rules[0].off = true;
+        let back: Rule = serde_json::from_value(serde_json::to_value(&set.rules[0]).unwrap()).unwrap();
+        assert!(back.off && !serde_json::from_value::<Rule>(on).unwrap().off);
     }
 
 }

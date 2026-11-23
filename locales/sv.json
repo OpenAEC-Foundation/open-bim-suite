@@ -1813,6 +1813,8 @@
     "below": "nedanför",
     "left": "vänster",
     "right": "höger",
-    "leader": "hänvisningslinje"
+    "leader": "hänvisningslinje",
+    "on": "på",
+    " (off)": " (av)"
   }
 }

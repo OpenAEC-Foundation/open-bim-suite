@@ -1813,6 +1813,8 @@
     "below": "au-dessous",
     "left": "à gauche",
     "right": "à droite",
-    "leader": "ligne de repère"
+    "leader": "ligne de repère",
+    "on": "activée",
+    " (off)": " (désactivée)"
   }
 }

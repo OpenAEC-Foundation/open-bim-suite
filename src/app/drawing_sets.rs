@@ -66,6 +66,8 @@ pub enum DrawingSetMessage {
     RuleRemove(String),
     RuleAdd,
     Gives(String, GivesChoice),
+    /// Turn a rule (its key) on or off.
+    RuleOn(String, bool),
     /// The frame, the place, the text style (its key) and the leader of a label type (its key).
     LabelFrame(String, Frame),
     LabelPlace(String, Place),
@@ -278,6 +280,11 @@ impl App {
                     self.drawing_set_view.typing = None;
                 }
             }
+            DrawingSetMessage::RuleOn(rule, on) => {
+                if let Some(rule) = own(self).and_then(|set| set.rules.iter_mut().find(|r| r.key == rule)) {
+                    rule.off = !on;
+                }
+            }
             DrawingSetMessage::LabelFrame(label, frame) => {
                 if let Some(label) = own(self).and_then(|set| set.labels.iter_mut().find(|l| l.key == label)) {
                     label.frame = frame;
@@ -386,7 +393,8 @@ impl App {
         pane = pane.push(caption(l.text("Regels, in volgorde", "Rules, in order")));
         let choices = gives_choices(set, lang, l);
         for (k, rule) in set.rules.iter().enumerate() {
-            pane = pane.push(named(format!("{}. {}", k + 1, rule.names.get(lang)))).push(line(rule_line(set, rule, lang, l)));
+            let off = if rule.off { l.text(" (uit)", " (off)") } else { "" };
+            pane = pane.push(named(format!("{}. {}{off}", k + 1, rule.names.get(lang)))).push(line(rule_line(set, rule, lang, l)));
             if project {
                 let key = rule.key.clone();
                 let classes = input(Field::Classes(key.clone()), rule.filter.classes.join(", "), "IfcWall, IfcSlab");
@@ -395,7 +403,9 @@ impl App {
                 let gives_key = key.clone();
                 let gives = pick_list(choices.clone(), now, move |c: GivesChoice| Message::DrawingSet(DrawingSetMessage::Gives(gives_key.clone(), c))).text_size(11).padding([2, 6]).width(Fill);
                 let buttons = row![gives, small_button("↑", DrawingSetMessage::Move(key.clone(), true)), small_button("↓", DrawingSetMessage::Move(key.clone(), false)), small_button("×", DrawingSetMessage::RuleRemove(key))].spacing(2).align_y(Center);
-                pane = pane.push(row![classes, codes].spacing(4)).push(buttons);
+                let on_key = rule.key.clone();
+                let on = checkbox(!rule.off).label(l.text("aan", "on")).on_toggle(move |on| Message::DrawingSet(DrawingSetMessage::RuleOn(on_key.clone(), on))).size(14).text_size(12);
+                pane = pane.push(row![classes, codes].spacing(4)).push(buttons).push(on);
             }
         }
         if project {
@@ -492,7 +502,7 @@ mod tests {
         {
             let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 1600.0), app.drawing_set_pane(p, l, &app.library));
             assert!(pane.find("+ Rule").is_ok() && pane.find("Remove the drawing set").is_ok() && pane.find("Scale (empty: every scale)").is_ok() && pane.find("Copy to the project").is_err());
-            assert!(pane.find("5. new rule").is_ok());
+            assert!(pane.find("5. new rule (off)").is_ok());
         }
         // a set of another library is not changed there, and is taken as a copy
         let _ = app.libraries_update(LibrariesMessage::Source(Source::General));
@@ -542,6 +552,27 @@ mod tests {
         assert_eq!(app.library.drawing_set(&key).unwrap().annotate(&beam).label.map(|l| l.1).as_deref(), Some("HEA 200 -S355"));
         let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 2400.0), app.drawing_set_pane(p, l, &app.library));
         assert!(pane.find("leader").is_ok());
+    }
+
+    #[test]
+    fn a_rule_added_in_the_editor_is_off_until_it_is_turned_on() {
+        use crate::app::libraries::{LibrariesMessage, Source};
+        let mut app = App::default();
+        let _ = app.libraries_update(LibrariesMessage::Source(Source::Project));
+        let key = "structural-plan-100".to_string();
+        app.drawing_set_update(DrawingSetMessage::Pick(key.clone()));
+        let wall = Described { class: "IfcWall".into(), name: "W1".into(), ..Described::default() };
+        let label = |app: &App| app.library.drawing_set(&key).unwrap().annotate(&wall).label;
+        app.drawing_set_update(DrawingSetMessage::RuleAdd);
+        assert_eq!(label(&app), None, "an added rule gives no wall a label yet");
+        app.drawing_set_update(DrawingSetMessage::RuleOn("rule-1".into(), true));
+        assert!(label(&app).is_some());
+        app.drawing_set_update(DrawingSetMessage::RuleOn("rule-1".into(), false));
+        assert_eq!(label(&app), None);
+        // a rule of the set is turned off the same way
+        let beam = Described { class: "IfcBeam".into(), name: "L1".into(), ..Described::default() };
+        app.drawing_set_update(DrawingSetMessage::RuleOn("beams".into(), false));
+        assert_eq!(app.library.drawing_set(&key).unwrap().annotate(&beam).label, None);
     }
 
 }
