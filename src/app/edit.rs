@@ -168,11 +168,13 @@ impl App {
 
     /// Whether Tab means edit mode now: in it, or with one modelled element selected.
     pub(crate) fn wants_tab(&self) -> bool {
-        self.modeller.edit.is_some() || self.modeller.sketch.is_some() || self.editable().is_some()
+        self.annotates && (self.modeller.rebar_edit.is_some() || self.selected_rebar_key().is_some() || self.modeller.edit.is_some() || self.modeller.sketch.is_some() || self.editable().is_some())
     }
 
     /// Tab: into edit mode on the selected element, or out of it.
     pub(super) fn toggle_edit(&mut self) {
+        if self.modeller.rebar_edit.is_some() { return self.rebar_action(super::reinforcement::Action::Finish); }
+        if let Some((wall,name)) = self.selected_rebar_key() { return self.rebar_action(super::reinforcement::Action::Edit(wall,name)); }
         // the sketch of a floor: Tab finishes it, and Tab on a floor opens it
         if self.modeller.sketch.is_some() {
             return self.finish_sketch();
@@ -219,6 +221,7 @@ impl App {
     /// Something the edit overlay reports.
     pub(super) fn edit_event(&mut self, event: EditEvent) {
         // the sketch of a floor; a floor with grips, or one of them dragged
+        if self.rebar_event(event) { return; }
         if self.sketch_event(event) || (self.modeller.edit.is_none() && self.slab_event(event)) {
             return;
         }
@@ -437,6 +440,7 @@ impl App {
 
     /// The edit overlay: the edited element's points and the lines between them.
     pub(super) fn edit_overlay(&self, ink: Color, fill: Color) -> Option<EditOverlay> {
+        if let Some(overlay) = self.rebar_overlay(ink,fill) { return Some(overlay); }
         if let Some(overlay) = self.sketch_overlay(ink, fill) {
             return Some(overlay);
         }
@@ -451,6 +455,7 @@ impl App {
         }
         let picked = (0..points.len()).map(|i| edit.picked.contains(&i)).collect();
         Some(EditOverlay {
+            selected_sketch_line: None,
             points: points.iter().map(|p| p.as_vec3()).collect(),
             closed,
             lines: None,
@@ -502,6 +507,8 @@ pub struct EditOverlay {
     /// Lines drawn in place of those between the points (a floor with grips: its outline; a
     /// sketch: its lines).
     pub lines: Option<Vec<[Vec3; 2]>>,
+    /// Projected as a heavier stroke. An open sketch owns left clicks even before a line is picked.
+    pub selected_sketch_line: Option<Vec<Vec3>>,
     pub picked: Vec<bool>,
     /// Model to clip space.
     pub view_proj: Mat4,
@@ -536,10 +543,10 @@ impl EditOverlay {
     }
 }
 
-impl<M: From<EditEvent>> canvas::Program<M> for EditOverlay {
+impl canvas::Program<Message> for EditOverlay {
     type State = EditState;
 
-    fn update(&self, state: &mut EditState, event: &iced::Event, bounds: Rectangle, cursor: mouse::Cursor) -> Option<canvas::Action<M>> {
+    fn update(&self, state: &mut EditState, event: &iced::Event, bounds: Rectangle, cursor: mouse::Cursor) -> Option<canvas::Action<Message>> {
         match event {
             iced::Event::Keyboard(keyboard::Event::ModifiersChanged(m)) => {
                 state.ctrl = m.control();
@@ -549,7 +556,7 @@ impl<M: From<EditEvent>> canvas::Program<M> for EditOverlay {
                 let at = cursor.position_in(bounds);
                 if state.dragging {
                     let at = at?;
-                    return Some(canvas::Action::publish(M::from(EditEvent::Drag { x: at.x, y: at.y, width: bounds.width, height: bounds.height })).and_capture());
+                    return Some(canvas::Action::publish(Message::from(EditEvent::Drag { x: at.x, y: at.y, width: bounds.width, height: bounds.height })).and_capture());
                 }
                 let hover = at.and_then(|p| self.handle_at(bounds.size(), p));
                 (hover != state.hover).then(|| {
@@ -558,13 +565,18 @@ impl<M: From<EditEvent>> canvas::Program<M> for EditOverlay {
                 })
             }
             iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
-                let index = self.handle_at(bounds.size(), cursor.position_in(bounds)?)?;
+                let at = cursor.position_in(bounds)?;
+                let Some(index) = self.handle_at(bounds.size(), at) else {
+                    self.selected_sketch_line.as_ref()?;
+                    let pick = crate::viewport::Navigate::Pick { x: at.x, y: at.y, width: bounds.width, height: bounds.height, add: false };
+                    return Some(canvas::Action::publish(Message::Navigate(pick)).and_capture());
+                };
                 state.dragging = true;
-                Some(canvas::Action::publish(M::from(EditEvent::Press { index, add: state.ctrl })).and_capture())
+                Some(canvas::Action::publish(Message::from(EditEvent::Press { index, add: state.ctrl })).and_capture())
             }
             iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) if state.dragging => {
                 state.dragging = false;
-                Some(canvas::Action::publish(M::from(EditEvent::Release)).and_capture())
+                Some(canvas::Action::publish(Message::from(EditEvent::Release)).and_capture())
             }
             _ => None,
         }
@@ -594,6 +606,13 @@ impl<M: From<EditEvent>> canvas::Program<M> for EditOverlay {
             }
         });
         frame.stroke(&lines, canvas::Stroke::default().with_color(self.ink).with_width(1.5));
+        if let Some(line) = &self.selected_sketch_line {
+            for segment in line.windows(2) {
+                if let (Some(a), Some(b)) = (project(&self.view_proj, bounds.size(), segment[0]), project(&self.view_proj, bounds.size(), segment[1])) {
+                    frame.stroke(&Path::line(a, b), canvas::Stroke::default().with_color(self.ink).with_width(3.5));
+                }
+            }
+        }
         for (i, p) in shown.iter().enumerate() {
             let Some(p) = p else { continue };
             let half = if state.hover == Some(i) { 6.0 } else { 4.5 };
@@ -610,6 +629,7 @@ impl<M: From<EditEvent>> canvas::Program<M> for EditOverlay {
         }
         match cursor.position_in(bounds) {
             Some(p) if self.handle_at(bounds.size(), p).is_some() => mouse::Interaction::Grab,
+            Some(_) if self.selected_sketch_line.is_some() => mouse::Interaction::Crosshair,
             _ => mouse::Interaction::None,
         }
     }
@@ -766,7 +786,7 @@ mod tests {
         let mut app = modelling();
         app.camera.set_preset(crate::viewport::camera::ViewPreset::Front);
         let id = app
-            .add_element("Column", None, Shape::Linear(LinearDef { start: DVec3::ZERO, end: DVec3::new(0.0, 0.0, 3.0), profile: ProfileDef::Rectangle { width: 0.3, height: 0.3 }, roll: 0.0 }))
+            .add_element("Column", None, Shape::Linear(LinearDef { start: DVec3::ZERO, end: DVec3::new(0.0, 0.0, 3.0), profile: ProfileDef::Rectangle { width: 0.3, height: 0.3 }, roll: 0.0, role: Default::default() }))
             .unwrap();
         app.select_modelled(id);
         let _ = app.update(Message::EditMode);
@@ -783,7 +803,7 @@ mod tests {
     fn every_shape_gives_its_points_back_unchanged() {
         let shapes = [
             Shape::Point(PointDef { at: DVec3::new(1.0, 2.0, 0.5), rotation: 0.3, size: DVec3::ONE, opening: None }),
-            Shape::Linear(LinearDef { start: DVec3::ZERO, end: DVec3::new(4.0, 0.0, 3.0), profile: ProfileDef::Rectangle { width: 0.2, height: 0.4 }, roll: 0.0 }),
+            Shape::Linear(LinearDef { start: DVec3::ZERO, end: DVec3::new(4.0, 0.0, 3.0), profile: ProfileDef::Rectangle { width: 0.2, height: 0.4 }, roll: 0.0, role: Default::default() }),
             Shape::Planar(PlanarDef { form: PlanarForm::Wall { start: DVec2::ZERO, end: DVec2::new(5.0, 1.0), base: 3.0, height: 2.7 }, thickness: 0.2, openings: Vec::new(), build_up: None }),
             Shape::Planar(PlanarDef {
                 form: PlanarForm::Slab { outline: vec![DVec2::ZERO, DVec2::new(4.0, 0.0), DVec2::new(4.0, 3.0)], holes: Vec::new(), top: 3.0, bulges: Vec::new(), role: Default::default(), slope: None },

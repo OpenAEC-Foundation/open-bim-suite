@@ -29,6 +29,7 @@ mod reports;
 mod layers;
 #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
 pub mod collab;
+pub mod work_packages;
 mod docs;
 mod drawing_kinds;
 mod solid_view;
@@ -80,10 +81,12 @@ pub mod modeller;
 mod paper;
 mod placement;
 mod placing;
+pub mod reinforcement;
 mod schedules;
 mod take_over;
 pub mod transform;
 mod undo;
+mod viewer;
 mod view_props;
 mod views;
 mod sheets;
@@ -181,6 +184,7 @@ pub struct App {
     /// The files still to add after the one loading, when several are added at once: each is
     /// read, and the scene is built once, after the last.
     add_queue: Vec<loaders::Source>,
+    work_packages: work_packages::Register,
     /// The project whose files are loading: its set-up is put back when the last is in.
     project_opening: Option<project_file::Opening>,
     /// Models read from the queue that the scene does not show yet.
@@ -302,6 +306,8 @@ pub struct App {
     /// Sheets of the document open in a document tab (paths), and the one shown.
     pub open_doc_sheets: Vec<String>,
     pub active_doc_sheet: Option<String>,
+    sheet_zoom: f64,
+    sheet_pan: [f64; 2],
     /// The cut of every floor plan placed on a sheet, by the plan's path.
     pub cuts: std::collections::HashMap<String, Arc<crate::drawing::Cut>>,
     /// The drawings laid on the levels.
@@ -358,6 +364,7 @@ pub struct App {
     pub export_menu: bool,
     /// The dimension tool of the sheets is on.
     pub dimension_tool: bool,
+    reference_target: Option<(Arc<str>, usize)>,
     /// The view's bar offers its tools to dimension, write and cut (the Modeller and the
     /// Validator; the Viewer only looks).
     pub annotates: bool,
@@ -384,6 +391,7 @@ pub struct App {
     pub mark_pick: Option<marks::MarkPick>,
     /// Groups of layers opened in the explorer (closed by default).
     pub open_layer_groups: HashSet<String>,
+    collapsed_view_groups: HashSet<&'static str>,
     /// Sheets open in a document tab, in tab order, and the one shown in the workspace.
     pub open_sheets: Vec<usize>,
     pub active_sheet: Option<usize>,
@@ -586,6 +594,7 @@ pub enum Message {
     Preset(ViewPreset),
     Ortho(bool),
     Fit,
+    NavigateSheet { zoom: f64, pan: [f64; 2] },
     ToggleLayersPanel,
     TogglePropertiesPanel,
     Layer(usize, bool),
@@ -601,6 +610,7 @@ pub enum Message {
     LayersQuery(String),
     /// Typed in a field of the right pane's View section.
     ViewField(ViewField, String),
+    PileLegendField(Arc<str>, crate::document::PileLegendField, String),
     /// Enter in a field of the View section: it shows the value in use again.
     ViewFieldDone,
     /// The kind of drawing picked for the view the right pane shows: a key of the drawing
@@ -617,6 +627,7 @@ pub enum Message {
     ToggleGrids,
     /// Open or close an explorer group (0 views, 1 rooms, 2 layers, 3 schedules, 4 sheets).
     ToggleExplorer(usize),
+    ToggleViewGroup(&'static str),
     /// Show a tab of the explorer.
     ExplorerTab(ExplorerTab),
     /// The Library tab.
@@ -734,6 +745,10 @@ pub enum Message {
     PairSize(String),
     /// Put the picked dimension on the other side of what it measures.
     FlipDimension,
+    ArmDimensionReference(Option<(Arc<str>, usize)>),
+    InsertDimensionReference(Arc<str>, usize, [f64; 2]),
+    RemoveDimensionReference(Arc<str>, usize, usize),
+    AddChainTotal(Arc<str>, usize),
     /// The picked dimension looks otherwise: another style, or its style changed.
     DimensionLook(marks::LookEdit),
     /// Give a view (its path) its standard dimensions.
@@ -778,12 +793,20 @@ pub enum Message {
     Exported(Option<Result<(PathBuf, f32), String>>),
     /// Delete was pressed (not in a text field): remove what is picked, on a sheet or a view.
     DeletePicked,
+    DesignatePiles,
+    DesignateReinforcement,
+    PlacePileLegend(Arc<str>, &'static str),
+    NewPileSchedule(Arc<str>, &'static str),
     /// Remove what is picked on the sheet shown.
     RemovePicked,
     /// Set the scale of a placed view: sheet, index, 1 : scale.
     SetScale(Arc<str>, usize, f64),
+    SetPlacedTitle(Arc<str>, usize, Option<bool>),
     /// Give a sheet another paper (width, height in metres).
     SetPaper(Arc<str>, [f64; 2]),
+    SheetField(Arc<str>, bim_library::house::Field, String),
+    ProjectAddress(String),
+    SheetRevision(Arc<str>, usize, bool, String),
     /// The cut height being typed, and its use.
     CutText(String),
     ApplyCut,
@@ -926,6 +949,7 @@ pub enum Message {
     TempDim(modeller::temp_dims::TempDimMessage),
     /// Cancel in a floor's sketch: it leaves with the floor unchanged.
     SketchCancel,
+    Reinforcement(reinforcement::Action),
     /// Shift+C in the Modeller: the 3D cursor goes home.
     Cursor3dHome,
     /// Typed in a field of the selected modelled element's Definition section.
@@ -947,6 +971,8 @@ pub enum Message {
     AddOpening(bool),
     /// Make the element drawing of the element selected, on a sheet of its own, and show it.
     ElementDrawing(Language),
+    /// Give the selected member its reinforcement (true), or take it away.
+    Reinforce(bool),
     /// Remove an opening (its index) of the selected wall.
     RemoveOpening(usize),
     /// Give an opening (its index) of the selected timber frame its type's framing again.
@@ -1058,6 +1084,7 @@ impl Default for App {
             models: Vec::new(),
             adding_model: false,
             add_queue: Vec::new(),
+            work_packages: Default::default(),
             project_opening: None,
             scene_stale: false,
             aligned: Vec::new(),
@@ -1120,6 +1147,8 @@ impl Default for App {
             model_view: None,
             open_doc_sheets: Vec::new(),
             active_doc_sheet: None,
+            sheet_zoom: 1.0,
+            sheet_pan: [0.; 2],
             cuts: Default::default(),
             underlays: Vec::new(),
             overlay_lines: Arc::new(Vec::new()),
@@ -1149,6 +1178,7 @@ impl Default for App {
             views_3d_labels: Vec::new(),
             export_menu: false,
             dimension_tool: false,
+            reference_target: None,
             annotates: true,
             drawing_on_paper: true,
             section_tool: false,
@@ -1161,6 +1191,7 @@ impl Default for App {
             note_text: String::new(),
             mark_pick: None,
             open_layer_groups: HashSet::new(),
+            collapsed_view_groups: HashSet::new(),
             open_sheets: Vec::new(),
             active_sheet: None,
             open_drafts: Vec::new(),
@@ -1544,6 +1575,11 @@ impl App {
     }
 
     pub fn fit(&mut self) {
+        if self.active_doc_sheet.is_some() {
+            self.sheet_zoom = 1.;
+            self.sheet_pan = [0.; 2];
+            return;
+        }
         self.anim = None;
         self.camera = self.fitted(self.camera);
     }
@@ -1807,6 +1843,7 @@ impl App {
     /// What belongs to the window, not to a project, from the project shown before: the theme,
     /// the viewport's size and place, touch input and the remote control.
     pub fn take_window_settings(&mut self, from: &App) {
+        self.annotates = from.annotates;
         self.theme = from.theme;
         self.viewport_size = from.viewport_size;
         self.viewport_origin = from.viewport_origin;
@@ -1833,6 +1870,9 @@ impl App {
     }
 
     pub fn set_model(&mut self, model: Arc<Model>) {
+        self.work_packages = Default::default();
+        #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
+        { self.collab.packages = Default::default(); }
         // a point marked to orbit about belonged to the model before
         self.nav.marked = None;
         self.picked_model = None;
@@ -1972,7 +2012,10 @@ impl App {
         self.document.recognise(&model);
         self.model = Some(model);
         #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
-        self.collab.model_changed();
+        {
+            self.collab.model_changed();
+            self.refresh_package_index();
+        }
         self.section = None;
         self.section_on = false;
         self.plane = None;
@@ -2085,6 +2128,7 @@ impl App {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        if !self.annotates && !message.allowed_in_viewer() { return Task::none(); }
         let before = changes_visibility(&message).then(|| self.view_state());
         let shown = before.is_some() || matches!(message, Message::Undo | Message::Redo);
         // typing in one field of a Library editor is one step to take back
@@ -2240,6 +2284,7 @@ impl App {
             Message::RemoteShot(shot) => self.remote_shot(shot),
             Message::ClearMeasurements => self.measurements.clear(),
             Message::NewModel(level) => self.new_model(level),
+            Message::Reinforcement(action) => self.rebar_action(action),
             Message::ModelTool(tool) => self.set_model_tool(tool),
             Message::GridTool => self.toggle_grid_tool(),
             Message::SelectTool => self.select_tool(),
@@ -2267,7 +2312,12 @@ impl App {
             Message::SpaceNameDone => self.modeller.space_typing = None,
             Message::Place(message) => self.place_message(message),
             Message::AddOpening(door) => self.add_opening(door),
+            Message::PlacePileLegend(sheet, name) => self.place_pile_legend(&sheet, name),
+            Message::NewPileSchedule(level, name) => self.new_pile_schedule_view(&level, name),
+            Message::DesignatePiles => self.designate_members(false),
+            Message::DesignateReinforcement => self.designate_members(true),
             Message::ElementDrawing(l) => self.element_drawing(l),
+            Message::Reinforce(on) => self.reinforce(on),
             Message::RemoveOpening(index) => self.remove_opening(index),
             Message::ResetOpeningFraming(index) => self.reset_opening_framing(index),
             Message::AddBreak => self.add_break(),
@@ -2432,6 +2482,7 @@ impl App {
             },
             Message::Ortho(o) => self.camera.ortho = o,
             Message::Fit => self.fit(),
+            Message::NavigateSheet { zoom, pan } => { self.sheet_zoom = zoom; self.sheet_pan = pan; }
             Message::Walk { forward, right, up, fast } => self.walk(forward, right, up, fast),
             Message::ToggleLayersPanel => self.show_layers = !self.show_layers,
             Message::TogglePropertiesPanel => self.show_properties = !self.show_properties,
@@ -2498,6 +2549,9 @@ impl App {
             Message::SideTab(tab) => self.side_tab = tab,
             Message::LayersQuery(q) => self.layers_query = q,
             Message::ViewField(field, typed) => self.type_view_field(field, typed),
+            Message::PileLegendField(path, field, value) => {
+                if self.document.set_pile_legend_field(&path, &field, value) { self.tag_plans(); }
+            }
             Message::ViewFieldDone => self.view_typing = None,
             Message::ViewKind(key) => self.set_view_kind(&key),
             Message::ViewScale(scale) => self.set_view_scale(scale),
@@ -2554,6 +2608,7 @@ impl App {
                         self.select_box(rect, width, height, add);
                     }
                 }
+                Navigate::Hover { x, y, width, height } if self.rebar_hover(x,y,width,height) => {}
                 Navigate::Hover { x, y, width, height } if self.grab_hover(x, y, width, height) => {}
                 Navigate::Hover { x, y, width, height } if self.sketch_hover(x, y, width, height) => {}
                 Navigate::Hover { x, y, width, height } if self.edit_hover(x, y, width, height) => {}
@@ -2568,6 +2623,7 @@ impl App {
                 Navigate::HoverOff => {
                     self.modeller.cursor = None;
                     self.modeller.aim = None;
+                    if let Some(sketch) = &mut self.modeller.sketch { sketch.cursor = None; }
                     self.hover_request = None;
                     self.measure.hover = None;
                     self.structural_hover_off();
@@ -2614,6 +2670,9 @@ impl App {
                 if !self.show_grids {
                     self.picked_grid = None;
                 }
+            }
+            Message::ToggleViewGroup(group) => {
+                if !self.collapsed_view_groups.remove(group) { self.collapsed_view_groups.insert(group); }
             }
             Message::ToggleExplorer(i) => {
                 if let Some(open) = self.explorer_open.get_mut(i) {
@@ -2675,7 +2734,8 @@ impl App {
             }
             Message::PickLevelFor(kind) => {
                 // the levels to pick from are listed in the Views tab
-                if kind.is_some() {
+                if let Some(kind) = kind {
+                    self.collapsed_view_groups.remove(kind.key());
                     self.explorer_tab = ExplorerTab::Views;
                 }
                 self.views_picker = kind;
@@ -2702,7 +2762,7 @@ impl App {
             }
             Message::PlaceOnSheet(sheet, plan) => self.place_on_sheet(&sheet, &plan),
             Message::MoveOnSheet(sheet, i, at) => {
-                self.document.move_placed(&sheet, i, at);
+                self.document.put_placed(&sheet, i, at);
             }
             Message::DimensionTool(on) => {
                 self.dimension_tool = on;
@@ -2761,7 +2821,11 @@ impl App {
                 self.document.add_note(&view, at, &wording);
             }
             Message::MoveNote(view, k, at) => {
-                self.document.move_note(&view, k, at);
+                if self.document.move_pile_tag(&view, k, at) {
+                    self.tag_plans();
+                } else {
+                    self.document.move_note(&view, k, at);
+                }
             }
             Message::PickMark(pick) => self.pick_mark(pick),
             Message::RemoveMark => self.remove_mark(),
@@ -2779,6 +2843,17 @@ impl App {
                 if let Some(text) = self.modeller.offset.as_mut() {
                     *text = typed;
                 }
+            }
+            Message::ArmDimensionReference(target) => self.reference_target = target,
+            Message::InsertDimensionReference(view, index, at) => {
+                let anchor = self.document.plan(&view).and_then(|_| self.anchor_at(at));
+                self.document.insert_dimension_reference(&view, index, at, anchor);
+                self.reference_target = None;
+            }
+            Message::AddChainTotal(view, index) => { self.document.add_dimension_chain_total(&view, index); }
+            Message::RemoveDimensionReference(view, index, reference) => {
+                self.document.remove_dimension_reference(&view, index, reference);
+                self.reference_target = None;
             }
             Message::FlipDimension => self.flip_dimension(),
             Message::DimensionLook(edit) => self.edit_dimension_look(edit),
@@ -2888,13 +2963,18 @@ impl App {
             Message::LetGoView => self.dragging_view = None,
             Message::CropPlan(plan, crop) => {
                 if self.document.set_crop(&plan, crop) {
+                    self.tag_plans();
                     self.fit_plan_section(&plan);
                 }
             }
             Message::RemovePicked => self.remove_picked(),
+            Message::SetPlacedTitle(sheet, i, show) => self.document.set_placed_title(&sheet, i, show),
             Message::SetScale(sheet, i, scale) => {
-                self.document.set_scale(&sheet, i, scale);
+                self.scale_placed_view(&sheet, i, scale);
             }
+            Message::ProjectAddress(value) => self.document.set_project_address(value),
+            Message::SheetRevision(sheet, row, date, value) => self.document.set_revision(&sheet, row, date, value),
+            Message::SheetField(sheet, field, value) => self.document.set_title_value(&sheet, field, value),
             Message::SetPaper(sheet, paper) => {
                 self.document.set_paper(&sheet, paper);
             }
@@ -3109,6 +3189,9 @@ impl App {
             }
             // Enter while a distance is typed in a move puts the move down
             Message::MeasureFinish if self.tool_enter() => {}
+            Message::MeasureFinish if self.modeller.rebar_edit.is_some() => self.rebar_action(reinforcement::Action::Finish),
+            Message::MeasureFinish if self.modeller.sketch.is_some() => self.finish_sketch(),
+            Message::MeasureFinish if self.modeller.tool.is_some() => self.set_model_tool(None),
             // in Docs Enter opens the picked file
             Message::MeasureFinish if self.docs.shown => return self.docs_update(DocsMessage::Enter),
             Message::MeasureFinish if self.put_grab_down() => {}
@@ -3165,6 +3248,7 @@ impl App {
             Message::HideSelection => self.hide_selection(),
             Message::IsolateSelection => self.isolate_selection(),
             Message::ShowAllElements => self.show_all_elements(),
+            Message::Escape if self.reference_target.is_some() => self.reference_target = None,
             Message::Escape if self.plane_picking => self.plane_picking = false,
             Message::Escape if self.moving_model.is_some() => {
                 self.moving_model = None;
@@ -3187,6 +3271,7 @@ impl App {
             Message::Escape if self.modeller.edit.is_some() => {
                 self.edit_escape();
             }
+            Message::Escape if self.modeller.rebar_edit.is_some() => self.rebar_action(reinforcement::Action::Cancel),
             Message::Escape if self.modeller.transform.is_some() => {
                 self.escape_transform();
             }
@@ -3349,6 +3434,7 @@ impl App {
         if self.put_grab_down() {
             return;
         }
+        if self.rebar_point_click(x,y,width,height) { return; }
         if self.sketch_click(x, y, width, height) {
             return;
         }
@@ -3436,6 +3522,7 @@ impl App {
             (None, true) => return,
             (hit, false) => self.sel.set(hit),
         }
+        if !add { self.expand_rebar_pick(); }
         self.selection_changed();
     }
 
@@ -3502,6 +3589,10 @@ impl App {
                     *f |= UNIT_HIDDEN;
                 }
             }
+        }
+        #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
+        for &id in &self.collab.packages.hidden {
+            if let Some(flag) = index.element_unit(id).and_then(|unit| flags.get_mut(unit)) { *flag |= UNIT_HIDDEN; }
         }
         // a structural plan leaves out what carries nothing
         if self.is_structural_plan(self.active_plan.as_deref()) {
@@ -4117,7 +4208,7 @@ impl App {
             // (the sheets are listed at once; the header alone stands in for a file without any yet)
             if self.reads_drawings(own) && sheets.is_empty() {
                 let tag = l.text("leest…", "reading…");
-                inner = inner.push(group_header(p, l.text("Tekeningen", "Drawings"), Some(tag), 0, false, Message::ToggleExplorer(4)));
+                inner = inner.push(group_header(p, l.text("Tekenbladen", "Sheets"), Some(tag), 0, false, Message::ToggleExplorer(4)));
             }
             inner = self.sheets_group(p, l, &query, sheets, inner);
             inner = self.drafts_groups(p, l, &query, drafts, inner);
@@ -4271,6 +4362,7 @@ impl App {
             content = content.push(section(name)).push(rows).push(rule::horizontal(1));
         }
         // the sketch of a floor: its tools
+        if let Some(rows) = self.rebar_bar(l) { content = content.push(rows); }
         if let Some(rows) = self.sketch_bar(p, l) {
             content = content.push(section(l.text("Schets", "Sketch"))).push(rows).push(rule::horizontal(1));
         }
@@ -4604,7 +4696,8 @@ impl App {
             bounds: self.world_bounds(),
         };
         // the grid lines and levels where the view shown draws them
-        let datums = if clean { Vec::new() } else { self.datums() };
+        let paper_view = self.drawing_on_paper && self.shown_view().is_some();
+        let datums = if clean || paper_view { Vec::new() } else { self.datums() };
         let segments = Arc::new(datums.iter().map(|d| [d.line.a, d.line.b]).collect::<Vec<_>>());
         let scene = shader(Viewport3D {
             model: self.model.as_ref(),
@@ -4617,7 +4710,7 @@ impl App {
             drag_selects: self.drag_selects(),
             cursor3d: self.has_cursor3d(),
             buttons: self.mouse_buttons,
-            hover: (self.measure.tool.is_some() || self.structural_hover_on() || self.edit_follows_cursor() || self.modeller.sketch.is_some() || self.modeller.grab.is_some() || self.modeller.tool.is_some() || self.modeller.grid_tool) && !self.plane_picking,
+            hover: (self.measure.tool.is_some() || self.structural_hover_on() || self.edit_follows_cursor() || self.modeller.sketch.is_some() || self.modeller.grab.is_some() || self.modeller.tool.is_some() || self.modeller.grid_tool || self.copying() || self.modeller.rebar_edit.is_some()) && !self.plane_picking,
             crosshair: (self.measure.tool.is_some() && !self.plane_picking) || (self.shown_view().is_some() && (self.dimension_tool || self.note_tool)),
             structural_selected: &self.structural.selected_marks,
             structural_hovered: &self.structural.hovered_marks,
@@ -4675,7 +4768,11 @@ impl App {
             let shown = if self.mode == RenderMode::SolidEdges { RenderMode::Solid } else { self.mode };
             let picked = styles.iter().find(|s| s.0 == shown).copied();
             let pick = iced::widget::pick_list(styles, picked, |s: Look| Message::Mode(s.0)).text_size(11).padding([2, 6]).width(STYLE_WIDTH);
-            container(pick)
+            let mut controls = iced::widget::column![pick].spacing(3).align_x(iced::Alignment::End);
+            if let Some(scale) = self.shown_view().and_then(|path| self.document.view_scale(path)) {
+                controls = controls.push(text(format!("1:{scale}")).size(12).color(p.text));
+            }
+            container(controls)
                 .padding(iced::Padding { top: STYLE_TOP, right: CUBE_RIGHT - STYLE_WIDTH / 2.0, ..iced::Padding::ZERO })
                 .align_right(Fill)
                 .align_top(Fill)
@@ -4688,7 +4785,9 @@ impl App {
             canvas(PlaneOverlay { plane, world, view_proj: self.camera.view_proj(self.aspect()) }).width(Fill).height(Fill)
         });
         let editing = self.modeller.edit.as_ref().and_then(|e| Some((e, self.modeller.model.get(e.element)?)));
-        let banner = if let Some(hint) = self.grab_hint(l) {
+        let banner = if self.modeller.rebar_edit.is_some() {
+            Some(l.text("Wapeningsgebied · sluit op het beginpunt · Tab: klaar · Esc: annuleren","Reinforcement area · close at first point · Tab: finish · Esc: cancel").to_string())
+        } else if let Some(hint) = self.grab_hint(l) {
             Some(hint)
         } else if let Some(hint) = self.sketch_hint(l) {
             Some(hint)
@@ -4840,7 +4939,7 @@ impl App {
         });
         let boxed = self.box_select.map(|(from, to)| canvas(crate::viewport::box_select::BoxOverlay { from, to }).width(Fill).height(Fill));
         // the dimensions and texts of the view shown in its tab
-        let marks = self.marks_layer(p, l).filter(|_| overlay.is_none()).map(|m| canvas(m).width(Fill).height(Fill));
+        let marks = self.marks_layer(p, l).filter(|_| overlay.is_none()).map(|m| m.widget());
         let menu = self.context_menu.filter(|_| overlay.is_none()).map(|at| self.context_menu_view(p, l, at));
         // edit mode's points, else the selected element's grips: one slot, so a drag that begins on
         // a grip keeps its overlay

@@ -3,7 +3,7 @@
 //! where the dialog says (desktop) or downloaded (browser).
 
 use super::{App, Message};
-use crate::drawing2d::{sheet_drawing, view_drawing, Datum2, Drawing2d};
+use crate::drawing2d::{sheet_drawing_with_style, view_drawing, Datum2, Drawing2d};
 use crate::export::drawing::{file_name, write, DrawingFormat};
 use crate::theme::Palette;
 use iced::widget::{button, text, Row};
@@ -37,7 +37,7 @@ impl App {
             for view in &views {
                 self.cut_view(view);
             }
-            return sheet_drawing(&self.document, &sheet, &|path| self.cuts.get(path).cloned(), &|path| self.view_datums(path), &|path| self.view_rules(path));
+            return sheet_drawing_with_style(&self.document, &self.house, &sheet, &|path| self.cuts.get(path).cloned(), &|path| self.view_datums(path), &|path| self.view_rules(path));
         }
         // a sheet read from the file, with the views it places cut first
         if let Some(sheet) = self.active_sheet.and_then(|i| self.sheets().get(i).cloned()) {
@@ -88,10 +88,21 @@ impl App {
     /// The grid lines and levels a view's tab shows (none while the grid lines are off), on the
     /// view's drawing: a floor plan's in plan, a section's along its line and up.
     pub(super) fn view_datums(&self, view: &str) -> Vec<Datum2> {
+        if self.document.view_is_schedule(view) {
+            return Vec::new();
+        }
+        if self.document.view_presentation(view)["grids"] == false { return Vec::new(); }
         let Some(model) = self.model.as_ref().filter(|_| self.grids_shown()) else { return Vec::new() };
-        if self.document.plan(view).is_some() {
+        if let Some(plan) = self.document.plan(view) {
             let flat = |p: [f32; 3]| [f64::from(p[0]), f64::from(p[1])];
-            return model.project.grids.iter().map(|g| Datum2 { name: g.name.clone(), a: flat(g.a), b: flat(g.b), level: None }).collect();
+            return model.project.grids.iter().filter_map(|g| {
+                let (a, b) = (flat(g.a), flat(g.b));
+                let (a, b) = match plan.crop {
+                    Some((lo, hi)) => crate::drawing2d::clip(a, b, lo, hi)?,
+                    None => (a, b),
+                };
+                Some(Datum2 { name: g.name.clone(), a, b, level: None })
+            }).collect();
         }
         let Some(s) = self.document.section(view) else { return Vec::new() };
         let (along, _) = s.axes();
@@ -257,7 +268,8 @@ mod tests {
         ]);
         let d = app.drawing_to_export().unwrap();
         assert!(d.texts.iter().any(|t| t.text == "A") && d.texts.iter().any(|t| t.text == "1"), "{:?}", d.texts);
-        assert!(d.lines.iter().any(|l| l.pen == crate::drawing2d::Pen::Grids && l.a == [-2.0, 2.5] && l.b == [10.0, 2.5]), "the grid in plan");
+        let dash = 0.008 / d.paper_per_unit();
+        assert!(d.lines.iter().any(|l| l.pen == crate::drawing2d::Pen::Grids && l.a == [-2.0, 2.5] && l.b == [-2.0 + dash, 2.5]), "the first dash of the horizontal grid");
         // a section across: grid 1 upright where it crosses, the levels across
         let _ = app.update(Message::NewSection([0.0, 2.0], [8.0, 2.0], "Section"));
         let d = app.drawing_to_export().unwrap();

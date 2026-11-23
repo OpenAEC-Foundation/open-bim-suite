@@ -10,6 +10,7 @@ use iced::widget::text::Wrapping;
 use iced::widget::{button, column, container, row, rule, scrollable, svg, text, text_input, Column};
 use iced::{Center, Color, Element, Fill, Padding};
 use openaec_ui::Language;
+use openaec_ui::design::a11y::{node as named, Node, Role};
 use std::sync::Arc;
 
 /// The tabs of the explorer.
@@ -182,9 +183,9 @@ fn level_form<'a>(p: Palette, l: Language, form: &'a LevelForm) -> Element<'a, M
     let label = |s: &'static str| text(s).size(11).color(p.text_secondary);
     let mut fields = column![
         label(l.text("Naam", "Name")),
-        text_input("", &form.name).on_input(Message::LevelName).on_submit(Message::AddLevel).size(12).padding([5, 8]),
+        named(text_input("", &form.name).on_input(Message::LevelName).on_submit(Message::AddLevel).size(12).padding([5, 8]), Node::new(Role::TextField, l.text("Naam bouwlaag", "Level name"))),
         label(l.text("Hoogte (m)", "Elevation (m)")),
-        text_input("0.000", &form.elevation).on_input(Message::LevelElevation).on_submit(Message::AddLevel).size(12).padding([5, 8]),
+        named(text_input("0.000", &form.elevation).on_input(Message::LevelElevation).on_submit(Message::AddLevel).size(12).padding([5, 8]), Node::new(Role::TextField, l.text("Bouwlaaghoogte", "Level elevation"))),
     ]
     .spacing(4);
     if let Some(error) = form.error {
@@ -198,7 +199,7 @@ fn level_form<'a>(p: Palette, l: Language, form: &'a LevelForm) -> Element<'a, M
     }
     let add = button(text(l.text("Toevoegen", "Add")).size(12)).padding([4, 12]).style(move |_, s| p.primary_button(s)).on_press(Message::AddLevel);
     let cancel = button(text(l.text("Annuleren", "Cancel")).size(12)).padding([4, 12]).style(move |_, s| p.ribbon_button(false, s)).on_press(Message::CancelLevel);
-    fields = fields.push(row![add, cancel].spacing(6));
+    fields = fields.push(row![named(add, Node::new(Role::Button, l.text("Bouwlaag toevoegen", "Add level"))), cancel].spacing(6));
     container(fields).padding([6, 8]).width(Fill).into()
 }
 

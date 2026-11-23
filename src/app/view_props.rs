@@ -94,6 +94,42 @@ impl App {
         let field = |k: &str, f: ViewField| field_row(p, k, self.view_field_text(&path, f), f);
         let mut rows = column![field(l.text("Naam", "Name"), ViewField::Name)].spacing(5);
         if let Some(plan) = self.document.plan(&path) {
+            if plan.drawing.as_deref() == Some("pile-schedule") {
+                use crate::document::PileLegendField;
+                let legend = &plan.presentation["legend"];
+                let edit = |name: String, value: &str, field: PileLegendField| -> Element<'static, Message> {
+                    let key: std::sync::Arc<str> = path.as_str().into();
+                    iced::widget::row![
+                        text(name).size(12).color(p.text_secondary).width(Length::FillPortion(2)),
+                        text_input("", value).size(12).padding([2,6]).width(Length::FillPortion(3))
+                            .on_input(move |s| Message::PileLegendField(key.clone(), field.clone(), s))
+                    ].align_y(Center).spacing(8).into()
+                };
+                let office = self.house.key.eq_ignore_ascii_case("3bm") || legend["layout"] == "pile-renvooi";
+                if office {
+                    rows = rows.push(edit(l.text("Uitvoering", "Execution").into(), legend["execution"].as_str().unwrap_or(""), PileLegendField::Execution))
+                        .push(edit(l.text("Funderingsadvies", "Foundation advice").into(), legend["advice"].as_str().unwrap_or(""), PileLegendField::Advice));
+                }
+                rows = rows.push(edit(l.text("Sondeerrapport", "Sounding report").into(), legend["report"].as_str().unwrap_or(""), PileLegendField::Report))
+                    .push(edit(l.text("Peil t.o.v. NAP", "Datum relative to NAP").into(), legend["datum"].as_str().unwrap_or(""), PileLegendField::Datum));
+                for entry in legend["rows"].as_array().into_iter().flatten() {
+                    let Some(key) = entry["key"].as_str() else { continue };
+                    let kind = entry["type"].as_str().unwrap_or("");
+                    let toe = entry["toe"].as_f64().unwrap_or_default();
+                    if office {
+                        for (label, prop, field) in [
+                        (l.text("O.K. voet [mm t.o.v. peil]", "Foot underside [mm from datum]"), "foot", PileLegendField::Foot(key.into())),
+                        (l.text("B.K. ongesnelde paal [mm t.o.v. peil]", "Uncut pile head [mm from datum]"), "uncut", PileLegendField::Uncut(key.into())),
+                        ] { rows = rows.push(edit(format!("{label} · {kind}"), legend[prop][key].as_str().unwrap_or(""), field)); }
+                    }
+                    let cutoff = if legend["cutoffLabel"].as_str().is_some_and(|s| s.starts_with("AFHAKMAAT")) {
+                        l.text("Afhakmaat [mm]", "Cut-off dimension [mm]")
+                    } else { l.text("Afhakhoogte", "Cut-off level") };
+                    let caption = format!("{cutoff} · {kind} ({toe:+.2} m)");
+                    rows = rows.push(edit(caption, legend["cutoffs"][key].as_str().unwrap_or(""), PileLegendField::Cutoff(key.to_owned())));
+                }
+                return Some(rows.into());
+            }
             let level = self.document.level(&plan.level).map(|lv| lv.name.clone()).unwrap_or_default();
             let kind = match plan.kind {
                 crate::document::PlanKind::Floor => l.text("Plattegrond", "Floor plan"),

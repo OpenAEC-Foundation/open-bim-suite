@@ -52,7 +52,7 @@ pub fn recipe(kind: &ConnectionKind) -> Option<Recipe> {
         ConnectionKind::Cut => Recipe::Cut,
         ConnectionKind::EndPlate(EndPlate { thickness, margin, bolt, hole, rows }) => Recipe::EndPlate { thickness, margin, bolt, hole, rows },
         ConnectionKind::FinPlate(FinPlate { thickness, gap, edge, bolt, hole, rows }) => Recipe::FinPlate { thickness, gap, edge, bolt, hole, rows },
-        ConnectionKind::Apart => return None,
+        ConnectionKind::Apart | ConnectionKind::Splice(_) | ConnectionKind::BasePlate(_) | ConnectionKind::Bend(_) | ConnectionKind::Tee(_) | ConnectionKind::Transition(_) => return None,
     })
 }
 
@@ -444,7 +444,7 @@ mod tests {
     #[test]
     fn a_join_takes_its_type_from_the_library() {
         let mut app = App::default();
-        let member = |a: DVec3, b: DVec3| Shape::Linear(LinearDef { start: a, end: b, profile: ProfileDef::Rectangle { width: 0.3, height: 0.3 }, roll: 0.0 });
+        let member = |a: DVec3, b: DVec3| Shape::Linear(LinearDef { role: Default::default(), start: a, end: b, profile: ProfileDef::Rectangle { width: 0.3, height: 0.3 }, roll: 0.0 });
         let column = app.add_element("Column", None, member(DVec3::ZERO, DVec3::new(0.0, 0.0, 3.0))).unwrap();
         let beam = app.add_element("Beam", None, member(DVec3::new(0.0, 0.0, 2.5), DVec3::new(4.0, 0.0, 2.5))).unwrap();
         let existing = app.modeller.model.iter().find(|e| matches!(&e.shape, Shape::Connection(c) if [c.primary, c.secondary].contains(&beam))).map(|e| e.id);
