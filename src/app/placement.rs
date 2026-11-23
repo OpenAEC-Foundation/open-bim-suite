@@ -416,6 +416,10 @@ fn shown(s: &Settings, field: PlaceField) -> String {
 fn with_typed(tool: ModelTool, s: &Settings, field: PlaceField, typed: &str) -> Option<Settings> {
     let mut s = s.clone();
     let typed = typed.trim();
+    if field == PlaceField::Sill && typed.is_empty() && tool == ModelTool::Stair {
+        s.sill = 0.0;
+        return Some(s);
+    }
     if field == PlaceField::Height && typed.is_empty() {
         let storey = matches!(tool, ModelTool::Wall | ModelTool::Column | ModelTool::Beam | ModelTool::System | ModelTool::Stair);
         s.height = None;
@@ -623,11 +627,14 @@ impl App {
             // a typed element's thickness is its type's
             let fixed = field == PlaceField::Width && s.kind.is_some() && matches!(tool, ModelTool::Wall | ModelTool::Slab | ModelTool::Column | ModelTool::Beam);
             let fixed = fixed || (field == PlaceField::Depth && s.kind.is_some() && matches!(tool, ModelTool::Column | ModelTool::Beam));
+            // a stair's steps not typed are counted from its height: the field is empty and says so
+            let counted = tool == ModelTool::Stair && field == PlaceField::Sill && s.sill < 2.0;
             let value = match &typing {
                 Some((f, typed)) if *f == field => typed.clone(),
+                _ if counted => String::new(),
                 _ => shown(&s, field),
             };
-            let hint = if field == PlaceField::Height { l.text("tot niveau", "to level") } else { "" };
+            let hint = if field == PlaceField::Height { l.text("tot niveau", "to level") } else if counted { l.text("uit hoogte", "from height") } else { "" };
             let input = text_input(hint, &value).size(12).padding([2, 6]).width(68);
             let input = if fixed { input } else { input.on_input(move |t| Message::Place(PlaceMessage::Field(field, t))).on_submit(Message::Place(PlaceMessage::Done)) };
             let named = openaec_ui::design::a11y::node(input.width(Fill), openaec_ui::design::a11y::Node::new(openaec_ui::design::a11y::Role::TextField, name).value(value.clone()).disabled(fixed));

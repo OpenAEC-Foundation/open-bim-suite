@@ -2542,6 +2542,8 @@ impl App {
                 Navigate::Pick { x, y, width, height, add } => self.pick(x, y, width, height, add),
                 Navigate::Context { x, y, width, height } => self.context_click(x, y, width, height),
                 Navigate::Cursor3d { x, y, width, height } => self.place_cursor3d(x, y, width, height),
+                // with the Grid line tool on, a drag moves the line of a curtain wall it began on
+                Navigate::Box { x0, y0, x1, y1, width, height, done, .. } if self.curtain_drag((x0, y0), (x1, y1), width, height, done) => {}
                 // a drag that starts on a picked grid line moves the picked grid lines
                 Navigate::Box { x0, y0, x1, y1, width, height, done, .. } if self.drag_grids((x0, y0), (x1, y1), width, height, done) => {}
                 Navigate::Box { x0, y0, x1, y1, width, height, done, add } => {

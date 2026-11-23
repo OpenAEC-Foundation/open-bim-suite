@@ -979,10 +979,12 @@ impl Line {
                         // a bay with a panel of its own: open, or closed in the members' material
                         match f.own.and_then(|own| own.panel(i, j)) {
                             Some(crate::element::BayPanel::Open) => {}
+                            // a closed panel is a cladding of the members' material, a door a leaf
                             Some(crate::element::BayPanel::Solid) => {
                                 let material = f.member.and_then(|(_, m)| m).map(str::to_string);
-                                parts.extend(panel(u, v, du, dv)?.into_iter().map(|p| PartSolid { material: material.clone(), ..p }));
+                                parts.extend(panel(u, v, du, dv)?.into_iter().map(|p| PartSolid { class: "IfcCovering", material: material.clone(), ..p }));
                             }
+                            Some(crate::element::BayPanel::Door) => parts.extend(panel(u, v, du, dv)?.into_iter().map(|p| PartSolid { class: "IfcDoor", material: None, ..p })),
                             None => parts.extend(panel(u, v, du, dv)?),
                         }
                     }
@@ -1857,7 +1859,8 @@ mod tests {
         let own = OwnGrid { along: vec![1.0, 4.5], up: vec![1.0, 2.0], panels: vec![(0, 0, BayPanel::Open), (1, 1, BayPanel::Solid)] };
         let made = parts(&SystemDef { grid: Some(own.clone()), ..plain.clone() }).unwrap();
         let members: Vec<_> = made.iter().filter(|p| p.class == "IfcMember").collect();
-        let panels: Vec<_> = made.iter().filter(|p| p.class == "IfcPlate").collect();
+        let panels: Vec<_> = made.iter().filter(|p| p.class == "IfcPlate" || p.class == "IfcCovering").collect();
+        assert_eq!(made.iter().filter(|p| p.class == "IfcCovering").count(), 1, "the closed bay");
         // four vertical lines and three bays of four horizontal ones; nine bays less the open one
         assert_eq!((members.len(), panels.len()), (4 + 3 * 4, 9 - 1));
         let at = |x: f64| members.iter().any(|m| {

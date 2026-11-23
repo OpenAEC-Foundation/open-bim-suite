@@ -352,9 +352,124 @@ pub struct Slope {
 /// (anticlockwise) with its slope, the eave being the edge the slope names. With no angle at all
 /// the roof is flat: the outline itself, without a slope.
 ///
-/// The outline must not turn inwards (it is convex): the planes of a roof round an inner corner
-/// are those of its wings, each drawn as a roof of its own.
+/// An outline that turns inwards (an L, a T, a U) is roofed wing by wing: at every inner corner
+/// it is cut along each of the two edges that meet there, run on to the far side, and each wing
+/// so cut off gets the roof of its own outline, the cut taking the slope of the edge it runs on
+/// from. The wings overlap, and so do their roofs: where two meet, the higher one is the roof
+/// and the lower one ends under it, so the valleys lie where the planes cross.
 pub fn roof_planes(outline: &[DVec2], angles: &[f64]) -> Result<Vec<(Vec<DVec2>, Option<Slope>)>, Refusal> {
+    let n = outline.len();
+    if n < 3 || outline.iter().any(|p| !p.is_finite()) {
+        return Err(Refusal::NotPositive);
+    }
+    let area: f64 = (0..n).map(|k| outline[k].perp_dot(outline[(k + 1) % n])).sum();
+    let ring: Vec<DVec2> = if area >= 0.0 { outline.to_vec() } else { outline.iter().rev().copied().collect() };
+    let angle_of = |i: usize| angles.get(if area >= 0.0 { i } else { (2 * n - 2 - i) % n }).copied().unwrap_or(0.0);
+    let angles: Vec<f64> = (0..n).map(angle_of).collect();
+    if angles.iter().all(|a| *a <= 1e-9) {
+        return roof_of_wing(&ring, &angles);
+    }
+    let mut planes = Vec::new();
+    for (wing, slopes) in roof_wings(ring, angles, 0)? {
+        for plane in roof_of_wing(&wing, &slopes)? {
+            // a plane two wings share is the roof's once
+            let same = |other: &(Vec<DVec2>, Option<Slope>)| other.1 == plane.1 && other.0.len() == plane.0.len() && other.0.iter().zip(&plane.0).all(|(a, b)| a.distance(*b) <= LINEAR_TOLERANCE);
+            if !planes.iter().any(same) {
+                planes.push(plane);
+            }
+        }
+    }
+    Ok(planes)
+}
+
+/// The most wings an outline is roofed in.
+const MOST_WINGS: usize = 64;
+
+/// The wings of an outline (anticlockwise, an angle per edge): itself when it does not turn
+/// inwards; else, at its first inner corner, the two parts cut off along the edges that meet
+/// there, each cut again in the same way.
+fn roof_wings(ring: Vec<DVec2>, angles: Vec<f64>, depth: usize) -> Result<Vec<(Vec<DVec2>, Vec<f64>)>, Refusal> {
+    let tol = LINEAR_TOLERANCE;
+    let n = ring.len();
+    let turn = |i: usize| (ring[i] - ring[(i + n - 1) % n]).perp_dot(ring[(i + 1) % n] - ring[i]);
+    let Some(r) = (0..n).find(|i| turn(*i) < -tol) else { return Ok(vec![(ring, angles)]) };
+    if depth > 16 {
+        return Err(Refusal::NotConvex);
+    }
+    // where the ray from corner r along `way` first meets the outline: the point, and the edge
+    let hit = |way: DVec2| -> Option<(DVec2, usize)> {
+        let mut best: Option<(f64, DVec2, usize)> = None;
+        for m in (0..n).filter(|m| *m != r && (*m + 1) % n != r) {
+            let (a, b) = (ring[m], ring[(m + 1) % n]);
+            let det = way.perp_dot(b - a);
+            if det.abs() < 1e-12 {
+                continue;
+            }
+            let (t, u) = ((a - ring[r]).perp_dot(b - a) / det, (a - ring[r]).perp_dot(way) / det);
+            if t > tol && (-1e-9..=1.0 + 1e-9).contains(&u) && best.is_none_or(|(least, ..)| t < least) {
+                best = Some((t, ring[r] + way * t, m));
+            }
+        }
+        best.map(|(_, q, m)| (q, m))
+    };
+    // corners of a wing that fell together are one, their edge of no length gone
+    let tidy = |points: Vec<DVec2>, slopes: Vec<f64>| -> (Vec<DVec2>, Vec<f64>) {
+        let mut out: (Vec<DVec2>, Vec<f64>) = (Vec::new(), Vec::new());
+        for k in 0..points.len() {
+            if points[k].distance(points[(k + 1) % points.len()]) > tol {
+                out.0.push(points[k]);
+                out.1.push(slopes[k]);
+            }
+        }
+        out
+    };
+    let (before, after) = ((r + n - 1) % n, (r + 1) % n);
+    let mut wings = Vec::new();
+    // along the edge that comes in at the corner, run on: the wing that edge is of
+    let way = (ring[r] - ring[before]).try_normalize().ok_or(Refusal::ZeroLength)?;
+    let (q, m) = hit(way).ok_or(Refusal::NotConvex)?;
+    let (mut points, mut slopes) = (vec![q], vec![angles[m]]);
+    let mut k = (m + 1) % n;
+    while k != r {
+        points.push(ring[k]);
+        slopes.push(angles[k]);
+        k = (k + 1) % n;
+    }
+    points.push(ring[r]);
+    slopes.push(angles[before]);
+    wings.push(tidy(points, slopes));
+    // along the edge that goes out from the corner, run back: the wing that edge is of
+    let way = (ring[r] - ring[after]).try_normalize().ok_or(Refusal::ZeroLength)?;
+    let (q, m) = hit(way).ok_or(Refusal::NotConvex)?;
+    let (mut points, mut slopes) = (Vec::new(), Vec::new());
+    let mut k = r;
+    loop {
+        points.push(ring[k]);
+        slopes.push(angles[k]);
+        if k == m {
+            break;
+        }
+        k = (k + 1) % n;
+    }
+    points.push(q);
+    slopes.push(angles[r]);
+    wings.push(tidy(points, slopes));
+    let mut out = Vec::new();
+    for (points, slopes) in wings {
+        if points.len() < 3 {
+            continue;
+        }
+        out.extend(roof_wings(points, slopes, depth + 1)?);
+        if out.len() > MOST_WINGS {
+            return Err(Refusal::NotConvex);
+        }
+    }
+    Ok(out)
+}
+
+/// The planes of the roof over a wing: an outline that does not turn inwards (see
+/// [`roof_planes`]).
+fn roof_of_wing(outline: &[DVec2], angles: &[f64]) -> Result<Vec<(Vec<DVec2>, Option<Slope>)>, Refusal> {
     let n = outline.len();
     if n < 3 || outline.iter().any(|p| !p.is_finite()) {
         return Err(Refusal::NotPositive);
@@ -839,6 +954,8 @@ pub enum BayPanel {
     Open,
     /// A closed panel, of what the members are made of.
     Solid,
+    /// A door leaf in the bay.
+    Door,
 }
 
 impl OwnGrid {
@@ -1862,9 +1979,23 @@ mod tests {
         // two different angles: the ridge lies nearer the steeper eave
         let uneven = roof_planes(&rect, &[deg(30.0), 0.0, deg(60.0), 0.0]).unwrap();
         assert!(area(&uneven[0].0) > area(&uneven[1].0) * 2.9, "{uneven:?}");
-        // an outline that turns inwards is refused for a sloped roof, and taken for a flat one
+        // an L is roofed in its two wings, 10 by 4 and 4 by 10: a hip roof each, and flat it is one
         let ell = [p(0.0, 0.0), p(10.0, 0.0), p(10.0, 4.0), p(4.0, 4.0), p(4.0, 10.0), p(0.0, 10.0)];
-        assert_eq!(roof_planes(&ell, &[deg(40.0); 6]).err(), Some(Refusal::NotConvex));
+        let wings = roof_planes(&ell, &[deg(40.0); 6]).unwrap();
+        assert_eq!(wings.len(), 8);
+        let mut sizes: Vec<f64> = wings.iter().map(|(ring, _)| (area(ring) * 1e6).round() / 1e6).collect();
+        sizes.sort_by(f64::total_cmp);
+        assert_eq!(sizes, [4.0, 4.0, 4.0, 4.0, 16.0, 16.0, 16.0, 16.0]);
         assert_eq!(roof_planes(&ell, &[]).unwrap().len(), 1);
+        // every plane of every wing is a slab the kernel makes
+        for (ring, slope) in &wings {
+            let slab = PlanarDef { form: PlanarForm::Slab { outline: ring.clone(), holes: Vec::new(), top: 3.0, bulges: Vec::new(), role: SlabRole::Roof, slope: *slope }, thickness: 0.2, openings: Vec::new(), build_up: None };
+            assert!(planar_solids(&slab).is_ok(), "{ring:?} {slope:?}");
+        }
+        // a U has four inner cuts and three wings' worth of planes, none lost
+        let you = [p(0.0, 0.0), p(12.0, 0.0), p(12.0, 10.0), p(8.0, 10.0), p(8.0, 4.0), p(4.0, 4.0), p(4.0, 10.0), p(0.0, 10.0)];
+        let wings = roof_planes(&you, &[deg(30.0); 8]).unwrap();
+        let covered = |q: DVec2| wings.iter().any(|(ring, _)| (0..ring.len()).all(|k| (ring[(k + 1) % ring.len()] - ring[k]).perp_dot(q - ring[k]) >= -1e-9));
+        assert!([p(1.0, 9.0), p(11.0, 9.0), p(6.0, 1.0), p(2.0, 2.0), p(10.0, 5.0)].into_iter().all(covered));
     }
 }

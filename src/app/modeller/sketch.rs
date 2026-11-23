@@ -1558,4 +1558,20 @@ mod tests {
         assert_eq!(made.len(), 4, "{:?}", app.modeller.refusal);
         assert!(made[3].0 == 16.0 && made[3].1.is_some_and(|s| (s.angle.to_degrees() - 10.0).abs() < 1e-9), "{:?}", made[3]);
     }
+
+    #[test]
+    fn the_roof_tool_roofs_an_l_wing_by_wing() {
+        let mut app = modelling();
+        let _ = app.update(Message::RoofTool("Roof"));
+        for (x, y) in [(0.0, 0.0), (10.0, 0.0), (10.0, 4.0), (4.0, 4.0), (4.0, 10.0), (0.0, 10.0), (0.0, 0.0)] {
+            click(&mut app, x, y);
+        }
+        let _ = app.update(Message::EditMode);
+        let mut made: Vec<f64> = roofs(&app).iter().map(|r| r.0).collect();
+        made.sort_by(f64::total_cmp);
+        // two hip roofs, 10 by 4 and 4 by 10: two triangles of 4 and two trapezia of 16 each
+        assert_eq!(made, [4.0, 4.0, 4.0, 4.0, 16.0, 16.0, 16.0, 16.0], "{:?}", app.modeller.refusal);
+        let _ = app.update(Message::Undo);
+        assert!(roofs(&app).is_empty(), "one step");
+    }
 }

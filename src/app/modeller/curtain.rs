@@ -4,8 +4,9 @@
 //!   head or a horizontal line the line stands upright through the click; near an end or an
 //!   upright line it lies level through it. Seen from above, where a click says no height, it
 //!   stands upright. Shift and a click takes the nearest line away.
-//! - **Panel** (the tool): a click on a bay gives it the next of glass, a closed panel and
-//!   nothing at all.
+//!   A drag that starts on a line moves it to where the button is let go.
+//! - **Panel** (the tool): a click on a bay gives it the next of glass, a closed panel, a door
+//!   and nothing at all.
 //! - A curtain wall whose grid was touched keeps its lines as its own (see `bim_core::OwnGrid`);
 //!   its properties list them, each to be typed where it stands or removed, and "Equal bays"
 //!   gives it back the equal grid of its spacing.
@@ -54,10 +55,10 @@ impl CurtainTool {
     pub fn hint(self, l: Language) -> &'static str {
         match self {
             CurtainTool::Line => l.text(
-                "Rasterlijn: klik op een vliesgevel (bij de voet of de kop: staand, bij een eind: liggend) · Shift + klik: lijn weghalen · Esc: stoppen",
-                "Grid line: click a curtain wall (near its foot or head: upright, near an end: level) · Shift + click: take a line away · Esc: stop",
+                "Rasterlijn: klik op een vliesgevel (bij de voet of de kop: staand, bij een eind: liggend) · sleep een lijn om hem te verplaatsen · Shift + klik: lijn weghalen · Esc: stoppen",
+                "Grid line: click a curtain wall (near its foot or head: upright, near an end: level) · drag a line to move it · Shift + click: take a line away · Esc: stop",
             ),
-            CurtainTool::Panel => l.text("Paneel: klik een vak · glas, dicht, open · Esc: stoppen", "Panel: click a bay · glass, closed, open · Esc: stop"),
+            CurtainTool::Panel => l.text("Paneel: klik een vak · glas, dicht, deur, open · Esc: stoppen", "Panel: click a bay · glass, closed, door, open · Esc: stop"),
         }
     }
 }
@@ -196,7 +197,8 @@ impl App {
                 let (Some(column), Some(row)) = (cell(&us, u), cell(&vs, v)) else { return };
                 let next = match own.panel(column, row) {
                     None => Some(BayPanel::Solid),
-                    Some(BayPanel::Solid) => Some(BayPanel::Open),
+                    Some(BayPanel::Solid) => Some(BayPanel::Door),
+                    Some(BayPanel::Door) => Some(BayPanel::Open),
                     Some(BayPanel::Open) => None,
                 };
                 own.panels.retain(|(c, r, _)| (*c, *r) != (column, row));
@@ -205,6 +207,42 @@ impl App {
         }
         s.grid = Some(own);
         self.change_shape(&e, shape);
+    }
+
+    /// A drag in the viewport from `from` to `to` (pixels) while the Grid line tool is on, the
+    /// button let go (`done`): the line of a curtain wall the drag began on goes to where it
+    /// ended, on that wall. False when the tool is off.
+    pub(in crate::app) fn curtain_drag(&mut self, from: (f32, f32), to: (f32, f32), width: f32, height: f32, done: bool) -> bool {
+        if self.modeller.curtain != Some(CurtainTool::Line) {
+            return false;
+        }
+        if !done {
+            return true;
+        }
+        let (width, height) = (width.max(1.0), height.max(1.0));
+        self.modeller.refusal = None;
+        let (Some((id, u0, v0)), Some((there, u1, v1))) = (self.curtain_under(from.0, from.1, width, height), self.curtain_under(to.0, to.1, width, height)) else { return true };
+        if id != there {
+            return true;
+        }
+        let Some(e) = self.modeller.model.get(id).cloned() else { return true };
+        let mut shape = e.shape_in_project(&self.modeller.model.grid);
+        let Shape::System(s) = &mut shape else { return true };
+        let mut own = own_grid(s);
+        let nearest = |lines: &[f64], at: f64| lines.iter().enumerate().map(|(k, q)| (k, (q - at).abs())).min_by(|a, b| a.1.total_cmp(&b.1));
+        let round = |q: f64| (q / ROUND).round() * ROUND;
+        let upright = nearest(&own.along, u0);
+        let level = v0.and_then(|v| nearest(&own.up, v));
+        // the line the drag began on: the nearer of the upright and the level one, within reach;
+        // it keeps its place among the others (one dragged past its neighbour is refused)
+        match (upright, level, v1) {
+            (Some((k, d)), level, _) if d <= TAKE && level.is_none_or(|(_, e)| d <= e) => own.along[k] = round(u1),
+            (_, Some((k, d)), Some(v1)) if d <= TAKE => own.up[k] = round(v1),
+            _ => return true,
+        }
+        s.grid = Some(own);
+        self.change_shape(&e, shape);
+        true
     }
 
     /// Removes grid line `index` of the selected curtain wall: an upright one, or a level one.
@@ -292,20 +330,32 @@ mod tests {
         face_click(&mut app, 3.05, 0.6, true);
         assert_eq!(system(&app, id).grid.unwrap().along, [1.5, 2.2, 4.5, 5.2]);
         // the Panel tool steps a bay through closed, open and glass again
-        let plates = |app: &App| app.modeller.model.evaluate(id).unwrap().iter().filter(|p| p.class == "IfcPlate").count();
+        let plates = |app: &App| app.modeller.model.evaluate(id).unwrap().iter().filter(|p| matches!(p.class, "IfcPlate" | "IfcCovering" | "IfcDoor")).count();
         let all = plates(&app);
         let _ = app.update(Message::CurtainTool(CurtainTool::Panel));
         face_click(&mut app, 0.7, 0.7, false);
         assert_eq!((system(&app, id).grid.unwrap().panels, plates(&app)), (vec![(0, 0, BayPanel::Solid)], all));
         face_click(&mut app, 0.7, 0.7, false);
+        assert_eq!(system(&app, id).grid.unwrap().panels, vec![(0, 0, BayPanel::Door)]);
+        assert_eq!(app.modeller.model.evaluate(id).unwrap().iter().filter(|p| p.class == "IfcDoor").count(), 1);
+        face_click(&mut app, 0.7, 0.7, false);
         assert_eq!((system(&app, id).grid.unwrap().panels, plates(&app)), (vec![(0, 0, BayPanel::Open)], all - 1));
         face_click(&mut app, 0.7, 0.7, false);
         assert_eq!(plates(&app), all);
+        // a drag with the Grid line tool moves the line it began on: the one at 4.5 to 4.0
+        let _ = app.update(Message::CurtainTool(CurtainTool::Line));
+        let (a, b) = (app.on_screen(DVec3::new(4.52, 0.0, 0.8), 1000.0, 800.0).unwrap(), app.on_screen(DVec3::new(4.0, 0.0, 0.9), 1000.0, 800.0).unwrap());
+        for done in [false, true] {
+            let _ = app.update(Message::Navigate(Navigate::Box { x0: a.0, y0: a.1, x1: b.0, y1: b.1, width: 1000.0, height: 800.0, done, add: false }));
+        }
+        assert_eq!(system(&app, id).grid.unwrap().along, [1.5, 2.2, 4.0, 5.2]);
+        assert!(app.box_select.is_none());
+        let _ = app.update(Message::CurtainTool(CurtainTool::Line));
         // a line is typed where it stands and removed in the properties; one step back each
         let _ = app.update(Message::CurtainTool(CurtainTool::Panel));
         app.select_modelled(id);
         let _ = app.update(Message::ElementField(crate::app::element_props::ElementField::GridAlong(1), "2.4".into()));
-        assert_eq!(system(&app, id).grid.unwrap().along, [1.5, 2.4, 4.5, 5.2]);
+        assert_eq!(system(&app, id).grid.unwrap().along, [1.5, 2.4, 4.0, 5.2]);
         let _ = app.update(Message::RemoveGridLine(false, 0));
         assert_eq!(system(&app, id).grid.unwrap().up, [2.0]);
         let _ = app.update(Message::Undo);
@@ -313,7 +363,7 @@ mod tests {
         app.select_modelled(id);
         // a line closer to the next than a member is wide is refused, and the wall stays
         let _ = app.update(Message::ElementField(crate::app::element_props::ElementField::GridAlong(1), "1.52".into()));
-        assert_eq!(system(&app, id).grid.unwrap().along, [1.5, 2.4, 4.5, 5.2]);
+        assert_eq!(system(&app, id).grid.unwrap().along, [1.5, 2.4, 4.0, 5.2]);
         assert!(app.modeller.refusal.is_some(), "and it is told why");
         // Equal bays gives the grid of its spacing back
         let _ = app.update(Message::EqualGrid);

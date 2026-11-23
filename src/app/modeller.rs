@@ -1287,6 +1287,8 @@ fn class_colour(class: &str) -> [f32; 3] {
         "IfcDuctSegment" | "IfcDuctFitting" => [0.45, 0.68, 0.86],
         "IfcPipeSegment" | "IfcPipeFitting" => [0.36, 0.66, 0.42],
         "IfcCableCarrierSegment" | "IfcCableCarrierFitting" => [0.88, 0.72, 0.28],
+        // a stair as concrete is
+        "IfcStair" => [0.74, 0.74, 0.72],
         "IfcSpaceHeater" | "IfcSanitaryTerminal" => [0.94, 0.94, 0.95],
         "IfcBoiler" | "IfcPump" | "IfcFan" | "IfcUnitaryEquipment" | "IfcTank" | "IfcValve" => [0.72, 0.74, 0.78],
         "IfcAirTerminal" | "IfcOutlet" | "IfcLightFixture" => [0.90, 0.90, 0.86],

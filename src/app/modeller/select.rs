@@ -50,7 +50,8 @@ impl App {
 
     /// Whether a left drag in the viewport draws a selection box: the Select tool of the Modeller.
     pub(crate) fn drag_selects(&self) -> bool {
-        self.modeller.in_modeller && self.modeller.shown.is_some() && self.selecting()
+        // (with the Grid line tool a drag moves a line of a curtain wall: it is no turn of the view)
+        self.modeller.in_modeller && self.modeller.shown.is_some() && (self.selecting() || self.modeller.curtain == Some(super::curtain::CurtainTool::Line))
     }
 
     /// The Modeller's Esc when the tools of its own (placing, the grid, a move) have let theirs go:
