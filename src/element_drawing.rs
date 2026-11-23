@@ -48,6 +48,8 @@ struct Shape2 {
     points: [[f64; 2]; 8],
     n: usize,
     size: (f64, f64),
+    /// How far off square its most sloping end is cut (degrees): the saw's setting.
+    angle: f64,
 }
 
 impl Shape2 {
@@ -87,6 +89,7 @@ impl Shape2 {
         }
         // as it is cut: the narrowest it is across any of its sides, and how long it is along that side
         let mut size = (f64::INFINITY, 0.0);
+        let mut along_it = (1.0, 0.0);
         for i in 0..n {
             let (a, b) = (hull[i], hull[(i + 1) % n]);
             let long = (b[0] - a[0]).hypot(b[1] - a[1]);
@@ -101,11 +104,22 @@ impl Shape2 {
             }
             if wide < size.0 {
                 size = (wide, to - from);
+                along_it = (dx, dy);
+            }
+        }
+        // its ends: the sides that do not run along it; a square cut lies across it
+        let mut angle = 0.0_f64;
+        for i in 0..n {
+            let (a, b) = (hull[i], hull[(i + 1) % n]);
+            let (ex, ey) = (b[0] - a[0], b[1] - a[1]);
+            let (run, rise) = ((ex * along_it.0 + ey * along_it.1).abs(), (ex * along_it.1 - ey * along_it.0).abs());
+            if rise > 0.005 && run > 1e-4 {
+                angle = angle.max(run.atan2(rise).to_degrees());
             }
         }
         let mut points = [[0.0; 2]; 8];
         points[..n].copy_from_slice(&hull);
-        Some(Shape2 { points, n, size })
+        Some(Shape2 { points, n, size, angle })
     }
 }
 
@@ -223,7 +237,10 @@ pub fn element_drawings(model: &Model, element: &Element, named: &dyn Fn(&str) -
         }
         let height = s.height;
         // over it: its studs from plate to plate, centre to centre from either end
-        let mut studs: Vec<f64> = own.iter().filter(|m| m.upright() && m.v.1 - m.v.0 > height * 0.9).map(|m| (m.u.0 + m.u.1) / 2.0 - lo).collect();
+        // (a stud under a sloping cut stands on the foot and is cut short: it counts too)
+        let stud = |m: &&Member| m.upright() && (m.v.1 - m.v.0 > height * 0.9 || (m.shape.is_some() && m.v.0 < 0.1 && m.v.1 - m.v.0 > height * 0.25));
+        let mut studs: Vec<f64> = own.iter().filter(stud).map(|m| (m.u.0 + m.u.1) / 2.0 - lo).collect();
+        studs.sort_by(f64::total_cmp);
         studs.dedup_by(|a, b| (*a - *b).abs() < tol);
         // studs that stand against one another, or against the unit's end, are one place to measure to
         let mut chain: Vec<f64> = vec![0.0];
@@ -831,7 +848,12 @@ fn number(d: &mut Drawing2d, parts: &[Member], numbers: &[(i64, i64)], lo: f64, 
         } else {
             [mid_u, m.v.1 + 0.4 * text]
         };
-        d.texts.push(Text2d { pen: Pen::Text, at, height: text, text: (n + 1).to_string(), align: Align::Left, angle: 0.0 });
+        // one cut off square says by how much, for the saw
+        let label = match m.shape.filter(|s| s.angle >= 0.5) {
+            Some(s) => format!("{} · {:.0}°", n + 1, s.angle),
+            None => (n + 1).to_string(),
+        };
+        d.texts.push(Text2d { pen: Pen::Text, at, height: text, text: label, align: Align::Left, angle: 0.0 });
     }
 }
 
@@ -1003,6 +1025,11 @@ mod tests {
         // in the list as it is cut: 38 wide and 1500 long, not the 1200 by 900 it reaches over
         let texts: Vec<&str> = d.texts.iter().map(|t| t.text.as_str()).collect();
         assert!(texts.iter().any(|t| t.starts_with("1 × 38×140 L=15")), "{texts:?}");
+        // the studs under the cut are measured to, and their heads are cut 37° off square
+        // (the cut rises 900 over 1200)
+        let values: Vec<i64> = d.dimensions.iter().map(|x| mm(x.value)).collect();
+        assert!(values.iter().filter(|v| **v == 600).count() >= 4, "{values:?}");
+        assert!(texts.iter().filter(|t| t.ends_with(" · 37°")).count() >= 2, "{texts:?}");
     }
 
     #[test]
