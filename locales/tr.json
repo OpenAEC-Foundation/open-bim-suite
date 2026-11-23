@@ -1757,6 +1757,11 @@
     "Scale (empty: every scale)": "Ölçek (boş: her ölçek)",
     "Copy to the project": "Projeye kopyala",
     "+ Rule": "+ Kural",
-    "Remove the drawing set": "Çizim setini kaldır"
+    "Remove the drawing set": "Çizim setini kaldır",
+    "Sample wall, as this template draws it": "Örnek duvar, bu şablonun çizdiği gibi",
+    "detail by the scale": "ölçeğe göre ayrıntı",
+    "show": "göster",
+    "hatched where cut": "kesildiği yerde taranmış",
+    "Remove the view template": "Görünüm şablonunu kaldır"
   }
 }

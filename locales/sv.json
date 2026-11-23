@@ -1757,6 +1757,11 @@
     "Scale (empty: every scale)": "Skala (tomt: alla skalor)",
     "Copy to the project": "Kopiera till projektet",
     "+ Rule": "+ Regel",
-    "Remove the drawing set": "Ta bort ritningsuppsättningen"
+    "Remove the drawing set": "Ta bort ritningsuppsättningen",
+    "Sample wall, as this template draws it": "Exempelvägg, så som mallen ritar den",
+    "detail by the scale": "detalj enligt skalan",
+    "show": "visa",
+    "hatched where cut": "skrafferad där den skärs",
+    "Remove the view template": "Ta bort vymallen"
   }
 }

@@ -1757,6 +1757,11 @@
     "Scale (empty: every scale)": "Skala (puste: każda skala)",
     "Copy to the project": "Kopiuj do projektu",
     "+ Rule": "+ Reguła",
-    "Remove the drawing set": "Usuń zestaw rysunkowy"
+    "Remove the drawing set": "Usuń zestaw rysunkowy",
+    "Sample wall, as this template draws it": "Przykładowa ściana, tak jak rysuje ją ten szablon",
+    "detail by the scale": "szczegółowość według skali",
+    "show": "pokaż",
+    "hatched where cut": "kreskowane w miejscu przekroju",
+    "Remove the view template": "Usuń szablon widoku"
   }
 }

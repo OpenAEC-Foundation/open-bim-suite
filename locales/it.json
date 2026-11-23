@@ -1757,6 +1757,11 @@
     "Scale (empty: every scale)": "Scala (vuoto: ogni scala)",
     "Copy to the project": "Copia nel progetto",
     "+ Rule": "+ Regola",
-    "Remove the drawing set": "Rimuovi il set di disegno"
+    "Remove the drawing set": "Rimuovi il set di disegno",
+    "Sample wall, as this template draws it": "Parete di esempio, come la disegna questo modello",
+    "detail by the scale": "dettaglio secondo la scala",
+    "show": "mostra",
+    "hatched where cut": "tratteggiato dove è sezionato",
+    "Remove the view template": "Rimuovi il modello di vista"
   }
 }
