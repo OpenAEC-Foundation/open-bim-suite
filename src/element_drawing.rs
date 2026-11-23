@@ -392,7 +392,7 @@ pub fn element_drawings(model: &Model, element: &Element, named: &dyn Fn(&str) -
 /// the units with their sizes. The site puts the units up from it.
 fn overview(element: &Element, units: &[f64], members: &[Member], openings: &[bim_core::Opening], start: f64, height: f64) -> Drawing2d {
     let (text, off) = (TEXT * PLAN_SCALE, OFFSET * PLAN_SCALE);
-    let mut d = Drawing2d { name: format!("{} {} overview", element.name, element.id.0), space: Space::Model { scale: PLAN_SCALE }, paper: None, lines: Vec::new(), texts: Vec::new(), dimensions: Vec::new() };
+    let mut d = Drawing2d { polygons: Vec::new(), images: Vec::new(), name: format!("{} {} overview", element.name, element.id.0), space: Space::Model { scale: PLAN_SCALE }, paper: None, lines: Vec::new(), texts: Vec::new(), dimensions: Vec::new() };
     let rectangle = |d: &mut Drawing2d, pen: Pen, u: (f64, f64), v: (f64, f64)| {
         for (a, b) in [([u.0, v.0], [u.1, v.0]), ([u.1, v.0], [u.1, v.1]), ([u.1, v.1], [u.0, v.1]), ([u.0, v.1], [u.0, v.0])] {
             d.lines.push(Line2d::new(pen, a, b));
@@ -411,21 +411,21 @@ fn overview(element: &Element, units: &[f64], members: &[Member], openings: &[bi
     let mut lo = 0.0;
     let mut y = -(off * 5.0 + text);
     let title = format!("{} · {} × {} mm · 1:{}", element.name, mm(total), mm(height), PLAN_SCALE as i64);
-    d.texts.push(Text2d { pen: Pen::Text, at: [0.0, y], height: text * 1.4, text: title, align: Align::Left, angle: 0.0 });
+    d.texts.push(Text2d { family: None, bold: false, color: None, pen: Pen::Text, at: [0.0, y], height: text * 1.4, text: title, align: Align::Left, angle: 0.0 });
     y -= text * 1.4 * 1.8;
     for (k, length) in units.iter().enumerate() {
         let mark = bim_core::system::mark(element, k + 1);
         rectangle(&mut d, Pen::Cut, (lo, lo + length), (0.0, height));
-        d.dimensions.push(Dim2d { from: [lo, height], to: [lo + length, height], value: *length, offset: off, text_height: text });
+        d.dimensions.push(Dim2d { first_witness: true, units_per_paper_metre: off / OFFSET, witnesses: [[lo, height], [lo + length, height]], from: [lo, height], to: [lo + length, height], value: *length, offset: off, text_height: text, style: crate::document::DimensionStyle::standard() });
         // its number large under it, clear of its members and openings; its whole mark in the list
-        d.texts.push(Text2d { pen: Pen::Text, at: [lo + length / 2.0, -text * 2.4], height: text * 2.0, text: (k + 1).to_string(), align: Align::Center, angle: 0.0 });
-        d.texts.push(Text2d { pen: Pen::Text, at: [0.0, y], height: text, text: format!("{}  {mark} · {} × {} mm", k + 1, mm(*length), mm(height)), align: Align::Left, angle: 0.0 });
+        d.texts.push(Text2d { family: None, bold: false, color: None, pen: Pen::Text, at: [lo + length / 2.0, -text * 2.4], height: text * 2.0, text: (k + 1).to_string(), align: Align::Center, angle: 0.0 });
+        d.texts.push(Text2d { family: None, bold: false, color: None, pen: Pen::Text, at: [0.0, y], height: text, text: format!("{}  {mark} · {} × {} mm", k + 1, mm(*length), mm(height)), align: Align::Left, angle: 0.0 });
         y -= text * 1.8;
         lo += length;
     }
     // the whole length under the numbers
-    d.dimensions.push(Dim2d { from: [total, 0.0], to: [0.0, 0.0], value: total, offset: off * 2.5, text_height: text });
-    d.dimensions.push(Dim2d { from: [0.0, 0.0], to: [0.0, height], value: height, offset: off, text_height: text });
+    d.dimensions.push(Dim2d { first_witness: true, units_per_paper_metre: off / OFFSET, witnesses: [[total, 0.0], [0.0, 0.0]], from: [total, 0.0], to: [0.0, 0.0], value: total, offset: off * 2.5, text_height: text, style: crate::document::DimensionStyle::standard() });
+    d.dimensions.push(Dim2d { first_witness: true, units_per_paper_metre: off / OFFSET, witnesses: [[0.0, 0.0], [0.0, height]], from: [0.0, 0.0], to: [0.0, height], value: height, offset: off, text_height: text, style: crate::document::DimensionStyle::standard() });
     d
 }
 
@@ -697,7 +697,7 @@ fn elevation(model: &Model, element: &Element, s: &bim_core::SystemDef, t: &bim_
     }
     over.sort_by(|a, b| b.0 .1.cmp(&a.0 .1));
     for ((high, long, material), n) in over {
-        d.texts.push(Text2d { pen: Pen::Text, at: [0.0, y], height: text, text: format!("{n} × {} {thick}×{high} L={long}", named(material)), align: Align::Left, angle: 0.0 });
+        d.texts.push(Text2d { family: None, bold: false, color: None, pen: Pen::Text, at: [0.0, y], height: text, text: format!("{n} × {} {thick}×{high} L={long}", named(material)), align: Align::Left, angle: 0.0 });
         y -= text * 1.8;
     }
     Some(d)
