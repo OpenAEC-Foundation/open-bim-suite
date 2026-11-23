@@ -1815,6 +1815,9 @@
     "right": "höger",
     "leader": "hänvisningslinje",
     "on": "på",
-    " (off)": " (av)"
+    " (off)": " (av)",
+    "House style of OpenAEC Blueprint (brand.yaml)": "Husstil från OpenAEC Blueprint (brand.yaml)",
+    "Take from a file": "Hämta från en fil",
+    "Save as a file": "Spara som fil"
   }
 }

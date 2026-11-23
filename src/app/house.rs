@@ -61,6 +61,15 @@ pub enum HouseMessage {
     Terminator(Terminator),
     /// The hatch standard the office hatches by (its key); none: the library's own choice.
     HatchStandard(Option<String>),
+    /// Pick a `brand.yaml` of the OpenAEC Blueprint to take the name, the colours and the
+    /// typefaces from.
+    OpenBrand,
+    /// The text of the picked file, or why it could not be read; none: nothing was picked.
+    BrandRead(Option<Result<String, String>>),
+    /// Save the house style's name, colours and typefaces as a `brand.yaml`.
+    SaveBrand,
+    /// Where it was saved, or why not; none: nothing was picked.
+    BrandSaved(Option<Result<std::path::PathBuf, String>>),
 }
 
 /// Which colour is set, which sheet format the sample shows, what is being typed that was not
@@ -71,6 +80,9 @@ pub struct HouseView {
     pub sheet: Option<String>,
     pub draft: Option<(Typed, String)>,
     pub refused: Option<String>,
+    /// What the last `brand.yaml` did: how many things were taken from one, or where one was
+    /// saved.
+    pub brand: Option<String>,
 }
 
 /// The roles a house style's colours have from the start: they are not removed.
@@ -131,6 +143,30 @@ fn mm(v: f64) -> String {
 
 impl App {
     pub(super) fn house_update(&mut self, message: HouseMessage) -> Task<Message> {
+        match message {
+            HouseMessage::OpenBrand => {
+                let dialog = rfd::AsyncFileDialog::new().set_title("brand.yaml").add_filter("YAML", &["yaml", "yml"]);
+                return Task::perform(
+                    async move {
+                        let file = dialog.pick_file().await?;
+                        Some(std::fs::read_to_string(file.path()).map_err(|why| why.to_string()))
+                    },
+                    |read| Message::House(HouseMessage::BrandRead(read)),
+                );
+            }
+            HouseMessage::SaveBrand => {
+                let text = self.house.brand();
+                let dialog = rfd::AsyncFileDialog::new().set_title("brand.yaml").set_file_name("brand.yaml").add_filter("YAML", &["yaml", "yml"]);
+                return Task::perform(
+                    async move {
+                        let path = dialog.save_file().await?.path().to_path_buf();
+                        Some(std::fs::write(&path, text).map(|()| path).map_err(|why| why.to_string()))
+                    },
+                    |saved| Message::House(HouseMessage::BrandSaved(saved)),
+                );
+            }
+            _ => {}
+        }
         let before = self.house.clone();
         self.house_apply(message);
         // the project's file holds its house style: what the model shows is made again
@@ -165,6 +201,21 @@ impl App {
                 }
             }
             HouseMessage::Terminator(terminator) => self.house.dimensions.terminator = terminator,
+            // (the dialogs are opened in `house_update`)
+            HouseMessage::OpenBrand | HouseMessage::SaveBrand => {}
+            HouseMessage::BrandRead(read) => {
+                let taken = match read {
+                    None => return,
+                    Some(Err(why)) => Err(why),
+                    Some(Ok(text)) => self.house.take_brand(&text).map_err(|why| why.to_string()).and_then(|taken| if taken == 0 { Err("no name, colours or typefaces in it".to_string()) } else { Ok(taken) }),
+                };
+                (self.house_view.draft, self.house_view.refused, self.house_view.brand) = (None, taken.clone().err(), taken.ok().map(|taken| format!("{taken}")));
+            }
+            HouseMessage::BrandSaved(saved) => match saved {
+                None => {}
+                Some(Ok(path)) => (self.house_view.refused, self.house_view.brand) = (None, Some(path.display().to_string())),
+                Some(Err(why)) => self.house_view.refused = Some(why),
+            },
             HouseMessage::HatchStandard(key) => {
                 // (a standard the project does not have is not named)
                 if key.as_deref().is_none_or(|key| self.library.hatch_standards.iter().any(|s| s.key == key)) {
@@ -303,6 +354,13 @@ impl App {
         fields = fields.push(row![text(hatch_name).size(12).color(p.text_secondary).wrapping(Wrapping::WordOrGlyph).width(Length::FillPortion(2)), container(a11y::named(pick, Aria::ComboBox, hatch_name)).width(Length::FillPortion(3))].spacing(8).align_y(Center));
         fields = fields.push(caption(l.text("Titelblok", "Title block")));
         fields = fields.push(typed(Typed::BlockWidth, mm(style.title_block.width), l.text("Breedte (mm)", "Width (mm)")));
+        // the name, the colours and the typefaces to and from a brand.yaml of the OpenAEC Blueprint
+        let act = |label: &'static str, message: HouseMessage| button(text(label).size(12).color(p.text_secondary)).padding([3, 8]).style(move |_, s| p.row_button(s)).on_press(message);
+        fields = fields.push(caption(l.text("Huisstijl van OpenAEC Blueprint (brand.yaml)", "House style of OpenAEC Blueprint (brand.yaml)")));
+        fields = fields.push(row![act(l.text("Overnemen uit bestand", "Take from a file"), HouseMessage::OpenBrand), act(l.text("Bewaren als bestand", "Save as a file"), HouseMessage::SaveBrand), Space::new().width(Fill)].spacing(4));
+        if let Some(did) = &view.brand {
+            fields = fields.push(text(format!("brand.yaml: {did}")).size(11).color(p.text_secondary).wrapping(Wrapping::WordOrGlyph));
+        }
         let refused = view.refused.as_ref().map(|why| text(format!("{} ({why})", l.text("Niet overgenomen.", "Not taken."))).size(11).color(p.accent).wrapping(Wrapping::Word));
         let sample: Element<'_, Message> = match self.sample_sheet() {
             Some(sheet) => {
@@ -445,6 +503,32 @@ mod tests {
         style.hatch_standard = Some("nen47".into());
         other.adopt_house(&serde_json::to_value(&style).unwrap());
         assert_eq!(chosen(&other), Some("nen47".to_string()));
+    }
+
+    #[test]
+    fn the_house_style_takes_a_brand_file_of_the_blueprint() {
+        let mut app = App::default();
+        let brand = "brand:\n  name: \"OpenAEC Foundation\"\ncolors:\n  primary: \"#D97706\"\n  text_dark: \"#36363E\"\nfonts:\n  heading: \"SpaceGrotesk-Bold\"\n  body: \"Inter-Regular\"\n";
+        let _ = app.house_update(HouseMessage::BrandRead(Some(Ok(brand.to_string()))));
+        assert_eq!((app.house.company.name.as_str(), app.house.colour("primary"), app.house.colour("text"), app.house.fonts.heading.as_str()), ("OpenAEC Foundation", Some([0xD9, 0x77, 0x06]), Some([0x36, 0x36, 0x3E]), "SpaceGrotesk"));
+        assert_eq!((app.house_view.brand.as_deref(), app.house_view.refused.clone()), (Some("5"), None));
+        {
+            let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 2600.0), app.house_pane(app.theme.palette(), Language::English));
+            assert!(pane.find("Take from a file").is_ok() && pane.find("Save as a file").is_ok() && pane.find("brand.yaml: 5").is_ok());
+        }
+        // a file that could not be read, or says nothing of a house style, changes nothing and says so
+        let before = app.house.clone();
+        let _ = app.house_update(HouseMessage::BrandRead(Some(Err("no such file".into()))));
+        assert_eq!((app.house_view.refused.as_deref(), &app.house), (Some("no such file"), &before));
+        let _ = app.house_update(HouseMessage::BrandRead(Some(Ok("margins:\n  top_mm: 20\n".into()))));
+        assert!(app.house_view.refused.is_some() && app.house == before);
+        // nothing picked: nothing happens
+        let _ = app.house_update(HouseMessage::BrandRead(None));
+        let _ = app.house_update(HouseMessage::BrandSaved(None));
+        assert_eq!(app.house, before);
+        // saved: the pane says where
+        let _ = app.house_update(HouseMessage::BrandSaved(Some(Ok(std::path::PathBuf::from("brand.yaml")))));
+        assert_eq!((app.house_view.brand.as_deref(), app.house_view.refused.clone()), (Some("brand.yaml"), None));
     }
 
     #[test]

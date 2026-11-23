@@ -1815,6 +1815,9 @@
     "right": "a destra",
     "leader": "linea di richiamo",
     "on": "attiva",
-    " (off)": " (disattivata)"
+    " (off)": " (disattivata)",
+    "House style of OpenAEC Blueprint (brand.yaml)": "Stile aziendale di OpenAEC Blueprint (brand.yaml)",
+    "Take from a file": "Prendi da un file",
+    "Save as a file": "Salva come file"
   }
 }

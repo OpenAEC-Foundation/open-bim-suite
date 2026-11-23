@@ -1815,6 +1815,9 @@
     "right": "à direita",
     "leader": "linha de chamada",
     "on": "ativa",
-    " (off)": " (desativada)"
+    " (off)": " (desativada)",
+    "House style of OpenAEC Blueprint (brand.yaml)": "Estilo da casa do OpenAEC Blueprint (brand.yaml)",
+    "Take from a file": "Obter de um ficheiro",
+    "Save as a file": "Guardar como ficheiro"
   }
 }
