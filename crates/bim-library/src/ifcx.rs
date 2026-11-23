@@ -86,6 +86,10 @@ pub fn material_node(material: &Material) -> Value {
             MATERIAL: material,
         }
     });
+    // its NL-SfB material code, where its kind has one ([`crate::kind`])
+    if let (Some(code), Some(attributes)) = (material.material_code(), node["attributes"].as_object_mut()) {
+        attributes.insert(crate::kind::MATERIAL_CODE.into(), json!({"code": code}));
+    }
     // the strength class its grade names, and IFC's own properties of it ([`crate::class`])
     if let (Some(class), Some(attributes)) = (material.class(), node["attributes"].as_object_mut()) {
         attributes.extend(class.attributes());

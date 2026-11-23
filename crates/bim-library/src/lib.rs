@@ -37,6 +37,7 @@ pub mod house;
 pub mod ifcx;
 pub mod ils;
 pub mod inb;
+pub mod kind;
 pub mod library;
 pub mod lod;
 pub mod material;
