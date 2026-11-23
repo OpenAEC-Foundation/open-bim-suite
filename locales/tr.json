@@ -1747,6 +1747,7 @@
     "Maker": "Üretici",
     "Licence": "Lisans",
     "Source": "Kaynak",
-    "The drawing itself is not in the library yet: a view cannot place it yet.": "Çizimin kendisi henüz kitaplıkta değil: bir görünüm onu henüz yerleştiremez."
+    "The drawing itself is not in the library yet: a view cannot place it yet.": "Çizimin kendisi henüz kitaplıkta değil: bir görünüm onu henüz yerleştiremez.",
+    "No strength class of a standard: it has no values.": "Bir standardın dayanım sınıfı değil: değeri yok."
   }
 }

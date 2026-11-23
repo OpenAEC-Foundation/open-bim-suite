@@ -1747,6 +1747,7 @@
     "Maker": "Produttore",
     "Licence": "Licenza",
     "Source": "Fonte",
-    "The drawing itself is not in the library yet: a view cannot place it yet.": "Il disegno stesso non è ancora nella libreria: una vista non può ancora posizionarlo."
+    "The drawing itself is not in the library yet: a view cannot place it yet.": "Il disegno stesso non è ancora nella libreria: una vista non può ancora posizionarlo.",
+    "No strength class of a standard: it has no values.": "Nessuna classe di resistenza di una norma: non ha valori."
   }
 }
