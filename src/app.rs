@@ -4791,7 +4791,8 @@ impl App {
                     }),
             );
             if let Some(tools) = sketch_tools.take() {
-                over = over.push(container(tools).padding(4).style(move |_| container::Style {
+                // no wider than leaves the view cube free: its buttons wrap
+                over = over.push(container(tools).padding(4).max_width(520).style(move |_| container::Style {
                     background: Some(Background::Color(p.surface)),
                     border: Border { radius: 4.0.into(), width: 1.0, color: p.border },
                     ..Default::default()
