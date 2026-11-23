@@ -48,6 +48,8 @@ pub enum LabelField {
     Length,
     Area,
     Level,
+    /// Its grade or strength class ("S355", "C20/25"): the element's own, else its material's.
+    Grade,
     /// A property of the element, by its name.
     Property(String),
     /// A fixed text ("Ø", "d=").
@@ -231,6 +233,7 @@ impl LabelType {
                 LabelField::Length => element.prop("Length").map(millimetres),
                 LabelField::Area => element.prop("Area").map(str::to_string),
                 LabelField::Level => element.prop("Level").map(str::to_string),
+                LabelField::Grade => element.prop("Grade").map(str::to_string),
                 LabelField::Property(key) => element.prop(key).map(str::to_string),
                 LabelField::Text(text) => Some(text.clone()),
             };
@@ -355,8 +358,8 @@ pub fn starter() -> Vec<DrawingSet> {
     let wall_code = || label("wall-code", "wandcode", "wall code", "Wandcode", "code de mur", vec![Code, Thickness], "2.5", Frame::Hexagon, true, Place::Centre);
     let room = || label("room", "ruimte", "room", "Raum", "pièce", vec![Name, Area], "3.5", Frame::None, false, Place::Centre);
     let opening = || label("opening", "kozijnmerk", "opening mark", "Öffnungsnummer", "repère de baie", vec![Name], "2.5", Frame::Circle, false, Place::Centre);
-    let member = || label("member", "profiel", "profile", "Profil", "profilé", vec![Name, Profile], "2.5", Frame::None, false, Place::Along);
-    let column = || label("column", "kolom", "column", "Stütze", "poteau", vec![Name, Profile], "2.5", Frame::None, true, Place::Right);
+    let member = || label("member", "profiel", "profile", "Profil", "profilé", vec![Name, Profile, Grade], "2.5", Frame::None, false, Place::Along);
+    let column = || label("column", "kolom", "column", "Stütze", "poteau", vec![Name, Profile, Grade], "2.5", Frame::None, true, Place::Right);
     let slab = || label("slab", "vloer", "floor", "Decke", "plancher", vec![Type, Text("d=".into()), Thickness], "2.5", Frame::Rectangle, false, Place::Centre);
     let pile = || label("pile", "paal", "pile", "Pfahl", "pieu", vec![Name], "2.5", Frame::Circle, false, Place::Right);
     let run = || label("run", "tracé", "run", "Trasse", "tracé", vec![Type], "2.5", Frame::None, true, Place::Along);
@@ -596,6 +599,17 @@ mod tests {
         assert_eq!((duct.label, duct.dimensions.len()), (Some(("run".to_string(), "Spiro 160".to_string())), 1));
         assert_eq!(set.annotate(&of("IfcAirTerminal", "T1", "Ventiel 125")).label, Some(("terminal".to_string(), "T1".to_string())));
         assert_eq!(set.annotate(&of("IfcWall", "", "Kalkzandsteen 100")), Annotation::default());
+    }
+
+    #[test]
+    fn a_structural_label_reads_the_grade_where_the_element_has_one() {
+        let set = starter().into_iter().find(|s| s.key == "structural-plan-100").unwrap();
+        let beam = |props: &[(&str, &str)]| Described { class: "IfcBeam".into(), name: "L1".into(), props: props.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(), ..Described::default() };
+        assert_eq!(set.annotate(&beam(&[("Profile", "HEA 200"), ("Grade", "S355")])).label.map(|l| l.1).as_deref(), Some("L1 HEA 200 S355"));
+        assert_eq!(set.annotate(&beam(&[("Profile", "HEA 200")])).label.map(|l| l.1).as_deref(), Some("L1 HEA 200"), "without a grade nothing is written for it");
+        // as a field it is written and read as the others
+        let field = serde_json::to_value(LabelField::Grade).unwrap();
+        assert_eq!(serde_json::from_value::<LabelField>(field).unwrap(), LabelField::Grade);
     }
 
 }

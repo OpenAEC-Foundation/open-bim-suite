@@ -1783,6 +1783,13 @@
     "Price date": "Fecha del precio",
     "Region": "Región",
     "Checked against its source": "Comprobado con su fuente",
-    "Remove the price": "Quitar el precio"
+    "Remove the price": "Quitar el precio",
+    "Class of a standard": "Clase de una norma",
+    "concrete": "hormigón",
+    "structural steel": "acero estructural",
+    "reinforcing steel": "acero de armar",
+    "bolts": "tornillos",
+    "timber": "madera",
+    "grade": "calidad"
   }
 }

@@ -1783,6 +1783,13 @@
     "Price date": "Preisdatum",
     "Region": "Region",
     "Checked against its source": "Gegen die Quelle geprüft",
-    "Remove the price": "Preis entfernen"
+    "Remove the price": "Preis entfernen",
+    "Class of a standard": "Klasse einer Norm",
+    "concrete": "Beton",
+    "structural steel": "Baustahl",
+    "reinforcing steel": "Betonstahl",
+    "bolts": "Schrauben",
+    "timber": "Holz",
+    "grade": "Güte"
   }
 }

@@ -1783,6 +1783,13 @@
     "Price date": "Prisdatum",
     "Region": "Region",
     "Checked against its source": "Kontrollerat mot källan",
-    "Remove the price": "Ta bort priset"
+    "Remove the price": "Ta bort priset",
+    "Class of a standard": "Klass i en standard",
+    "concrete": "betong",
+    "structural steel": "konstruktionsstål",
+    "reinforcing steel": "armeringsstål",
+    "bolts": "skruvar",
+    "timber": "trä",
+    "grade": "kvalitet"
   }
 }
