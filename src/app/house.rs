@@ -59,6 +59,8 @@ pub enum HouseMessage {
     Sheet(String),
     Typed(Typed, String, Lang),
     Terminator(Terminator),
+    /// The hatch standard the office hatches by (its key); none: the library's own choice.
+    HatchStandard(Option<String>),
 }
 
 /// Which colour is set, which sheet format the sample shows, what is being typed that was not
@@ -163,6 +165,22 @@ impl App {
                 }
             }
             HouseMessage::Terminator(terminator) => self.house.dimensions.terminator = terminator,
+            HouseMessage::HatchStandard(key) => {
+                // (a standard the project does not have is not named)
+                if key.as_deref().is_none_or(|key| self.library.hatch_standards.iter().any(|s| s.key == key)) {
+                    self.house.hatch_standard = key;
+                    self.follow_house_hatches();
+                }
+            }
+        }
+    }
+
+    /// Chooses the hatch standard the house style names in the project's library, so its
+    /// drawings hatch by it; a style that names none, or one the library lacks, changes nothing.
+    pub(super) fn follow_house_hatches(&mut self) {
+        let Some(key) = self.house.hatch_standard.clone() else { return };
+        if self.library.hatch_standard().is_some_and(|s| s.key != key) && self.library.choose_hatch_standard(&key) && self.modeller.shown.is_some() && self.modeller.model.iter().next().is_some() {
+            self.show_modelled();
         }
     }
 
@@ -172,6 +190,7 @@ impl App {
             if style.check().is_ok() {
                 self.house = style;
                 self.house_view = HouseView::default();
+                self.follow_house_hatches();
             }
         }
     }
@@ -274,6 +293,14 @@ impl App {
         fields = fields.push(typed(Typed::TextHeight, mm(d.text_height), l.text("Teksthoogte", "Text height")));
         fields = fields.push(typed(Typed::Gap, mm(d.gap), l.text("Afstand tot het gemetene", "Gap to what is measured")));
         fields = fields.push(typed(Typed::Overshoot, mm(d.overshoot), l.text("Uitsteek", "Overshoot")));
+        // the hatch standard the office hatches by: one of the project's, or the library's own choice
+        let by_library = Standard(None, l.text("zoals de bibliotheek kiest", "as the library chooses").to_string());
+        let standards: Vec<Standard> = std::iter::once(by_library).chain(self.library.hatch_standards.iter().map(|s| Standard(Some(s.key.clone()), s.name(lang).to_string()))).collect();
+        let now = standards.iter().find(|s| s.0 == style.hatch_standard).cloned();
+        let hatch_name = l.text("Arceringen volgens", "Hatches by");
+        let pick = pick_list(standards, now, |s: Standard| HouseMessage::HatchStandard(s.0)).text_size(12).padding([2, 6]).width(Fill);
+        fields = fields.push(caption(l.text("Arceringen", "Hatches")));
+        fields = fields.push(row![text(hatch_name).size(12).color(p.text_secondary).wrapping(Wrapping::WordOrGlyph).width(Length::FillPortion(2)), container(a11y::named(pick, Aria::ComboBox, hatch_name)).width(Length::FillPortion(3))].spacing(8).align_y(Center));
         fields = fields.push(caption(l.text("Titelblok", "Title block")));
         fields = fields.push(typed(Typed::BlockWidth, mm(style.title_block.width), l.text("Breedte (mm)", "Width (mm)")));
         let refused = view.refused.as_ref().map(|why| text(format!("{} ({why})", l.text("Niet overgenomen.", "Not taken."))).size(11).color(p.accent).wrapping(Wrapping::Word));
@@ -286,6 +313,16 @@ impl App {
         };
         let pane = column![text(style.company.name.clone()).size(14).font(FONT_BOLD).color(p.text).wrapping(Wrapping::Word), sample, Element::from(fields.push(refused)).map(Message::House)].spacing(8);
         container(pane).padding(8).into()
+    }
+}
+
+/// A hatch standard (its key, or none for the library's own choice) with its name, to pick.
+#[derive(Debug, Clone, PartialEq)]
+struct Standard(Option<String>, String);
+
+impl std::fmt::Display for Standard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.1)
     }
 }
 
@@ -382,6 +419,32 @@ mod tests {
         assert_eq!((app.house.dimensions.text_height, app.house.title_block.width, app.house_view.refused.is_some()), (3.5, 180.0, true));
         let _ = app.house_update(HouseMessage::Terminator(Terminator::Arrow));
         assert_eq!(app.house.dimensions.terminator, Terminator::Arrow);
+    }
+
+    #[test]
+    fn the_house_style_names_the_hatch_standard_and_the_project_hatches_by_it() {
+        let mut app = App::default();
+        let chosen = |app: &App| app.library.hatch_standard().map(|s| s.key.clone());
+        assert_eq!((app.house.hatch_standard.clone(), chosen(&app)), (None, Some("openaec".to_string())));
+        let _ = app.house_update(HouseMessage::HatchStandard(Some("nen47".into())));
+        assert_eq!((app.house.hatch_standard.as_deref(), chosen(&app)), (Some("nen47"), Some("nen47".to_string())));
+        // one the project does not have is not named
+        let _ = app.house_update(HouseMessage::HatchStandard(Some("din".into())));
+        assert_eq!(app.house.hatch_standard.as_deref(), Some("nen47"));
+        {
+            let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 2400.0), app.house_pane(app.theme.palette(), Language::English));
+            assert!(pane.find("Hatches by").is_ok(), "the label");
+            assert!(pane.find("Hatches").is_ok(), "the caption");
+        }
+        // none: the library chooses, and what it had chosen stays
+        let _ = app.house_update(HouseMessage::HatchStandard(None));
+        assert_eq!((app.house.hatch_standard.clone(), chosen(&app)), (None, Some("nen47".to_string())));
+        // a house style taken from a project's file brings its standard along
+        let mut other = App::default();
+        let mut style = other.house.clone();
+        style.hatch_standard = Some("nen47".into());
+        other.adopt_house(&serde_json::to_value(&style).unwrap());
+        assert_eq!(chosen(&other), Some("nen47".to_string()));
     }
 
     #[test]

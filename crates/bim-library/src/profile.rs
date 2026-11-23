@@ -502,17 +502,21 @@ pub struct LinearType {
     /// An NL-SfB code of its own, in place of the rule's ("21.22").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
+    /// What a delivery asks of it beside its code ([`crate::ils`]); what is none follows from
+    /// its role and its code.
+    #[serde(default, skip_serializing_if = "crate::ils::Delivery::is_empty")]
+    pub delivery: crate::ils::Delivery,
 }
 
 impl LinearType {
     pub fn new(id: &str, role: LinearRole, material: &str, profile: ProfileShape) -> Self {
-        Self { id: id.into(), role, material: material.into(), profile, designation: None, name: None, code: None }
+        Self { id: id.into(), role, material: material.into(), profile, designation: None, name: None, code: None, delivery: Default::default() }
     }
 
     /// A type of `role` of the steel profile `designation`, of steel.
     pub fn steel(id: &str, role: LinearRole, designation: &str) -> Option<Self> {
         let p = steel(designation)?;
-        Some(Self { id: id.into(), role, material: "steel".into(), profile: p.shape.clone(), designation: Some(p.designation.clone()), name: None, code: None })
+        Some(Self { id: id.into(), role, material: "steel".into(), profile: p.shape.clone(), designation: Some(p.designation.clone()), name: None, code: None, delivery: Default::default() })
     }
 
     /// Checks it against `materials`: an id, a known material, a profile that checks.

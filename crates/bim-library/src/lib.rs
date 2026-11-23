@@ -22,16 +22,20 @@
 //! Lengths are metres.
 
 pub mod annotate;
+pub mod aspect;
 pub mod buildup;
 pub mod class;
 pub mod component;
 pub mod connection;
+pub mod cost;
+pub mod detail;
 pub mod drawing;
 pub mod dutch;
 pub mod grade;
 pub mod hatch;
 pub mod house;
 pub mod ifcx;
+pub mod ils;
 pub mod inb;
 pub mod library;
 pub mod lod;
@@ -39,6 +43,7 @@ pub mod material;
 pub mod nlsfb;
 pub mod object;
 pub mod ocondat;
+pub mod physics;
 pub mod profile;
 pub mod remote;
 pub mod service;
@@ -113,6 +118,8 @@ pub enum LibraryError {
     BadService(String),
     /// A hatch standard or a material's hatch that does not hold together: what it needs.
     BadHatch(String),
+    /// An aspect does not hold together; the text says what it needs.
+    BadAspect(String),
 }
 
 impl std::fmt::Display for LibraryError {
@@ -131,6 +138,7 @@ impl std::fmt::Display for LibraryError {
             LibraryError::BadConnection(what) => write!(f, "Not a connection: it needs {what}."),
             LibraryError::BadService(what) => write!(f, "Not a service type: it needs {what}."),
             LibraryError::BadHatch(what) => write!(f, "Not a hatch: it needs {what}."),
+            LibraryError::BadAspect(what) => write!(f, "Not an aspect: it needs {what}."),
             LibraryError::BadHouseStyle(what) => write!(f, "Not a house style: {what}."),
             LibraryError::BadCode(code) => write!(f, "\"{code}\" is no NL-SfB code (21, 21.2 or 21.22)."),
         }

@@ -95,6 +95,35 @@ pub enum Detail {
     Full,
 }
 
+impl Detail {
+    pub const ALL: [Detail; 4] = [Detail::Outline, Detail::Coarse, Detail::Layers, Detail::Full];
+
+    /// The level of detail of the library it asks of an item ([`crate::detail`]): an outline is
+    /// LOD 200, one hatch and the layers LOD 350, all of it LOD 500.
+    pub fn level(self) -> crate::detail::Detail {
+        match self {
+            Detail::Outline => crate::detail::Detail::D200,
+            Detail::Coarse | Detail::Layers => crate::detail::Detail::D350,
+            Detail::Full => crate::detail::Detail::D500,
+        }
+    }
+}
+
+impl crate::BuildUp {
+    /// The bands a section through it shows in a drawing of this detail: its outline, one band
+    /// of its thickest layer's material, or its layers.
+    pub fn drawn(&self, detail: Detail) -> Vec<crate::detail::Band<'_>> {
+        match detail {
+            Detail::Outline => self.at(crate::detail::Detail::D200),
+            Detail::Coarse => {
+                let main = self.layers.iter().max_by(|a, b| a.thickness.total_cmp(&b.thickness)).map(|layer| layer.material.as_str());
+                vec![crate::detail::Band { thickness: self.thickness(), material: main }]
+            }
+            Detail::Layers | Detail::Full => self.at(crate::detail::Detail::D350),
+        }
+    }
+}
+
 /// How an element is drawn. What is none is left to the kind of drawing.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Look {
@@ -191,6 +220,26 @@ impl ViewTemplate {
             Some(rule) => rule.look.over(&self.otherwise),
             None => self.otherwise.clone(),
         }
+    }
+
+    /// The level of detail it shows what no rule takes at ([`crate::detail`]): what its own
+    /// look says, else what its scale gives.
+    pub fn level(&self) -> crate::detail::Detail {
+        self.otherwise.detail.unwrap_or_else(|| detail_at(self.scale)).level()
+    }
+
+    /// Moves rule `key` one place up (tried sooner) or down; whether it moved.
+    pub fn move_rule(&mut self, key: &str, up: bool) -> bool {
+        let Some(at) = self.rules.iter().position(|r| r.key == key) else { return false };
+        let to = if up { at.checked_sub(1) } else { Some(at + 1).filter(|to| *to < self.rules.len()) };
+        to.map(|to| self.rules.swap(at, to)).is_some()
+    }
+
+    /// Takes rule `key` away; whether it had it.
+    pub fn remove_rule(&mut self, key: &str) -> bool {
+        let before = self.rules.len();
+        self.rules.retain(|r| r.key != key);
+        self.rules.len() != before
     }
 
     /// Whether it holds together: a key, a kind, a scale, and rules each once.
@@ -399,4 +448,34 @@ mod tests {
         assert_eq!(written["attributes"][VIEW_TEMPLATE]["rules"][0]["look"], json!({"cut": "0.7"}));
         assert_eq!(serde_json::from_value::<ViewTemplate>(written["attributes"][VIEW_TEMPLATE].clone()).unwrap(), t);
     }
+    #[test]
+    fn a_template_asks_a_level_of_detail_and_its_rules_are_moved() {
+        use crate::detail::Detail as Level;
+        assert_eq!(Detail::ALL.map(Detail::level), [Level::D200, Level::D350, Level::D350, Level::D500]);
+        let mut library = crate::Library::starter();
+        let level = |key: &str| library.view_template(key).expect(key).level();
+        assert_eq!((level("floor-plan-so-200"), level("floor-plan-do-100"), level("floor-plan-uo-50")), (Level::D200, Level::D350, Level::D350));
+        assert!(library.view_templates.iter().filter(|t| t.kind == "detail").all(|t| t.level() == Level::D500));
+        // a build-up as a drawing of a detail shows it
+        let wall = library.buildups.iter().find(|b| b.layers.len() >= 3).expect("a layered build-up").clone();
+        assert_eq!(wall.drawn(Detail::Outline).iter().map(|b| b.material).collect::<Vec<_>>(), [None]);
+        let coarse = wall.drawn(Detail::Coarse);
+        let thickest = wall.layers.iter().map(|l| l.thickness).fold(0.0, f64::max);
+        assert_eq!((coarse.len(), coarse[0].thickness), (1, wall.thickness()));
+        assert!(wall.layers.iter().any(|l| Some(l.material.as_str()) == coarse[0].material && l.thickness == thickest));
+        assert_eq!((wall.drawn(Detail::Layers).len(), wall.drawn(Detail::Full).len()), (wall.layers.len(), wall.layers.len()));
+        // a project takes a template as a copy and changes the order of its rules
+        let from = library.view_template("floor-plan-do-100").unwrap().clone();
+        let key = library.copy_view_template(&from);
+        assert_eq!(key, "floor-plan-do-100-2");
+        let template = library.view_template_mut(&key).unwrap();
+        let first = template.rules[0].key.clone();
+        assert!(template.move_rule(&first, false) && template.rules[1].key == first && !template.move_rule("nothing", true));
+        assert!(template.remove_rule(&first) && !template.remove_rule(&first) && template.check().is_ok());
+        let file = crate::ifcx::file(&library, "test", "test", "2026-11-23T00:00:00Z");
+        assert_eq!(crate::ifcx::read(&file).unwrap().view_template(&key), library.view_template(&key));
+        assert!(library.remove_view_template(&key) && !library.remove_view_template(&key));
+        assert_eq!(library.view_template("floor-plan-do-100"), Some(&from));
+    }
+
 }

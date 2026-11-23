@@ -20,6 +20,18 @@ use std::sync::Arc;
 /// a slider at every move: what is typed or dragged there in one go is one step to take back.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum Typing {
+    /// The fire rating typed for a linear type (its id).
+    ProfileRating(String),
+    /// The fire rating typed for a build-up (its id).
+    BuildUpRating(String),
+    /// The price typed for a material (its key).
+    MaterialPrice(String),
+    /// The physics typed for a material (its key).
+    MaterialProperty(String),
+    /// A field of a view template (its key).
+    ViewTemplate(String, super::view_templates::Field),
+    /// A field of a drawing set (its key).
+    DrawingSet(String, super::drawing_sets::Field),
     /// The name of a material (its key) in a language.
     MaterialName(String, Lang),
     /// The colour of a material: typed, or a channel at a time.
@@ -55,15 +67,21 @@ impl App {
             Message::Material(MaterialMessage::Named(lang, _)) => Some(Typing::MaterialName(self.material_view.picked.clone()?, *lang)),
             Message::Material(MaterialMessage::Hex(_) | MaterialMessage::Channel(..) | MaterialMessage::Shown) => Some(Typing::MaterialColour(self.material_view.picked.clone()?)),
             Message::House(super::house::HouseMessage::Typed(field, _, _)) => Some(Typing::House(*field)),
+            Message::Material(MaterialMessage::Property(..)) => Some(Typing::MaterialProperty(self.material_view.picked.clone()?)),
+            Message::Material(MaterialMessage::Priced(..)) => Some(Typing::MaterialPrice(self.material_view.picked.clone()?)),
             Message::Material(MaterialMessage::Graded(_)) => Some(Typing::MaterialGrade(self.material_view.picked.clone()?)),
             Message::Material(MaterialMessage::From(_)) => Some(Typing::MaterialScale(self.material_view.picked.clone()?)),
             Message::Material(MaterialMessage::StandardNamed(_)) => Some(Typing::HatchStandard(self.library.hatch_standard()?.key.clone())),
             Message::Code(super::codes::CodeMessage::Named(lang, _)) => Some(Typing::CodeName(self.code_view.picked.clone()?, *lang)),
             Message::Connection(super::connections::ConnectionMessage::Typed(field, _)) => Some(Typing::Connection(self.connection_view.picked.clone()?, *field)),
+            Message::ViewTemplate(super::view_templates::ViewTemplateMessage::Typed(field, _)) => Some(Typing::ViewTemplate(self.view_template_view.picked.clone()?, *field)),
+            Message::DrawingSet(super::drawing_sets::DrawingSetMessage::Typed(field, _)) => Some(Typing::DrawingSet(self.drawing_set_view.picked.clone()?, field.clone())),
             Message::Service(super::services::ServiceMessage::Typed(super::services::Field::Cover, _)) => Some(Typing::Service(self.service_view.cover.clone()?, super::services::Field::Cover)),
             Message::Service(super::services::ServiceMessage::Typed(field, _)) => Some(Typing::Service(self.service_view.picked.clone()?, *field)),
             Message::Object(super::objects::ObjectMessage::Typed(field, _)) => Some(Typing::Object(self.object_view.picked.clone()?, *field)),
+            Message::BuildUp(BuildUpMessage::FireRating(_)) => Some(Typing::BuildUpRating(self.buildup_view.picked.clone()?)),
             Message::BuildUp(BuildUpMessage::Named(_)) => Some(Typing::BuildUpName(self.buildup_view.picked.clone()?)),
+            Message::Profile(ProfileMessage::FireRating(_)) => Some(Typing::ProfileRating(self.profile_view.picked.clone()?)),
             Message::Profile(ProfileMessage::Named(_)) => Some(Typing::ProfileName(self.profile_view.picked.clone()?)),
             Message::Standard(StandardMessage::Typed(field, _, lang)) => Some(Typing::Standard(self.standard_view.picked.clone()?, *field, *lang)),
             _ => None,
