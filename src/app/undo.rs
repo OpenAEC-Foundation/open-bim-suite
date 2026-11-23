@@ -20,6 +20,8 @@ use std::sync::Arc;
 /// a slider at every move: what is typed or dragged there in one go is one step to take back.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum Typing {
+    /// The fire rating typed for a linear type (its id).
+    ProfileRating(String),
     /// The fire rating typed for a build-up (its id).
     BuildUpRating(String),
     /// The price typed for a material (its key).
@@ -79,6 +81,7 @@ impl App {
             Message::Object(super::objects::ObjectMessage::Typed(field, _)) => Some(Typing::Object(self.object_view.picked.clone()?, *field)),
             Message::BuildUp(BuildUpMessage::FireRating(_)) => Some(Typing::BuildUpRating(self.buildup_view.picked.clone()?)),
             Message::BuildUp(BuildUpMessage::Named(_)) => Some(Typing::BuildUpName(self.buildup_view.picked.clone()?)),
+            Message::Profile(ProfileMessage::FireRating(_)) => Some(Typing::ProfileRating(self.profile_view.picked.clone()?)),
             Message::Profile(ProfileMessage::Named(_)) => Some(Typing::ProfileName(self.profile_view.picked.clone()?)),
             Message::Standard(StandardMessage::Typed(field, _, lang)) => Some(Typing::Standard(self.standard_view.picked.clone()?, *field, *lang)),
             _ => None,
