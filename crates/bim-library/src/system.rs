@@ -93,13 +93,49 @@ impl SystemGroup {
 }
 
 /// How a grid's rows lie: on one another, or every second row shifted half a bay (a stretcher
-/// bond, staggered boards).
+/// bond, staggered boards), or as one of the bonds of brickwork, where a header is half a bay
+/// long: a stretcher as long as it is thick twice over with the joint between.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Pattern {
     #[default]
     Stack,
     RunningBond,
+    /// Stretchers, every row a quarter of a bay past the one under it, four rows to a turn.
+    Quarter,
+    /// A row of stretchers and a row of headers in turn, the stretchers over one another.
+    English,
+    /// As [`Pattern::English`], every second row of stretchers half a bay past the first.
+    EnglishCross,
+    /// A stretcher and a header in turn in every row, each header in the middle of the
+    /// stretcher under it.
+    Flemish,
+}
+
+impl Pattern {
+    /// Every pattern, in the order a list shows them.
+    pub const ALL: [Pattern; 6] = [Pattern::Stack, Pattern::RunningBond, Pattern::Quarter, Pattern::English, Pattern::EnglishCross, Pattern::Flemish];
+
+    /// How row `row` (from 0) is divided along it, for bays `bay` long: how far its first
+    /// division is from its start, and the lengths that follow one another from there, in turn.
+    pub fn course(self, row: usize, bay: f64) -> (f64, &'static [f64]) {
+        const WHOLE: &[f64] = &[1.0];
+        const HALVES: &[f64] = &[0.5];
+        const BOTH: &[f64] = &[1.0, 0.5];
+        let (shift, units) = match self {
+            Pattern::Stack => (0.0, WHOLE),
+            Pattern::RunningBond => (if row % 2 == 1 { 0.5 } else { 0.0 }, WHOLE),
+            Pattern::Quarter => ((row % 4) as f64 * 0.25, WHOLE),
+            Pattern::English => if row % 2 == 1 { (0.25, HALVES) } else { (0.0, WHOLE) },
+            Pattern::EnglishCross => match row % 4 {
+                0 => (0.0, WHOLE),
+                2 => (0.5, WHOLE),
+                _ => (0.25, HALVES),
+            },
+            Pattern::Flemish => (if row % 2 == 1 { 0.75 } else { 0.0 }, BOTH),
+        };
+        (shift * bay, units)
+    }
 }
 
 impl Pattern {
@@ -109,8 +145,12 @@ impl Pattern {
         let [nl, en, de, fr] = match (self, group) {
             (Pattern::Stack, SystemGroup::Masonry) => ["stapelverband", "stack bond", "Stapelverband", "joints alignés"],
             (Pattern::RunningBond, SystemGroup::Masonry) => ["halfsteensverband", "stretcher bond", "Läuferverband", "appareil en panneresse"],
-            (Pattern::RunningBond, _) => ["verspringend", "staggered", "versetzt", "décalé"],
+            (Pattern::Quarter, SystemGroup::Masonry) => ["klezorenverband", "quarter bond", "Viertelverband", "appareil au quart"],
+            (Pattern::English, SystemGroup::Masonry) => ["staand verband", "English bond", "Blockverband", "appareil anglais"],
+            (Pattern::EnglishCross, SystemGroup::Masonry) => ["kruisverband", "English cross bond", "Kreuzverband", "appareil croisé"],
+            (Pattern::Flemish, SystemGroup::Masonry) => ["Vlaams verband", "Flemish bond", "Flämischer Verband", "appareil flamand"],
             (Pattern::Stack, _) => return None,
+            (_, _) => ["verspringend", "staggered", "versetzt", "décalé"],
         };
         Some(match lang {
             Lang::Nl => nl,
@@ -420,6 +460,24 @@ impl Trimmer {
     }
 }
 
+/// How brickwork is carried over an opening: by a prefab concrete lintel as thick as the bricks,
+/// at least `height` high and as many whole courses as that takes (up to the joint under the
+/// course above it), bearing `bearing` on the brickwork either side of the opening.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Lintel {
+    pub height: f64,
+    pub bearing: f64,
+}
+
+impl Lintel {
+    /// At least 100 high, bearing 100 either side.
+    pub const BRICKWORK: Lintel = Lintel { height: 0.1, bearing: 0.1 };
+
+    fn fits(&self) -> bool {
+        [self.height, self.bearing].into_iter().all(|v| v.is_finite() && v > 0.0)
+    }
+}
+
 /// How the bays of a system's face are divided along its line (and, but for slabs, its rows
 /// across it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -481,6 +539,9 @@ pub struct SystemType {
     /// A floor of slabs: how the slabs an opening cuts through are carried.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trimmer: Option<Trimmer>,
+    /// Brickwork: how it is carried over an opening.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lintel: Option<Lintel>,
     /// Its bays are whole ones from its start and the last one is cut to fit (slabs of a fixed
     /// width, the last a fitting slab), rather than equal ones as near the grid's as fit.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -491,6 +552,10 @@ pub struct SystemType {
     /// How its bays are divided, where not in equal ones (or, slabs, whole from the start).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub division: Option<Division>,
+    /// What a delivery asks of it beside its code ([`crate::ils`]); what is none follows from
+    /// its group and its code.
+    #[serde(default, skip_serializing_if = "crate::ils::Delivery::is_empty")]
+    pub delivery: crate::ils::Delivery,
 }
 
 /// Whether a grid fits members `width` wide: positive bays and rows, wider than the members.
@@ -618,7 +683,7 @@ impl SystemType {
             }
             known(&panels.material)?;
         }
-        if self.lying.is_some_and(|h| !h.is_finite()) || self.trimmer.is_some_and(|t| !t.fits()) || self.cores.is_some_and(|c| !c.fits()) {
+        if self.lying.is_some_and(|h| !h.is_finite()) || self.trimmer.is_some_and(|t| !t.fits()) || self.lintel.is_some_and(|l| !l.fits()) || self.cores.is_some_and(|c| !c.fits()) {
             return Err(LibraryError::NotPositive);
         }
         Ok(())
@@ -702,7 +767,7 @@ pub fn starter() -> Vec<SystemType> {
     use Pattern::*;
     use SystemGroup::*;
     let glass = || Panels::new("glass", 0.024);
-    let upright = |id: &str, group, grid, members, panels| SystemType { id: id.into(), group, grid, members, panels, layers: Vec::new(), corners: Corner::Butt, lying: None, code: None, trimmer: None, whole: false, cores: None, division: None };
+    let upright = |id: &str, group, grid, members, panels| SystemType { id: id.into(), group, grid, members, panels, layers: Vec::new(), corners: Corner::Butt, lying: None, code: None, trimmer: None, lintel: None, whole: false, cores: None, division: None, delivery: Default::default() };
     // aluminium and PVC frames are mitred at their corners
     let mitred = |t: SystemType| SystemType { corners: Corner::Mitre, ..t };
     // boards of `material` laid edge to edge, `bay` wide and `row` high; membranes come in rolls
@@ -854,9 +919,13 @@ pub fn starter() -> Vec<SystemType> {
         metal_stud(0.1, 1),
         metal_stud(0.1, 2),
         // bricks as panels, the mortar as members set back 5 mm from either face
-        upright("system.masonry-waal-stretcher", Masonry, Grid::new(0.22, 0.0625, RunningBond), Members::new(0.01, 0.09, "mortar"), Panels::new("brick", 0.1)),
-        upright("system.masonry-dik-stretcher", Masonry, Grid::new(0.22, 0.075, RunningBond), Members::new(0.01, 0.09, "mortar"), Panels::new("brick", 0.1)),
-        upright("system.masonry-waal-stack", Masonry, Grid::new(0.22, 0.0625, Stack), Members::new(0.01, 0.09, "mortar"), Panels::new("brick", 0.1)),
+        SystemType { lintel: Some(Lintel::BRICKWORK), ..upright("system.masonry-waal-stretcher", Masonry, Grid::new(0.22, 0.0625, RunningBond), Members::new(0.01, 0.09, "mortar"), Panels::new("brick", 0.1)) },
+        SystemType { lintel: Some(Lintel::BRICKWORK), ..upright("system.masonry-dik-stretcher", Masonry, Grid::new(0.22, 0.075, RunningBond), Members::new(0.01, 0.09, "mortar"), Panels::new("brick", 0.1)) },
+        SystemType { lintel: Some(Lintel::BRICKWORK), ..upright("system.masonry-waal-stack", Masonry, Grid::new(0.22, 0.0625, Stack), Members::new(0.01, 0.09, "mortar"), Panels::new("brick", 0.1)) },
+        SystemType { lintel: Some(Lintel::BRICKWORK), ..upright("system.masonry-waal-quarter", Masonry, Grid::new(0.22, 0.0625, Quarter), Members::new(0.01, 0.09, "mortar"), Panels::new("brick", 0.1)) },
+        SystemType { lintel: Some(Lintel::BRICKWORK), ..upright("system.masonry-waal-english", Masonry, Grid::new(0.22, 0.0625, English), Members::new(0.01, 0.2, "mortar"), Panels::new("brick", 0.21)) },
+        SystemType { lintel: Some(Lintel::BRICKWORK), ..upright("system.masonry-waal-cross", Masonry, Grid::new(0.22, 0.0625, EnglishCross), Members::new(0.01, 0.2, "mortar"), Panels::new("brick", 0.21)) },
+        SystemType { lintel: Some(Lintel::BRICKWORK), ..upright("system.masonry-waal-flemish", Masonry, Grid::new(0.22, 0.0625, Flemish), Members::new(0.01, 0.2, "mortar"), Panels::new("brick", 0.21)) },
         upright("system.sand-lime-elements-100", Masonry, Grid::new(0.9, 0.6465, RunningBond), Members::new(0.003, 0.1, "glue"), Panels::new("sand-lime", 0.1)),
         upright("system.cladding-zinc-standing-seam-430", Cladding, Grid::new(0.43, 6.0, Stack), Members::new(0.006, 0.04, "zinc"), Panels::new("zinc", 0.0008)),
         upright("system.cladding-timber-boards-140", Cladding, Grid::new(4.0, 0.14, RunningBond), Members::new(0.004, 0.012, "timber"), Panels::new("timber-cladding", 0.018)),
@@ -906,7 +975,7 @@ mod tests {
     #[test]
     fn the_starter_types_check_and_have_names_of_their_own() {
         let types = starter();
-        assert_eq!(types.len(), 44);
+        assert_eq!(types.len(), 48);
         for t in &types {
             t.check(&materials()).unwrap_or_else(|e| panic!("{}: {e}", t.id));
             // a floor or a ceiling lies, the others stand

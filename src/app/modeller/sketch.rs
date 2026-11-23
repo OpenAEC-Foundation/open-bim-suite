@@ -18,6 +18,12 @@
 //!   It is one step to take back; what the kernel refuses (loops that cross, an opening outside
 //!   the outline) is told too.
 //! - **Esc** lets a tool go, then leaves the sketch with the floor unchanged.
+//! - **A framed wall.** Tab on a selected timber frame, steel frame or metal stud wall opens the
+//!   same sketch in the wall's own face, upright: its outline and its openings as lines. A
+//!   rectangle drawn inside it is an opening, framed as the wall's type frames openings; a
+//!   corner cut off the outline is cut off the wall. Tab makes the wall as long and as high as
+//!   the outline reaches. An opening that is not a rectangle with level and plumb sides is told.
+//!   In brickwork an opening's sill and head go to the nearest course.
 
 use crate::app::edit::{EditEvent, EditOverlay};
 use crate::app::App;
@@ -32,6 +38,8 @@ use std::f64::consts::{PI, TAU};
 const MEET: f64 = 1e-4;
 /// A click this near a point or a line takes it (logical pixels).
 const REACH: f32 = 12.0;
+/// A point clicked this near a line of the sketch is put on it (logical pixels).
+const ON_LINE: f32 = 4.0;
 /// A click is rounded to this (metres).
 const ROUND: f64 = 0.01;
 
@@ -179,6 +187,10 @@ pub enum SketchError {
     Gap,
     /// More than two lines meet in a point.
     Branch,
+    /// A loop inside a wall's outline is not a rectangle with level and plumb sides.
+    OpeningNotSquare,
+    /// A loop inside a system floor's outline is not a rectangle along its laying direction.
+    OpeningNotAlong,
 }
 
 impl SketchError {
@@ -187,6 +199,8 @@ impl SketchError {
             Self::Empty => l.text("De schets heeft geen lijnen", "The sketch has no lines"),
             Self::Gap => l.text("De omtrek is niet gesloten", "The outline is not closed"),
             Self::Branch => l.text("In een punt komen meer dan twee lijnen samen", "More than two lines meet in a point"),
+            Self::OpeningNotAlong => l.text("Een opening in een systeemvloer is een rechthoek langs de legrichting", "An opening in a system floor is a rectangle along its laying direction"),
+            Self::OpeningNotSquare => l.text("Een opening in een wand is een rechthoek, waterpas en te lood", "An opening in a wall is a rectangle, level and plumb"),
         }
     }
 }
@@ -211,6 +225,26 @@ pub struct Sketch {
     pub held: Option<DVec2>,
     /// Why Tab could not finish it.
     pub error: Option<SketchError>,
+    /// The sketch of a wall: where its face stands. None for a floor's, which lies at `top`.
+    pub face: Option<Face>,
+}
+
+/// The face of a standing wall a sketch is drawn in: a point of the sketch is so far `along` it
+/// from `origin` and so far up.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Face {
+    pub origin: DVec3,
+    pub along: DVec3,
+}
+
+impl Sketch {
+    /// Where point `p` of the sketch is in the scene.
+    fn lift(&self, p: DVec2) -> DVec3 {
+        match self.face {
+            Some(f) => f.origin + f.along * p.x + DVec3::Z * p.y,
+            None => p.extend(self.top),
+        }
+    }
 }
 
 /// A closed loop of a sketch: its corners in order, each with the bulge of the edge that leaves it.
@@ -373,7 +407,8 @@ impl App {
         self.modeller.model.get(id).is_some_and(|e| match &e.shape {
             Shape::Planar(PlanarDef { form: PlanarForm::Slab { .. }, .. }) => true,
             // a floor or a ceiling made as a system is laid in its outline
-            Shape::System(s) => s.lies(),
+            // a framed wall is sketched in its own face
+            Shape::System(s) => s.system_type.is_some(),
             _ => false,
         })
     }
@@ -382,10 +417,28 @@ impl App {
     pub(in crate::app) fn open_sketch(&mut self, element: ElementId) {
         self.drop_grab();
         let Some(shape) = self.modeller.model.get(element).map(|e| e.shape_in_project(&self.modeller.model.grid)) else { return };
+        let mut face = None;
         let (outline, holes, top, bulges) = match shape {
+            // a framed wall: its outline in its face, and its openings as rectangles
+            Shape::System(s) if !s.lies() => {
+                let Some(dir) = (s.end - s.start).try_normalize() else { return };
+                let p = DVec2::new;
+                let length = (s.end - s.start).length();
+                let outline = if s.outline.len() >= 3 { s.outline.clone() } else { vec![p(0.0, 0.0), p(length, 0.0), p(length, s.height), p(0.0, s.height)] };
+                let holes = s.openings.iter().map(|o| vec![p(o.along, o.sill), p(o.along + o.width, o.sill), p(o.along + o.width, o.sill + o.height), p(o.along, o.sill + o.height)]).collect();
+                face = Some(Face { origin: s.start.extend(s.base), along: dir.extend(0.0) });
+                (outline, holes, s.base, Vec::new())
+            }
             Shape::Planar(PlanarDef { form: PlanarForm::Slab { outline, holes, top, bulges, .. }, .. }) => (outline, holes, top, bulges),
+            // a floor made as a system: its outline, and its openings (but the drilled ones) as
+            // rectangles along its line
             Shape::System(s) if s.lies() => match super::slab_handles::lying_outline(&s) {
-                Some(outline) => (outline, Vec::new(), s.base, Vec::new()),
+                Some(outline) => {
+                    let dir = (s.end - s.start).try_normalize().unwrap_or(DVec2::X);
+                    let at = |u: f64, v: f64| s.start + dir * u + dir.perp() * v;
+                    let holes = s.openings.iter().filter(|o| !o.framing.is_some_and(|f| f.round)).map(|o| vec![at(o.along, o.sill), at(o.along + o.width, o.sill), at(o.along + o.width, o.sill + o.height), at(o.along, o.sill + o.height)]).collect();
+                    (outline, holes, s.base, Vec::new())
+                }
                 None => return,
             },
             _ => return,
@@ -396,34 +449,70 @@ impl App {
             segments.extend((0..hole.len()).map(|i| Segment::line(hole[i], hole[(i + 1) % hole.len()])));
         }
         self.select_tool();
-        self.modeller.sketch = Some(Sketch { element, top, segments, tool: SketchTool::Pick, first: None, second: None, cursor: None, picked: None, held: None, error: None });
+        self.modeller.refusal = None;
+        self.modeller.sketch = Some(Sketch { element, top, segments, tool: SketchTool::Pick, first: None, second: None, cursor: None, picked: None, held: None, error: None, face });
+    }
+
+    /// Where the cursor's ray at viewport point (x, y) meets the sketch's plane, as a point of
+    /// the sketch: none where the view looks along the plane.
+    fn sketch_plane_point(&self, x: f32, y: f32, width: f32, height: f32) -> Option<DVec2> {
+        let sketch = self.modeller.sketch.as_ref()?;
+        let Some(f) = sketch.face else { return self.plane_point(x, y, width, height, sketch.top).map(|p| p.truncate()) };
+        let inv = (self.camera.view_proj(width / height) * self.model_matrix()).inverse();
+        let (nx, ny) = (2.0 * x / width - 1.0, 1.0 - 2.0 * y / height);
+        let a = inv.project_point3(glam::Vec3::new(nx, ny, 0.0)).as_dvec3();
+        let b = inv.project_point3(glam::Vec3::new(nx, ny, 1.0)).as_dvec3();
+        let (d, normal) = (b - a, f.along.cross(DVec3::Z));
+        if d.dot(normal).abs() < 1e-9 * d.length() {
+            return None;
+        }
+        let t = (f.origin - a).dot(normal) / d.dot(normal);
+        let hit = a + d * t - f.origin;
+        (t >= 0.0).then(|| DVec2::new(hit.dot(f.along), hit.z))
     }
 
     /// Where a click at viewport point (x, y) lands in the sketch: on a point of the sketch or of
     /// another element near the cursor, else on the sketch's plane, rounded.
     fn sketch_point(&self, x: f32, y: f32, width: f32, height: f32, but: Option<DVec2>) -> Option<DVec2> {
         let sketch = self.modeller.sketch.as_ref()?;
-        let own = sketch.points().into_iter().filter(|p| but.is_none_or(|b| b.distance(*p) > MEET)).map(|p| p.extend(sketch.top));
+        let own = sketch.points().into_iter().filter(|p| but.is_none_or(|b| b.distance(*p) > MEET));
+        // a floor's sketch takes the points of other elements too, in plan; a wall's its own
+        let others: Vec<DVec2> = if sketch.face.is_none() { self.snap_points_except(sketch.element).into_iter().map(|q| q.truncate()).collect() } else { Vec::new() };
         let near = own
-            .chain(self.snap_points_except(sketch.element))
-            .filter_map(|q| self.on_screen(DVec3::new(q.x, q.y, sketch.top), width, height).map(|s| (q, (s.0 - x).hypot(s.1 - y))))
+            .chain(others)
+            .filter_map(|q| self.on_screen(sketch.lift(q), width, height).map(|s| (q, (s.0 - x).hypot(s.1 - y))))
             .filter(|(_, d)| *d <= REACH)
             .min_by(|a, b| a.1.total_cmp(&b.1));
         match near {
-            Some((q, _)) => Some(q.truncate()),
-            None => self.plane_point(x, y, width, height, sketch.top).map(|p| DVec2::new((p.x / ROUND).round() * ROUND, (p.y / ROUND).round() * ROUND)),
+            Some((q, _)) => Some(q),
+            // on a line of the sketch under the cursor, so a line drawn to it meets it; a point
+            // that is dragged stays free of its own lines
+            None => {
+                let rounded = self.sketch_plane_point(x, y, width, height).map(|p| DVec2::new((p.x / ROUND).round() * ROUND, (p.y / ROUND).round() * ROUND));
+                match self.sketch_line_within(x, y, width, height, ON_LINE).filter(|_| but.is_none()) {
+                    // the rounded point brought onto the line, so it stays on round figures
+                    Some((index, at)) => sketch.segments.get(index).map(|s| s.at(s.along(rounded.unwrap_or(at)))),
+                    None => rounded,
+                }
+            }
         }
     }
 
     /// The line of the sketch under viewport point (x, y), and the point of the sketch's plane
     /// there.
     fn sketch_line_under(&self, x: f32, y: f32, width: f32, height: f32) -> Option<(usize, DVec2)> {
+        self.sketch_line_within(x, y, width, height, REACH)
+    }
+
+    /// The line of the sketch within `reach` pixels of viewport point (x, y), and the point of
+    /// the sketch's plane there.
+    fn sketch_line_within(&self, x: f32, y: f32, width: f32, height: f32, reach: f32) -> Option<(usize, DVec2)> {
         let sketch = self.modeller.sketch.as_ref()?;
-        let at = self.plane_point(x, y, width, height, sketch.top)?.truncate();
+        let at = self.sketch_plane_point(x, y, width, height)?;
         let (index, s) = sketch.segments.iter().enumerate().min_by(|a, b| a.1.distance(at).total_cmp(&b.1.distance(at)))?;
         // near enough on the screen: the nearest point of the line against the cursor
-        let (sx, sy) = self.on_screen(s.at(s.along(at)).extend(sketch.top), width, height)?;
-        ((sx - x).hypot(sy - y) <= REACH).then_some((index, at))
+        let (sx, sy) = self.on_screen(sketch.lift(s.at(s.along(at))), width, height)?;
+        ((sx - x).hypot(sy - y) <= reach).then_some((index, at))
     }
 
     /// A click in the viewport while the sketch is open. False when none is.
@@ -472,7 +561,8 @@ impl App {
         true
     }
 
-    /// A key in the sketch: L, R, A and T take a tool (the same key again lets it go).
+    /// A key in the sketch: L, R, A and T take a tool (the same key again lets it go), S lets
+    /// the tool go.
     pub(in crate::app) fn sketch_key(&mut self, key: char) {
         let Some(sketch) = self.modeller.sketch.as_mut() else { return };
         let tool = match key.to_ascii_lowercase() {
@@ -480,6 +570,7 @@ impl App {
             'r' => SketchTool::Rectangle,
             'a' => SketchTool::Arc,
             't' => SketchTool::Trim,
+            's' => SketchTool::Pick,
             _ => return,
         };
         let continues = matches!((sketch.tool, tool), (SketchTool::Line, SketchTool::Arc) | (SketchTool::Arc, SketchTool::Line));
@@ -540,9 +631,83 @@ impl App {
         let Some(largest) = (0..rings.len()).max_by(|a, b| size(&rings[*a]).total_cmp(&size(&rings[*b]))) else { return };
         let (corners, bows) = apart(&rings.remove(largest));
         let mut shape = old.shape_in_project(&grid);
-        // a lying system takes the outline, its bows as chords; loops inside it are not its
-        // openings (those are its own, in its properties)
+        // a framed wall: as long and as high as the outline reaches, cut to it where it is not
+        // that rectangle; every other loop an opening, framed as the wall's type frames them
         if let Shape::System(s) = &mut shape {
+            if !s.lies() {
+                let ring = bowed(&corners, &bows);
+                let (lo, hi) = ring.iter().fold((DVec2::splat(f64::INFINITY), DVec2::splat(f64::NEG_INFINITY)), |(lo, hi), p| (lo.min(*p), hi.max(*p)));
+                let mut openings = Vec::with_capacity(rings.len());
+                for hole in &rings {
+                    let (hole, bows) = apart(hole);
+                    let (a, b) = hole.iter().fold((DVec2::splat(f64::INFINITY), DVec2::splat(f64::NEG_INFINITY)), |(a, b), p| (a.min(*p), b.max(*p)));
+                    let square = bows.iter().all(|b| *b == 0.0) && hole.iter().all(|p| ((p.x - a.x).abs() < MEET || (p.x - b.x).abs() < MEET) && ((p.y - a.y).abs() < MEET || (p.y - b.y).abs() < MEET)) && (area2(&hole).abs() / 2.0 - (b.x - a.x) * (b.y - a.y)).abs() < MEET;
+                    if !square {
+                        if let Some(sketch) = self.modeller.sketch.as_mut() {
+                            sketch.error = Some(SketchError::OpeningNotSquare);
+                        }
+                        return;
+                    }
+                    // an opening that was there keeps how it is framed
+                    let was = s.openings.iter().find(|o| (o.along - a.x).abs() < MEET && (o.sill - a.y).abs() < MEET && (o.width - (b.x - a.x)).abs() < MEET && (o.height - (b.y - a.y)).abs() < MEET);
+                    openings.push(bim_core::Opening { along: a.x - lo.x, sill: a.y - lo.y, width: b.x - a.x, height: b.y - a.y, framing: was.and_then(|o| o.framing) });
+                }
+                openings.sort_by(|a, b| a.along.total_cmp(&b.along));
+                let Some(dir) = (s.end - s.start).try_normalize() else { return };
+                let start = s.start;
+                (s.start, s.end) = (start + dir * lo.x, start + dir * hi.x);
+                s.base += lo.y;
+                s.height = hi.y - lo.y;
+                s.breaks = s.breaks.iter().map(|b| b - lo.x).filter(|b| *b > 0.0 && *b < hi.x - lo.x).collect();
+                // in brickwork an opening stands on a course and ends under one: its sill and
+                // its head go to the nearest course, so no sliver of brick is left at them
+                if s.system_type.as_ref().is_some_and(|t| t.lintel.is_some()) && s.spacing.y > 0.0 {
+                    let rows = (s.height / s.spacing.y).round().max(1.0);
+                    let course = s.height / rows;
+                    for o in openings.iter_mut() {
+                        let sill = (o.sill / course).round() * course;
+                        let head = (((o.sill + o.height) / course).round() * course).max(sill + course);
+                        (o.sill, o.height) = (sill, head - sill);
+                    }
+                }
+                s.openings = openings;
+                let (length, height) = (hi.x - lo.x, hi.y - lo.y);
+                let corner = |p: &DVec2| ((p.x - lo.x).abs() < MEET || (p.x - lo.x - length).abs() < MEET) && ((p.y - lo.y).abs() < MEET || (p.y - lo.y - height).abs() < MEET);
+                s.outline = if ring.len() == 4 && ring.iter().all(corner) { Vec::new() } else { ring.iter().map(|p| *p - lo).collect() };
+                match self.modeller.model.replace(old.reshaped(&grid, shape)) {
+                    Ok(()) => {
+                        self.modeller.sketch = None;
+                        self.modeller.refusal = None;
+                        self.show_modelled();
+                        self.select_modelled(id);
+                    }
+                    Err(refusal) => self.modeller.refusal = Some(refusal),
+                }
+                return;
+            }
+        }
+        // a lying system takes the outline, its bows as chords; every other loop is an opening in
+        // it, a rectangle along its line, cut and trimmed as its type says. Its drilled openings
+        // stay as they are.
+        if let Shape::System(s) = &mut shape {
+            let Some(dir) = (s.end - s.start).try_normalize() else { return };
+            let mut openings: Vec<bim_core::Opening> = s.openings.iter().filter(|o| o.framing.is_some_and(|f| f.round)).copied().collect();
+            for hole in &rings {
+                let (hole, bows) = apart(hole);
+                let local: Vec<DVec2> = hole.iter().map(|p| DVec2::new((*p - s.start).dot(dir), (*p - s.start).dot(dir.perp()))).collect();
+                let (a, b) = local.iter().fold((DVec2::splat(f64::INFINITY), DVec2::splat(f64::NEG_INFINITY)), |(a, b), p| (a.min(*p), b.max(*p)));
+                let tol = 10.0 * MEET;
+                let square = bows.iter().all(|b| *b == 0.0) && local.iter().all(|p| ((p.x - a.x).abs() < tol || (p.x - b.x).abs() < tol) && ((p.y - a.y).abs() < tol || (p.y - b.y).abs() < tol)) && (area2(&local).abs() / 2.0 - (b.x - a.x) * (b.y - a.y)).abs() < tol;
+                if !square {
+                    if let Some(sketch) = self.modeller.sketch.as_mut() {
+                        sketch.error = Some(SketchError::OpeningNotAlong);
+                    }
+                    return;
+                }
+                let was = s.openings.iter().find(|o| (o.along - a.x).abs() < tol && (o.sill - a.y).abs() < tol && (o.width - (b.x - a.x)).abs() < tol && (o.height - (b.y - a.y)).abs() < tol);
+                openings.push(bim_core::Opening { along: a.x, sill: a.y, width: b.x - a.x, height: b.y - a.y, framing: was.and_then(|o| o.framing) });
+            }
+            s.openings = openings;
             s.outline = bowed(&corners, &bows);
             match self.modeller.model.replace(old.reshaped(&grid, shape)) {
                 Ok(()) => {
@@ -613,7 +778,7 @@ impl App {
     /// The sketch over the viewport: its lines, the line under way, and a point at every end.
     pub(in crate::app) fn sketch_overlay(&self, ink: Color, fill: Color) -> Option<EditOverlay> {
         let sketch = self.modeller.sketch.as_ref()?;
-        let up = |p: DVec2| p.extend(sketch.top).as_vec3();
+        let up = |p: DVec2| sketch.lift(p).as_vec3();
         let points = sketch.points();
         let picked = sketch.picked.and_then(|i| sketch.segments.get(i));
         let lines = sketch.segments.iter().copied().chain(sketch.preview()).flat_map(|s| s.chords().windows(2).map(|w| [up(w[0]), up(w[1])]).collect::<Vec<_>>()).collect();
@@ -640,6 +805,7 @@ impl App {
         let is = |t: SketchTool| sketch.tool == t;
         let bar = Row::new()
             .spacing(4)
+            .push(tool(l.text("Kiezen (S)", "Pick (S)"), 's', is(SketchTool::Pick)))
             .push(tool(l.text("Lijn (L)", "Line (L)"), 'l', is(SketchTool::Line)))
             .push(tool(l.text("Rechthoek (R)", "Rectangle (R)"), 'r', is(SketchTool::Rectangle)))
             .push(tool(l.text("Boog (A)", "Arc (A)"), 'a', is(SketchTool::Arc)))
@@ -677,9 +843,10 @@ impl App {
             SketchTool::Trim => l.text("Trimmen: klik het stuk dat weg moet · Esc: stoppen · Tab: klaar", "Trim: click the stretch to take away · Esc: stop · Tab: done"),
         };
         let why = sketch.error.map(|e| e.reason(l)).or_else(|| self.modeller.refusal.map(|r| l.translate(r.reason())));
+        let name = if sketch.face.is_some() { l.text("Wandschets", "Wall sketch") } else { l.text("Vloerschets", "Floor sketch") };
         Some(match why {
-            Some(why) => format!("{}: {} · {}", l.text("Vloerschets", "Floor sketch"), why, hint),
-            None => format!("{}: {}", l.text("Vloerschets", "Floor sketch"), hint),
+            Some(why) => format!("{}: {} · {}", name, why, hint),
+            None => format!("{}: {}", name, hint),
         })
     }
 }

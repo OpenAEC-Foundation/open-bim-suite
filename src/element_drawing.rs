@@ -36,6 +36,91 @@ const SEAMS: usize = 16;
 struct Member {
     u: (f64, f64),
     v: (f64, f64),
+    /// What it looks like in the face where that is not the rectangle of `u` and `v`: a member
+    /// that slopes, or one cut on a slope.
+    shape: Option<Shape2>,
+}
+
+/// The outline of a part in the face that is not a level rectangle: its corners in order (the
+/// first `n` of `points`), and its size as it is cut: its width and its length along itself.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Shape2 {
+    points: [[f64; 2]; 8],
+    n: usize,
+    size: (f64, f64),
+    /// How far off square its most sloping end is cut (degrees): the saw's setting.
+    angle: f64,
+}
+
+impl Shape2 {
+    /// The outline of `points` in the face (their convex hull), when it is not the level
+    /// rectangle that holds them: none for a plain stud, plate or board.
+    fn of(points: &[[f64; 2]]) -> Option<Self> {
+        let mut sorted: Vec<[f64; 2]> = points.to_vec();
+        sorted.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
+        sorted.dedup_by(|a, b| (a[0] - b[0]).abs() < 1e-7 && (a[1] - b[1]).abs() < 1e-7);
+        if sorted.len() < 3 {
+            return None;
+        }
+        let turn = |o: [f64; 2], a: [f64; 2], b: [f64; 2]| (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+        let mut hull: Vec<[f64; 2]> = Vec::with_capacity(sorted.len() + 1);
+        for pass in 0..2 {
+            let start = hull.len();
+            let walk: Box<dyn Iterator<Item = &[f64; 2]>> = if pass == 0 { Box::new(sorted.iter()) } else { Box::new(sorted.iter().rev()) };
+            for q in walk {
+                while hull.len() >= start + 2 && turn(hull[hull.len() - 2], hull[hull.len() - 1], *q) <= 1e-12 {
+                    hull.pop();
+                }
+                hull.push(*q);
+            }
+            hull.pop();
+        }
+        let n = hull.len();
+        if !(3..=8).contains(&n) {
+            return None;
+        }
+        // a side that is neither level nor plumb, long enough to be cut so
+        let slopes = (0..n).any(|i| {
+            let (a, b) = (hull[i], hull[(i + 1) % n]);
+            (a[0] - b[0]).abs() > 1e-4 && (a[1] - b[1]).abs() > 1e-4 && (a[0] - b[0]).hypot(a[1] - b[1]) > 0.005
+        });
+        if !slopes {
+            return None;
+        }
+        // as it is cut: the narrowest it is across any of its sides, and how long it is along that side
+        let mut size = (f64::INFINITY, 0.0);
+        let mut along_it = (1.0, 0.0);
+        for i in 0..n {
+            let (a, b) = (hull[i], hull[(i + 1) % n]);
+            let long = (b[0] - a[0]).hypot(b[1] - a[1]);
+            if long < 1e-9 {
+                continue;
+            }
+            let (dx, dy) = ((b[0] - a[0]) / long, (b[1] - a[1]) / long);
+            let (mut wide, mut from, mut to) = (0.0_f64, f64::INFINITY, f64::NEG_INFINITY);
+            for q in &hull {
+                let (along, off) = ((q[0] - a[0]) * dx + (q[1] - a[1]) * dy, ((q[0] - a[0]) * dy - (q[1] - a[1]) * dx).abs());
+                (wide, from, to) = (wide.max(off), from.min(along), to.max(along));
+            }
+            if wide < size.0 {
+                size = (wide, to - from);
+                along_it = (dx, dy);
+            }
+        }
+        // its ends: the sides that do not run along it; a square cut lies across it
+        let mut angle = 0.0_f64;
+        for i in 0..n {
+            let (a, b) = (hull[i], hull[(i + 1) % n]);
+            let (ex, ey) = (b[0] - a[0], b[1] - a[1]);
+            let (run, rise) = ((ex * along_it.0 + ey * along_it.1).abs(), (ex * along_it.1 - ey * along_it.0).abs());
+            if rise > 0.005 && run > 1e-4 {
+                angle = angle.max(run.atan2(rise).to_degrees());
+            }
+        }
+        let mut points = [[0.0; 2]; 8];
+        points[..n].copy_from_slice(&hull);
+        Some(Shape2 { points, n, size, angle })
+    }
 }
 
 /// A part of the system in its face, with where it is across it (to its exterior positive).
@@ -50,6 +135,9 @@ impl Member {
     /// Its size in the face and its length (metres): a stud's width and height, a plate's height
     /// and length.
     fn section(&self) -> (f64, f64) {
+        if let Some(shape) = self.shape {
+            return shape.size;
+        }
         let (du, dv) = (self.u.1 - self.u.0, self.v.1 - self.v.0);
         (du.min(dv), du.max(dv))
     }
@@ -59,13 +147,15 @@ impl Member {
     }
 }
 
-/// Millimetres, whole.
+/// Millimetres, whole: a half is rounded up whichever side of it the sum of its coordinates
+/// fell (a brick 52.5 high is 53 in every row of the list).
 fn mm(metres: f64) -> i64 {
-    (metres * 1000.0).round() as i64
+    ((metres * 10_000.0).round() / 10.0).round() as i64
 }
 
 /// The drawings of `element` of `model`: for every prefab unit it is made of, in order from its
-/// start, the drawing of its frame and then one of every layer with boards or battens. `named`
+/// start, the drawing of its frame and then one of every layer with boards or battens; and last,
+/// for a frame of several units, their [`overview`]. `named`
 /// gives a material's name for its key. A standing system that is not framed gets its
 /// [`elevation`], a lying one its [`laying_plan`]. None for an element that is not a system with
 /// a type, or that the kernel refuses.
@@ -96,7 +186,8 @@ pub fn element_drawings(model: &Model, element: &Element, named: &dyn Fn(&str) -
                 v = (v.0.min(b), v.1.max(b));
                 across = (across.0.min(c), across.1.max(c));
             }
-            Item { at: Member { u, v }, across, member: p.class == "IfcMember", material: p.material.as_deref() }
+            let face: Vec<[f64; 2]> = p.solid.positions.iter().map(|q| [(DVec2::new(q.x, q.y) - s.start).dot(dir), q.z - s.base]).collect();
+            Item { at: Member { u, v, shape: Shape2::of(&face) }, across, member: p.class == "IfcMember", material: p.material.as_deref() }
         })
         .collect();
     // the members of the frame itself: of the frame's material, inside the frame and as deep as
@@ -120,6 +211,14 @@ pub fn element_drawings(model: &Model, element: &Element, named: &dyn Fn(&str) -
         }
     };
     let outline = |d: &mut Drawing2d, pen: Pen, m: &Member, lo: f64| {
+        // a member that slopes or is cut on a slope as it is; any other as its rectangle
+        if let Some(shape) = m.shape {
+            for i in 0..shape.n {
+                let (a, b) = (shape.points[i], shape.points[(i + 1) % shape.n]);
+                d.lines.push(Line2d::new(pen, [a[0] - lo, a[1]], [b[0] - lo, b[1]]));
+            }
+            return;
+        }
         let (x0, x1, y0, y1) = (m.u.0 - lo, m.u.1 - lo, m.v.0, m.v.1);
         for (a, b) in [([x0, y0], [x1, y0]), ([x1, y0], [x1, y1]), ([x1, y1], [x0, y1]), ([x0, y1], [x0, y0])] {
             d.lines.push(Line2d::new(pen, a, b));
@@ -138,7 +237,10 @@ pub fn element_drawings(model: &Model, element: &Element, named: &dyn Fn(&str) -
         }
         let height = s.height;
         // over it: its studs from plate to plate, centre to centre from either end
-        let mut studs: Vec<f64> = own.iter().filter(|m| m.upright() && m.v.1 - m.v.0 > height * 0.9).map(|m| (m.u.0 + m.u.1) / 2.0 - lo).collect();
+        // (a stud under a sloping cut stands on the foot and is cut short: it counts too)
+        let stud = |m: &&Member| m.upright() && (m.v.1 - m.v.0 > height * 0.9 || (m.shape.is_some() && m.v.0 < 0.1 && m.v.1 - m.v.0 > height * 0.25));
+        let mut studs: Vec<f64> = own.iter().filter(stud).map(|m| (m.u.0 + m.u.1) / 2.0 - lo).collect();
+        studs.sort_by(f64::total_cmp);
         studs.dedup_by(|a, b| (*a - *b).abs() < tol);
         // studs that stand against one another, or against the unit's end, are one place to measure to
         let mut chain: Vec<f64> = vec![0.0];
@@ -228,7 +330,7 @@ pub fn element_drawings(model: &Model, element: &Element, named: &dyn Fn(&str) -
             };
             // what runs on past the unit (the plates of a layer that is not made in units) is
             // drawn as far as the unit goes
-            let within = |i: &Item| Member { u: (if first { i.at.u.0 } else { i.at.u.0.max(lo) }, if last { i.at.u.1 } else { i.at.u.1.min(hi) }), v: i.at.v };
+            let within = |i: &Item| Member { u: (if first { i.at.u.0 } else { i.at.u.0.max(lo) }, if last { i.at.u.1 } else { i.at.u.1.min(hi) }), v: i.at.v, shape: i.at.shape };
             let mut own: Vec<Item> = items.iter().filter(of_layer).map(|i| Item { at: within(i), across: i.across, member: i.member, material: i.material }).collect();
             // a batten layer shows its battens; the wool between them is not cut to a list
             if own.iter().any(|i| i.member) {
@@ -277,7 +379,54 @@ pub fn element_drawings(model: &Model, element: &Element, named: &dyn Fn(&str) -
         }
         lo = hi;
     }
+    // a frame of several units: last, where each of them stands in it
+    if units.len() > 1 {
+        drawings.push(overview(element, &units, &members, &openings, start, s.height));
+    }
     drawings
+}
+
+/// The overview of a frame made of several prefab units, at 1 : 50, seen as its units are: each
+/// unit as its outline with its number under it, the frame's members thin inside it, its openings
+/// crossed; the units' lengths, the frame's length and its height dimensioned, and the list of
+/// the units with their sizes. The site puts the units up from it.
+fn overview(element: &Element, units: &[f64], members: &[Member], openings: &[bim_core::Opening], start: f64, height: f64) -> Drawing2d {
+    let (text, off) = (TEXT * PLAN_SCALE, OFFSET * PLAN_SCALE);
+    let mut d = Drawing2d { name: format!("{} {} overview", element.name, element.id.0), space: Space::Model { scale: PLAN_SCALE }, paper: None, lines: Vec::new(), texts: Vec::new(), dimensions: Vec::new() };
+    let rectangle = |d: &mut Drawing2d, pen: Pen, u: (f64, f64), v: (f64, f64)| {
+        for (a, b) in [([u.0, v.0], [u.1, v.0]), ([u.1, v.0], [u.1, v.1]), ([u.1, v.1], [u.0, v.1]), ([u.0, v.1], [u.0, v.0])] {
+            d.lines.push(Line2d::new(pen, a, b));
+        }
+    };
+    for m in members {
+        rectangle(&mut d, Pen::Beyond, (m.u.0 - start, m.u.1 - start), m.v);
+    }
+    for o in openings {
+        let (a, b, foot, head) = (o.along - start, o.along + o.width - start, o.sill, o.sill + o.height);
+        d.lines.push(Line2d::new(Pen::Detail, [a, foot], [b, head]));
+        d.lines.push(Line2d::new(Pen::Detail, [a, head], [b, foot]));
+        rectangle(&mut d, Pen::Detail, (a, b), (foot, head));
+    }
+    let total: f64 = units.iter().sum();
+    let mut lo = 0.0;
+    let mut y = -(off * 5.0 + text);
+    let title = format!("{} · {} × {} mm · 1:{}", element.name, mm(total), mm(height), PLAN_SCALE as i64);
+    d.texts.push(Text2d { pen: Pen::Text, at: [0.0, y], height: text * 1.4, text: title, align: Align::Left, angle: 0.0 });
+    y -= text * 1.4 * 1.8;
+    for (k, length) in units.iter().enumerate() {
+        let mark = bim_core::system::mark(element, k + 1);
+        rectangle(&mut d, Pen::Cut, (lo, lo + length), (0.0, height));
+        d.dimensions.push(Dim2d { from: [lo, height], to: [lo + length, height], value: *length, offset: off, text_height: text });
+        // its number large under it, clear of its members and openings; its whole mark in the list
+        d.texts.push(Text2d { pen: Pen::Text, at: [lo + length / 2.0, -text * 2.4], height: text * 2.0, text: (k + 1).to_string(), align: Align::Center, angle: 0.0 });
+        d.texts.push(Text2d { pen: Pen::Text, at: [0.0, y], height: text, text: format!("{}  {mark} · {} × {} mm", k + 1, mm(*length), mm(height)), align: Align::Left, angle: 0.0 });
+        y -= text * 1.8;
+        lo += length;
+    }
+    // the whole length under the numbers
+    d.dimensions.push(Dim2d { from: [total, 0.0], to: [0.0, 0.0], value: total, offset: off * 2.5, text_height: text });
+    d.dimensions.push(Dim2d { from: [0.0, 0.0], to: [0.0, height], value: height, offset: off, text_height: text });
+    d
 }
 
 /// The scale a laying plan is drawn at: 1 : 50.
@@ -401,14 +550,14 @@ const MOST: usize = 4000;
 /// The elevation of a standing system on a grid (a curtain wall, a frame, a wall of elements,
 /// cladding), seen from its interior at 1 : 50: every panel and every member as its outline, the
 /// seams between the panels dimensioned along it and up it, its length and its height, each
-/// panel with its number, and the lists of the panels and of the members. None for a system of
-/// more than [`MOST`] parts (brickwork), which is not made from a list of its bricks.
+/// panel with its number, its openings crossed, and the lists of the panels and of the members.
+/// A system of more than [`MOST`] parts (brickwork) is drawn as its outline and its openings,
+/// with its courses counted in the title and its bricks in the list.
 fn elevation(model: &Model, element: &Element, s: &bim_core::SystemDef, t: &bim_core::SystemTypeDef, named: &dyn Fn(&str) -> String) -> Option<Drawing2d> {
     let dir = (s.end - s.start).try_normalize()?;
     let parts = model.evaluate(element.id).ok()?;
-    if parts.len() > MOST {
-        return None;
-    }
+    // a wall of bricks: its outline, its courses counted and its bricks listed, not drawn
+    let many = parts.len() > MOST;
     let (text, off) = (TEXT * PLAN_SCALE, OFFSET * PLAN_SCALE);
     let mut d = Drawing2d { polygons: Vec::new(), images: Vec::new(), name: format!("{} {}", element.name, element.id.0), space: Space::Model { scale: PLAN_SCALE }, paper: None, lines: Vec::new(), texts: Vec::new(), dimensions: Vec::new() };
     let faced = |p: &bim_core::Part| {
@@ -417,7 +566,7 @@ fn elevation(model: &Model, element: &Element, s: &bim_core::SystemDef, t: &bim_
             let (a, b) = ((DVec2::new(q.x, q.y) - s.start).dot(dir), q.z - s.base);
             (u, v) = ((u.0.min(a), u.1.max(a)), (v.0.min(b), v.1.max(b)));
         }
-        Member { u, v }
+        Member { u, v, shape: None }
     };
     let own = || parts.iter().filter(|p| p.tile == element.tile);
     let panels: Vec<Member> = own().filter(|p| p.class == "IfcPlate" && p.material.as_deref() == Some(t.panel_material.as_str())).map(faced).collect();
@@ -433,15 +582,32 @@ fn elevation(model: &Model, element: &Element, s: &bim_core::SystemDef, t: &bim_
     // members thinner than [`JOINT`] (a joint of mortar or glue, a seam) are the lines between
     // the panels: not drawn twice
     let drawn = |m: &&Member| m.section().0 >= JOINT - 1e-9;
-    for m in members.iter().filter(drawn) {
-        outline(Pen::Cut, m);
-    }
-    for p in &panels {
-        outline(if members.iter().any(|m| drawn(&m)) { Pen::Beyond } else { Pen::Cut }, p);
-    }
     let all = || panels.iter().chain(&members);
     let (u0, u1) = all().fold((f64::INFINITY, f64::NEG_INFINITY), |acc, m| (acc.0.min(m.u.0), acc.1.max(m.u.1)));
     let (v0, v1) = all().fold((f64::INFINITY, f64::NEG_INFINITY), |acc, m| (acc.0.min(m.v.0), acc.1.max(m.v.1)));
+    if many {
+        outline(Pen::Cut, &Member { u: (u0, u1), v: (v0, v1), shape: None });
+    } else {
+        for m in members.iter().filter(drawn) {
+            outline(Pen::Cut, m);
+        }
+        for p in &panels {
+            outline(if members.iter().any(|m| drawn(&m)) { Pen::Beyond } else { Pen::Cut }, p);
+        }
+    }
+    // the lintels that carry it over its openings
+    let lintels: Vec<(Member, Option<&str>)> = own().filter(|p| p.class == "IfcBeam").map(|p| (faced(p), p.material.as_deref())).collect();
+    for (m, _) in &lintels {
+        outline(Pen::Cut, m);
+    }
+    // its openings and those of the doors and windows standing in it: an outline and a cross
+    let openings = model.openings_of(element.id);
+    for o in &openings {
+        let (a, b, foot, head) = (o.along, o.along + o.width, o.sill, o.sill + o.height);
+        for (p, q) in [([a, foot], [b, foot]), ([b, foot], [b, head]), ([b, head], [a, head]), ([a, head], [a, foot]), ([a, foot], [b, head]), ([a, head], [b, foot])] {
+            d.lines.push(Line2d::new(Pen::Detail, p, q));
+        }
+    }
     let dim = |d: &mut Drawing2d, from: [f64; 2], to: [f64; 2], rows: f64| {
         let value = (to[0] - from[0]).hypot(to[1] - from[1]);
         if value > LINEAR_TOLERANCE {
@@ -474,6 +640,13 @@ fn elevation(model: &Model, element: &Element, s: &bim_core::SystemDef, t: &bim_
         for pair in along.windows(2) {
             dim(&mut d, [pair[0], v1], [pair[1], v1], 1.0);
         }
+    } else if !openings.is_empty() {
+        // too many seams to read: where its openings are along it
+        let mut at: Vec<f64> = once(u0).chain(openings.iter().flat_map(|o| [o.along, o.along + o.width])).chain(once(u1)).collect();
+        at.sort_by(f64::total_cmp);
+        for pair in at.windows(2) {
+            dim(&mut d, [pair[0], v1], [pair[1], v1], 1.0);
+        }
     }
     if up.len() > 2 && up.len() <= SEAMS {
         for pair in up.windows(2) {
@@ -484,14 +657,18 @@ fn elevation(model: &Model, element: &Element, s: &bim_core::SystemDef, t: &bim_
     dim(&mut d, [u0, v0], [u0, v1], 1.0);
     // its name, the panels numbered, and the members
     let thick = bim_library::millimetres(s.panel, bim_library::Lang::En);
-    let title = format!("{} · {} {thick} · {} × {} mm · 1:{}", element.name, named(&t.panel_material), mm(u1 - u0), mm(v1 - v0), PLAN_SCALE as i64);
+    // courses too many to dimension one by one are counted: how many, and how high each is
+    // (counted by the grid: an opening cuts bricks, which is no course more)
+    let rows = if s.spacing.y > LINEAR_TOLERANCE { ((v1 - v0) / s.spacing.y).round().max(1.0) as usize } else { up.len() - 1 };
+    let courses = if up.len() - 1 > SEAMS { format!(" · {rows} × {}", bim_library::millimetres(s.spacing.y, bim_library::Lang::En)) } else { String::new() };
+    let title = format!("{} · {} {thick} · {} × {} mm{courses} · 1:{}", element.name, named(&t.panel_material), mm(u1 - u0), mm(v1 - v0), PLAN_SCALE as i64);
     let mut y = v0 - (off * 2.5 + text);
     let before = d.texts.len();
     let counted: Vec<(i64, i64)> = panels.iter().map(|p| (mm(p.section().0), mm(p.section().1))).collect();
     let numbers = write_list(&mut d, y, text, title, &counted, &|width, long| format!("{thick} × {width} × {long}"));
     let listed = d.texts[before..].iter().filter(|t| t.at[0] == 0.0).count();
     // a number in every panel, where there is room for them
-    if panels.len() <= 400 {
+    if panels.len() <= 400 && !many {
         number(&mut d, &panels, &numbers, 0.0, text);
     }
     y -= text * 1.8 * (1.4 + listed as f64 - 1.0) + text * 0.9;
@@ -507,6 +684,20 @@ fn elevation(model: &Model, element: &Element, s: &bim_core::SystemDef, t: &bim_
     list.sort_by(|a, b| b.0.cmp(&a.0));
     for (long, n) in list {
         d.texts.push(Text2d { family: None, bold: false, color: None, pen: Pen::Text, at: [0.0, y], height: text, text: format!("{n} × {} {width}×{depth} L={long}", named(&t.member_material)), align: Align::Left, angle: 0.0 });
+        y -= text * 1.8;
+    }
+    // the lintels: as thick as the panels, alike ones counted together, the longest first
+    let mut over: Vec<((i64, i64, &str), usize)> = Vec::new();
+    for (m, material) in &lintels {
+        let key = (mm(m.section().0), mm(m.section().1), material.unwrap_or(""));
+        match over.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, n)) => *n += 1,
+            None => over.push((key, 1)),
+        }
+    }
+    over.sort_by(|a, b| b.0 .1.cmp(&a.0 .1));
+    for ((high, long, material), n) in over {
+        d.texts.push(Text2d { pen: Pen::Text, at: [0.0, y], height: text, text: format!("{n} × {} {thick}×{high} L={long}", named(material)), align: Align::Left, angle: 0.0 });
         y -= text * 1.8;
     }
     Some(d)
@@ -623,9 +814,9 @@ fn open_plan(model: &Model, element: &Element, s: &bim_core::SystemDef, t: &bim_
     Some(d)
 }
 
-/// Whether a drawing of [`element_drawings`] is the frame's, not a layer's.
+/// Whether a drawing of [`element_drawings`] is a unit's frame, not a layer's or the overview.
 pub fn is_frame(d: &Drawing2d) -> bool {
-    !d.name.rsplit(' ').nth(1).is_some_and(|w| w.starts_with('L') && w[1..].parse::<usize>().is_ok())
+    !d.name.ends_with(" overview") && !d.name.rsplit(' ').nth(1).is_some_and(|w| w.starts_with('L') && w[1..].parse::<usize>().is_ok())
 }
 
 /// Writes under a drawing, from `y` down, its `title` and the list of its parts (each its size in
@@ -678,7 +869,12 @@ fn number(d: &mut Drawing2d, parts: &[Member], numbers: &[(i64, i64)], lo: f64, 
         } else {
             [mid_u, m.v.1 + 0.4 * text]
         };
-        d.texts.push(Text2d { family: None, bold: false, color: None, pen: Pen::Text, at, height: text, text: (n + 1).to_string(), align: Align::Left, angle: 0.0 });
+        // one cut off square says by how much, for the saw
+        let label = match m.shape.filter(|s| s.angle >= 0.5) {
+            Some(s) => format!("{} · {:.0}°", n + 1, s.angle),
+            None => (n + 1).to_string(),
+        };
+        d.texts.push(Text2d { family: None, bold: false, color: None, pen: Pen::Text, at, height: text, text: label, align: Align::Left, angle: 0.0 });
     }
 }
 
@@ -713,6 +909,16 @@ mod tests {
         let all = element_drawings(&m, m.get(id).unwrap(), &|key| key.to_string());
         let drawings: Vec<&Drawing2d> = all.iter().filter(|d| is_frame(d)).collect();
         assert_eq!(drawings.len(), 3);
+        // last the overview: the three units side by side, each with its number, its length and
+        // its line in the list, and the frame's whole length
+        let over = all.last().unwrap();
+        assert!(over.name == format!("Frame {} overview", id.0) && !is_frame(over));
+        assert_eq!(over.lines.iter().filter(|l| l.pen == Pen::Cut).count(), 3 * 4);
+        let values: Vec<i64> = over.dimensions.iter().map(|x| mm(x.value)).collect();
+        assert_eq!(values, [2400, 2400, 2400, 7200, 2700]);
+        for k in 1..=3 {
+            assert!(over.texts.iter().any(|t| t.text == k.to_string()) && over.texts.iter().any(|t| t.text == format!("{k}  Frame {}-{k} · 2400 × 2700 mm", id.0)), "{k}");
+        }
         for (k, d) in drawings.iter().enumerate() {
             // two plates, two end studs and the studs at 600 between them: 7 members, 4 lines each
             assert_eq!(elevation(d).count(), 7 * 4, "unit {k}");
@@ -815,7 +1021,7 @@ mod tests {
         assert_eq!(all.iter().filter(|d| is_frame(d)).count(), units.len());
         assert_eq!(all.iter().filter(|d| is_frame(d)).map(|d| d.lines.iter().filter(|l| l.pen == Pen::Detail).count()).sum::<usize>(), 6, "the window, once");
         let mut unit = 0;
-        for d in &all {
+        for d in all.iter().filter(|d| !d.name.ends_with(" overview")) {
             if is_frame(d) {
                 unit = d.name.rsplit('-').next().unwrap().parse::<usize>().unwrap() - 1;
             }
@@ -823,6 +1029,30 @@ mod tests {
             assert!(lo > -0.3 && hi < units[unit] + 0.3, "{}: {lo} to {hi} in a unit of {}", d.name, units[unit]);
         }
     }
+    #[test]
+    fn a_frame_with_a_corner_off_is_drawn_as_it_is_cut() {
+        // 3 m of frame, 1.2 by 0.9 off its top at its end
+        let (mut m, id) = frame(3.0, Vec::new());
+        let mut cut = m.get(id).unwrap().clone();
+        let Shape::System(s) = &mut cut.shape else { panic!("a system") };
+        let p = DVec2::new;
+        s.outline = vec![p(0.0, 0.0), p(3.0, 0.0), p(3.0, 1.8), p(1.8, 2.7), p(0.0, 2.7)];
+        m.replace(cut).unwrap();
+        let all = element_drawings(&m, m.get(id).unwrap(), &|key| key.to_string());
+        let d = all.iter().find(|d| is_frame(d)).unwrap();
+        // the plate along the cut slopes, and so do the heads of the studs under it
+        let sloping = d.lines.iter().filter(|l| l.pen == Pen::Cut && l.a[1] <= 2.7 + 1e-6 && (l.a[0] - l.b[0]).abs() > 1e-6 && (l.a[1] - l.b[1]).abs() > 1e-6).count();
+        assert!(sloping >= 4, "{sloping}");
+        // in the list as it is cut: 38 wide and 1500 long, not the 1200 by 900 it reaches over
+        let texts: Vec<&str> = d.texts.iter().map(|t| t.text.as_str()).collect();
+        assert!(texts.iter().any(|t| t.starts_with("1 × 38×140 L=15")), "{texts:?}");
+        // the studs under the cut are measured to, and their heads are cut 37° off square
+        // (the cut rises 900 over 1200)
+        let values: Vec<i64> = d.dimensions.iter().map(|x| mm(x.value)).collect();
+        assert!(values.iter().filter(|v| **v == 600).count() >= 4, "{values:?}");
+        assert!(texts.iter().filter(|t| t.ends_with(" · 37°")).count() >= 2, "{texts:?}");
+    }
+
     #[test]
     fn a_system_on_a_grid_gets_an_elevation_with_its_panels_and_members() {
         // a curtain wall of 6 m, bays of 1500: four panes over one another in rows of 1800
@@ -842,9 +1072,23 @@ mod tests {
         let listed: usize = texts.iter().filter(|t| t.contains(" × ") && !t.contains("L=") && !t.contains("1:50")).map(|t| t.split(' ').next().unwrap().parse::<usize>().unwrap()).sum();
         assert_eq!(listed, panes, "{texts:?}");
         assert!(texts.iter().any(|t| t.contains("aluminium 50×150 L=")), "{texts:?}");
-        // brickwork is not drawn brick by brick
-        let (m, id) = typed(16.0, Vec::new(), "system.masonry-waal-stretcher");
-        assert!(element_drawings(&m, m.get(id).unwrap(), &|key| key.to_string()).is_empty());
+        // brickwork is not drawn brick by brick: its outline, its courses and its bricks counted;
+        // a window in it is crossed and the lintel over it drawn and listed
+        let window = Opening { along: 4.0, sill: 0.9, width: 1.2, height: 1.2, framing: None };
+        let (m, id) = typed(16.0, vec![window], "system.masonry-waal-stretcher");
+        let all = element_drawings(&m, m.get(id).unwrap(), &|key| key.to_string());
+        assert_eq!(all.len(), 1);
+        let d = &all[0];
+        assert_eq!((d.lines.iter().filter(|l| l.pen == Pen::Cut).count(), d.lines.iter().filter(|l| l.pen == Pen::Detail).count()), (4 + 4, 6));
+        assert!(d.texts.iter().any(|t| t.text.starts_with("1 × concrete 100×12") && t.text.ends_with(" L=1400")), "{:?}", d.texts.iter().map(|t| &t.text).collect::<Vec<_>>());
+        let texts: Vec<&str> = d.texts.iter().map(|t| t.text.as_str()).collect();
+        assert!(texts[0].contains(" · 43 × 62.5 · 1:50"), "{texts:?}");
+        let bricks: usize = texts.iter().filter(|t| t.contains(" × 100 × ")).map(|t| t.split(' ').next().unwrap().parse::<usize>().unwrap()).sum();
+        assert!(bricks > 2500, "{bricks}");
+        // alike bricks on one line: whole ones and halves at the ends of every other course
+        assert!(texts.iter().filter(|t| t.contains(" × 100 × ")).count() >= 2, "{texts:?}");
+        let values: Vec<i64> = d.dimensions.iter().map(|x| mm(x.value)).collect();
+        assert!(values.iter().any(|v| *v >= 16000) && values.iter().any(|v| (2690..=2710).contains(v)), "{values:?}");
     }
 
     #[test]

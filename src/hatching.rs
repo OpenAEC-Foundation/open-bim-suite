@@ -193,6 +193,10 @@ pub fn part_materials(library: &bim_library::Library) -> Vec<PartMaterial> {
 /// standard, where that gives it a hatch of the catalogue: with the scale it is drawn from and
 /// what a smaller drawing shows (the hatch's colour, else the material's; or the paper).
 pub fn cut_pattern(library: &bim_library::Library, m: &bim_library::Material) -> Option<Pattern> {
+    // at a level of detail of 200 what is cut is an outline alone: the paper, without lines
+    if !library.hatches_cuts() {
+        return Some(Pattern { fill: None, line: [0; 3], solid: false, grids: Vec::new(), on_paper: false, from: 0.0, below: None });
+    }
     let own = library.material_hatch(&m.key)?;
     let hatch = own.cut_hatch()?;
     let below = match own.below {
@@ -653,4 +657,22 @@ mod tests {
         let model = model(vec![open]);
         assert!(cut_at(&model, Shown::all(), 1.5).fills.is_empty());
     }
+    #[test]
+    fn at_a_level_of_detail_of_200_a_cut_is_an_outline_alone() {
+        let mut library = bim_library::Library::starter();
+        let timber = library.material("timber").unwrap().clone();
+        let hatched = cut_pattern(&library, &timber).expect("timber has a hatch of the catalogue");
+        assert!(!hatched.grids.is_empty() || hatched.fill.is_some() || hatched.solid);
+        library.detail = Some(bim_library::detail::Detail::D200);
+        let plain = cut_pattern(&library, &timber).expect("an outline");
+        assert_eq!((plain.grids.len(), plain.fill, plain.solid, plain.look().0), (0, None, false, [255; 3]));
+        // a material without a hatch of the catalogue is an outline too, not the hatch of its kind
+        let generic = library.materials.iter().find(|m| m.sign.is_none()).cloned();
+        if let Some(generic) = generic {
+            assert!(cut_pattern(&library, &generic).is_some_and(|p| p.grids.is_empty() && p.fill.is_none()));
+        }
+        library.detail = Some(bim_library::detail::Detail::D500);
+        assert_eq!(cut_pattern(&library, &timber), Some(hatched));
+    }
+
 }

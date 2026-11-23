@@ -1267,6 +1267,45 @@ mod tests {
         assert_eq!(units(&app), before);
     }
     #[test]
+    fn a_rectangle_sketched_in_a_floor_of_slabs_is_an_opening_trimmed_as_its_type_says() {
+        use crate::app::modeller::sketch::{Segment, SketchError};
+        for (of, trimmed) in [("system.hollow-core-200", true), ("system.wide-slab-200", false)] {
+            let mut app = App::default();
+            app.new_model("Level 0");
+            let generic = bim_core::SystemDef { start: DVec2::ZERO, end: DVec2::new(4.8, 0.0), base: 3.0, height: 6.0, spacing: DVec2::splat(1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), division: None };
+            let floor = generic.laid(app.library.system_type(of).unwrap()).unwrap();
+            let id = app.add_element("Floor", None, Shape::System(floor)).unwrap();
+            let volume = |app: &App| app.modeller.model.evaluate(id).unwrap().iter().map(|p| p.solid.volume()).sum::<f64>();
+            let whole = volume(&app);
+            // a stair hole of 1.0 by 2.4 drawn in its sketch
+            app.open_sketch(id);
+            let p = DVec2::new;
+            let rectangle = |a: DVec2, b: DVec2| [Segment::line(a, p(b.x, a.y)), Segment::line(p(b.x, a.y), b), Segment::line(b, p(a.x, b.y)), Segment::line(p(a.x, b.y), a)];
+            app.modeller.sketch.as_mut().unwrap().segments.extend(rectangle(p(1.5, 2.0), p(2.5, 4.4)));
+            app.finish_sketch();
+            assert!(app.modeller.sketch.is_none() && app.modeller.refusal.is_none(), "{of}: {:?}", app.modeller.refusal);
+            let Shape::System(s) = app.modeller.model.get(id).unwrap().shape_in_project(&app.modeller.model.grid) else { panic!("a system") };
+            assert_eq!(s.openings.len(), 1, "{of}");
+            let o = s.openings[0];
+            assert!((o.along - 1.5).abs() < 1e-6 && (o.sill - 2.0).abs() < 1e-6 && (o.width - 1.0).abs() < 1e-6 && (o.height - 2.4).abs() < 1e-6, "{of}: {o:?}");
+            assert!(volume(&app) < whole - 0.5 * 1.0 * 2.4 * 0.05, "{of}");
+            // hollow-core slabs hang in steel trimmers beside it; a wide-slab floor is cut
+            assert_eq!(app.modeller.model.evaluate(id).unwrap().iter().any(|p| p.material.as_deref() == Some("steel")), trimmed, "{of}");
+            // opened again it is there as four lines more, and removed it is gone
+            app.open_sketch(id);
+            assert_eq!(app.modeller.sketch.as_ref().unwrap().segments.len(), 8, "{of}");
+            app.modeller.sketch.as_mut().unwrap().segments.truncate(4);
+            app.finish_sketch();
+            assert!((volume(&app) - whole).abs() < 1e-6, "{of}");
+            // a loop askew is told
+            app.open_sketch(id);
+            app.modeller.sketch.as_mut().unwrap().segments.extend([Segment::line(p(1.0, 1.0), p(2.0, 1.0)), Segment::line(p(2.0, 1.0), p(1.5, 2.0)), Segment::line(p(1.5, 2.0), p(1.0, 1.0))]);
+            app.finish_sketch();
+            assert_eq!(app.modeller.sketch.as_ref().unwrap().error, Some(SketchError::OpeningNotAlong), "{of}");
+        }
+    }
+
+    #[test]
     fn a_floor_system_is_sketched_gets_openings_and_keeps_its_place_mirrored() {
         use crate::app::transform::{transformed, Map};
         let mut app = App::default();

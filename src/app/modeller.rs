@@ -1677,6 +1677,86 @@ mod tests {
     }
 
     #[test]
+    fn tab_on_a_framed_wall_opens_its_sketch_and_a_rectangle_in_it_is_a_framed_opening() {
+        use super::sketch::{Segment, SketchError};
+        let mut app = App::default();
+        let generic = bim_core::SystemDef { start: glam::DVec2::new(2.0, 1.0), end: glam::DVec2::new(6.8, 1.0), base: 0.0, height: 2.7, spacing: glam::DVec2::new(1.5, 1.5), member: glam::DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), division: None };
+        let s = generic.typed_from(&app.library, "system.timber-frame-140").unwrap();
+        let grid = app.modeller.model.grid;
+        let id = app.modeller.model.add(Element::in_project(&grid, "Frame", None, Shape::System(s))).unwrap();
+        app.show_modelled();
+        let whole = app.modeller.model.evaluate(id).unwrap().len();
+        assert!(app.sketchable(id));
+        app.open_sketch(id);
+        // its outline in its own face: four lines, upright from its base at its start
+        let sketch = app.modeller.sketch.clone().unwrap();
+        assert_eq!(sketch.segments.len(), 4);
+        let face = sketch.face.unwrap();
+        assert_eq!((face.origin, face.along), (glam::DVec3::new(2.0, 1.0, 0.0), glam::DVec3::X));
+        // a window drawn in it, 1.2 by 1.2 at 1.2 along and 0.9 up
+        let p = glam::DVec2::new;
+        let rectangle = |a: glam::DVec2, b: glam::DVec2| [Segment::line(a, p(b.x, a.y)), Segment::line(p(b.x, a.y), b), Segment::line(b, p(a.x, b.y)), Segment::line(p(a.x, b.y), a)];
+        app.modeller.sketch.as_mut().unwrap().segments.extend(rectangle(p(1.2, 0.9), p(2.4, 2.1)));
+        app.finish_sketch();
+        assert!(app.modeller.sketch.is_none() && app.modeller.refusal.is_none(), "{:?}", app.modeller.refusal);
+        let Shape::System(made) = &app.modeller.model.get(id).unwrap().shape else { panic!() };
+        let mm = |v: f64| (v * 1000.0).round() as i64;
+        assert_eq!(made.openings.iter().map(|o| (mm(o.along), mm(o.sill), mm(o.width), mm(o.height))).collect::<Vec<_>>(), [(1200, 900, 1200, 1200)]);
+        assert!(made.outline.is_empty());
+        // framed: a header, a sill, trimmers and king studs more than the studs it took out
+        assert!(app.modeller.model.evaluate(id).unwrap().len() > whole);
+
+        // again: the window is there as four lines; a corner off the top at the end
+        app.open_sketch(id);
+        let sketch = app.modeller.sketch.as_mut().unwrap();
+        assert_eq!(sketch.segments.len(), 8);
+        sketch.segments.splice(0..4, [Segment::line(p(0.0, 0.0), p(4.8, 0.0)), Segment::line(p(4.8, 0.0), p(4.8, 1.8)), Segment::line(p(4.8, 1.8), p(3.9, 2.7)), Segment::line(p(3.9, 2.7), p(0.0, 2.7)), Segment::line(p(0.0, 2.7), p(0.0, 0.0))]);
+        app.finish_sketch();
+        assert!(app.modeller.sketch.is_none() && app.modeller.refusal.is_none(), "{:?}", app.modeller.refusal);
+        let Shape::System(made) = &app.modeller.model.get(id).unwrap().shape else { panic!() };
+        assert_eq!((made.outline.len(), made.openings.len(), made.height), (5, 1, 2.7));
+        // as high as ever at its start, and under the cut at its end
+        let highest = |from: f64, to: f64| app.modeller.model.evaluate(id).unwrap().iter().flat_map(|part| part.solid.positions.clone()).filter(|q| q.x - 2.0 >= from && q.x - 2.0 <= to).map(|q| q.z).fold(0.0, f64::max);
+        assert!(highest(0.0, 1.0) > 2.69 && highest(4.6, 4.8) < 2.0 && highest(4.6, 4.8) > 1.7, "{} {}", highest(0.0, 1.0), highest(4.6, 4.8));
+
+        // an opening that is not a rectangle is told, and the sketch stays open
+        app.open_sketch(id);
+        app.modeller.sketch.as_mut().unwrap().segments.extend([Segment::line(p(0.3, 0.3), p(0.9, 0.3)), Segment::line(p(0.9, 0.3), p(0.6, 0.9)), Segment::line(p(0.6, 0.9), p(0.3, 0.3))]);
+        app.finish_sketch();
+        assert_eq!(app.modeller.sketch.as_ref().unwrap().error, Some(SketchError::OpeningNotSquare));
+    }
+
+    #[test]
+    fn an_opening_sketched_in_brickwork_goes_to_the_courses_and_gets_a_lintel() {
+        use super::sketch::Segment;
+        let mut app = App::default();
+        let generic = bim_core::SystemDef { start: glam::DVec2::new(2.0, 1.0), end: glam::DVec2::new(6.4, 1.0), base: 0.0, height: 2.5, spacing: glam::DVec2::new(1.5, 1.5), member: glam::DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), division: None };
+        let s = generic.typed_from(&app.library, "system.masonry-waal-stretcher").unwrap();
+        let grid = app.modeller.model.grid;
+        let id = app.modeller.model.add(Element::in_project(&grid, "Wall", None, Shape::System(s))).unwrap();
+        app.show_modelled();
+        assert!(app.sketchable(id));
+        app.open_sketch(id);
+        // a window drawn from 0.92 to 2.13 up: its sill goes to course 15, its head to course 34
+        let p = glam::DVec2::new;
+        let (a, b) = (p(1.5, 0.92), p(2.5, 2.13));
+        app.modeller.sketch.as_mut().unwrap().segments.extend([Segment::line(a, p(b.x, a.y)), Segment::line(p(b.x, a.y), b), Segment::line(b, p(a.x, b.y)), Segment::line(p(a.x, b.y), a)]);
+        app.finish_sketch();
+        assert!(app.modeller.sketch.is_none() && app.modeller.refusal.is_none(), "{:?}", app.modeller.refusal);
+        let Shape::System(made) = &app.modeller.model.get(id).unwrap().shape else { panic!() };
+        let o = made.openings[0];
+        assert!((o.sill - 15.0 * 0.0625).abs() < 1e-9 && (o.sill + o.height - 34.0 * 0.0625).abs() < 1e-9, "{o:?}");
+        let parts = app.modeller.model.evaluate(id).unwrap();
+        assert_eq!(parts.iter().filter(|p| p.class == "IfcBeam").count(), 1);
+        // no brick thinner than a whole one less its joints
+        let thin = parts.iter().filter(|p| p.class == "IfcPlate").filter(|p| {
+            let (lo, hi) = p.solid.bounds();
+            hi.z - lo.z < 0.05
+        }).count();
+        assert_eq!(thin, 0);
+    }
+
+    #[test]
     fn a_timber_frame_is_exported_as_an_assembly_for_every_prefab_unit() {
         // 7.2 m of timber frame: three units of 2400
         let mut app = App::default();

@@ -91,11 +91,15 @@ pub struct BuildUp {
     /// An NL-SfB code of its own, in place of the rule's ("21.22").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
+    /// What a delivery asks of it beside its code: whether it bears, whether it is external
+    /// and its fire rating ([`crate::ils`]); what is none follows from its code.
+    #[serde(default, skip_serializing_if = "crate::ils::Delivery::is_empty")]
+    pub delivery: crate::ils::Delivery,
 }
 
 impl BuildUp {
     pub fn new(id: &str, role: Role, layers: Vec<Layer>) -> Self {
-        Self { id: id.into(), role, layers, name: None, code: None }
+        Self { id: id.into(), role, layers, name: None, code: None, delivery: Default::default() }
     }
 
     /// The total thickness.

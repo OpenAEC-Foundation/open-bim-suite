@@ -52,7 +52,7 @@ use crate::join::{self, JoinKind, Member, MemberEnd};
 use crate::profile::Profile;
 use crate::solid::{Axes, Plane, Solid};
 use crate::{positive, Refusal, LINEAR_TOLERANCE};
-use bim_library::system::{Cores, Corner, Framing, Gauge, Pattern, Trimmer, StudStart, SystemLayer, SystemType};
+use bim_library::system::{Cores, Corner, Framing, Gauge, Lintel, Pattern, Trimmer, StudStart, SystemLayer, SystemType};
 use bim_library::Library;
 use glam::{DVec2, DVec3};
 use serde::{Deserialize, Serialize};
@@ -61,6 +61,7 @@ use std::iter::once;
 mod assembly;
 mod corner;
 mod lying;
+mod shaped;
 mod tee;
 
 pub(crate) use corner::{connection, connection_node, joined_parts};
@@ -98,6 +99,9 @@ pub struct SystemTypeDef {
     /// A floor of slabs: how the slabs an opening cuts through are carried.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trimmer: Option<Trimmer>,
+    /// Brickwork: how it is carried over an opening.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lintel: Option<Lintel>,
     /// Its bays are whole ones from its start, the last one cut to fit (a fitting slab), rather
     /// than equal ones.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -164,6 +168,7 @@ impl SystemDef {
             gauge: t.members.gauge,
             lying: t.lying.is_some(),
             trimmer: t.trimmer,
+            lintel: t.lintel,
             whole: t.whole,
             cores: t.cores,
             division: t.division,
@@ -193,6 +198,8 @@ struct Face<'a> {
     /// How its bays are divided along it.
     division: Division,
     panel: (f64, Option<&'a str>),
+    /// How it is carried over an opening (brickwork).
+    lintel: Option<Lintel>,
 }
 
 impl Face<'_> {
@@ -295,7 +302,8 @@ impl Face<'_> {
             Pattern::Stack => (bays + 1).saturating_add(cells.saturating_add(bays)).saturating_add(cells),
             // the edges and the rows' lines, then per row one division and one panel more than
             // its bays at most
-            Pattern::RunningBond => (rows + 3).saturating_add(rows.saturating_mul(bays + 1).saturating_mul(2)),
+            // (a row of headers has two to a bay)
+            _ => (rows + 3).saturating_add(rows.saturating_mul(bays + 1).saturating_mul(4)),
         }
     }
 
@@ -378,6 +386,7 @@ fn faces(s: &SystemDef) -> Vec<Face<'_>> {
         whole: t.is_some_and(|t| t.whole),
         division: s.divided(),
         panel: (s.panel, t.map(|t| t.panel_material.as_str())),
+        lintel: t.and_then(|t| t.lintel),
     };
     let layers = t.into_iter().flat_map(|t| &t.layers).map(|l| Face {
         offset: l.offset,
@@ -390,6 +399,7 @@ fn faces(s: &SystemDef) -> Vec<Face<'_>> {
         whole: false,
         division: Division::Equal,
         panel: (l.panels.thickness, Some(l.panels.material.as_str())),
+        lintel: None,
     });
     std::iter::once(own).chain(layers).collect()
 }
@@ -514,6 +524,12 @@ fn build(s: &SystemDef, ends: &Ends) -> Result<Vec<PartSolid>, Refusal> {
         Some((rectangle, outline)) => (rectangle, Some(outline.as_slice())),
         None => (s, None),
     };
+    // a standing one with an outline in its face is made as its rectangle and cut to it
+    let shaped = shaped::bounded(s)?;
+    let (s, face) = match &shaped {
+        Some((rectangle, face)) => (rectangle, Some(face.as_slice())),
+        None => (s, None),
+    };
     let plan = plan(s, ends)?;
     // a standing face runs up; a lying one runs level to the left of its line, its layers stacked
     // upwards, the top of the highest at the system's base
@@ -531,7 +547,10 @@ fn build(s: &SystemDef, ends: &Ends) -> Result<Vec<PartSolid>, Refusal> {
         let length = plan.spans[0].hi - plan.spans[0].lo;
         return lying::finish(s, &plan.faces[0], length, s.base - sunk + own, outline, parts);
     }
-    Ok(parts)
+    match face {
+        Some(face) => shaped::cut(s, face, parts),
+        None => Ok(parts),
+    }
 }
 
 /// Checks system `s`, its faces ending as `ends` say, and lays it out: every face on its span, the
@@ -550,9 +569,6 @@ fn plan<'a>(s: &'a SystemDef, ends: &Ends) -> Result<Plan<'a>, Refusal> {
     let faces = faces(s);
     // openings are framed: by the system's own face and by every face with members; a lying
     // system is cut where they are
-    if !s.lies() && !s.openings.is_empty() && faces.iter().any(|f| f.member.is_some() && f.framing.is_none()) {
-        return Err(Refusal::OpeningNotFramed);
-    }
     let at = |ends: &[FaceEnd], i: usize| ends.get(i).copied().unwrap_or_default();
     let rough = if s.lies() { lying::cut(s, &faces[0], length)? } else { rough_openings(s, &faces) };
     let mut spans: Vec<Span> = Vec::with_capacity(faces.len());
@@ -984,11 +1000,49 @@ impl Frame<'_> {
 }
 
 impl Line {
+    /// Opening `o` of this face as the rectangle it takes (`[u0, v0, u1, v1]`) and the solid that
+    /// cuts it through the whole of the face.
+    fn hole(&self, o: &Opening) -> Result<([f64; 4], Solid), Refusal> {
+        let r = [o.along, o.sill.max(0.0), o.along + o.width, o.sill + o.height];
+        // a door's hole runs on under the face's foot, so nothing of a member is left there
+        let foot = if o.sill <= LINEAR_TOLERANCE { r[1] - 1.0 } else { r[1] };
+        let axes = Axes::new(self.origin - self.right, self.dir, self.right)?;
+        let ring = vec![DVec2::new(r[0], foot), DVec2::new(r[2], foot), DVec2::new(r[2], r[3]), DVec2::new(r[0], r[3])];
+        Ok((r, Solid::extrude(&Profile::new(ring, Vec::new())?, &axes, 2.0)?))
+    }
+
     /// Face `f` on a grid: its members on the grid's lines, joined, and its panels (or boards) in
     /// its bays, cut around `openings` and at the prefab units' `joints`.
     fn grid(&self, f: &Face, openings: &[Opening], joints: &[f64], parts: &mut Vec<PartSolid>) -> Result<(), Refusal> {
         let (_, _, bay, row) = f.division(self.length, self.height);
         let w = f.width();
+        // brickwork is carried over an opening by a lintel: whole courses high, bearing either
+        // side; it takes the place of the bricks and joints there, as an opening does
+        let lintels: Vec<Opening> = match f.lintel.filter(|_| f.framing.is_none() && row > LINEAR_TOLERANCE) {
+            Some(rule) => openings
+                .iter()
+                .filter_map(|o| {
+                    let head = o.sill.max(0.0) + o.height;
+                    let courses = ((rule.height + w) / row).ceil().max(1.0);
+                    // up to where the bricks of its last course would end: the joint over it stays
+                    let high = courses * row - w / 2.0;
+                    let (from, to) = ((o.along - rule.bearing).max(0.0), (o.along + o.width + rule.bearing).min(self.length));
+                    (head + high < self.height - LINEAR_TOLERANCE && to - from > LINEAR_TOLERANCE).then_some(Opening { along: from, sill: head, width: to - from, height: high, framing: None })
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        let held: Vec<Opening>;
+        let openings: &[Opening] = if lintels.is_empty() {
+            openings
+        } else {
+            held = openings.iter().chain(&lintels).copied().collect();
+            &held
+        };
+        for l in &lintels {
+            let lintel = self.panel(f, l.along, l.sill, l.width, l.height)?;
+            parts.push(PartSolid { class: "IfcBeam", material: Some("concrete".to_string()), ..lintel });
+        }
         // where division `i` along is, and row `j` up
         let lines = f.lines(self.length);
         let bays = lines.len() - 1;
@@ -1067,7 +1121,7 @@ impl Line {
                     }
                 }
             }
-            Pattern::RunningBond => {
+            bond => {
                 // the edges and the rows' lines; the rows' lines stop against the edges, a mitre
                 // at the corners
                 let mut lines_up: Vec<usize> = Vec::new();
@@ -1088,15 +1142,18 @@ impl Line {
                 }
                 for j in 0..rows {
                     let v = j as f64 * row;
-                    // the divisions of this row: every bay, shifted half a bay in every second
-                    // row; one too close to the one before it (or to the end) is left out
-                    let shift = if j % 2 == 1 { bay / 2.0 } else { 0.0 };
+                    // the divisions of this row as its bond lays it (every bay, shifted half a
+                    // bay in every second row, for a stretcher bond); one too close to the one
+                    // before it (or to the end) is left out
+                    let (shift, units) = bond.course(j, bay);
                     let mut lines = vec![0.0];
-                    for k in 0..=bays {
-                        let u = k as f64 * bay + shift;
+                    let (mut u, mut k) = (shift, 0usize);
+                    while u < self.length && k <= 4 * (bays + 2) {
                         if u - lines[lines.len() - 1] > w + LINEAR_TOLERANCE && self.length - u > w + LINEAR_TOLERANCE {
                             lines.push(u);
                         }
+                        u += units[k % units.len()] * bay;
+                        k += 1;
                     }
                     lines.push(self.length);
                     if let Some((size, _)) = f.member {
@@ -1135,8 +1192,38 @@ impl Line {
             parts.extend(done.parts);
         }
         let material = f.member.and_then(|(_, m)| m).map(str::to_string);
+        // a face on a grid has its members cut where an opening lies: what is in it is left out,
+        // what runs through it ends at it. (A framed face frames its openings instead.)
+        let tools: Vec<([f64; 4], Solid)> = if f.framing.is_none() { openings.iter().map(|o| self.hole(o)).collect::<Result<_, _>>()? } else { Vec::new() };
         for p in pieces {
-            let solid = join::finish(&p.member, p.start, p.end, &p.additions, &p.removals)?;
+            let mut solid = join::finish(&p.member, p.start, p.end, &p.additions, &p.removals)?;
+            let mut gone = false;
+            for (r, tool) in &tools {
+                let tol = LINEAR_TOLERANCE;
+                let (mut lo, mut hi) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
+                for q in &solid.positions {
+                    let at = [(*q - self.origin).dot(self.dir), (*q - self.origin).dot(self.up)];
+                    (lo, hi) = ([lo[0].min(at[0]), lo[1].min(at[1])], [hi[0].max(at[0]), hi[1].max(at[1])]);
+                }
+                if hi[0] <= r[0] + tol || lo[0] >= r[2] - tol || hi[1] <= r[1] + tol || lo[1] >= r[3] - tol {
+                    continue;
+                }
+                if lo[0] >= r[0] - tol && hi[0] <= r[2] + tol && lo[1] >= r[1] - tol && hi[1] <= r[3] + tol {
+                    gone = true;
+                    break;
+                }
+                match crate::boolean::boolean(&solid, tool, crate::boolean::BooleanOp::Difference) {
+                    Ok(left) => solid = left,
+                    Err(Refusal::Empty) => {
+                        gone = true;
+                        break;
+                    }
+                    Err(refusal) => return Err(refusal),
+                }
+            }
+            if gone {
+                continue;
+            }
             parts.push(PartSolid { class: "IfcMember", solid, material: material.clone() });
         }
         Ok(())
@@ -1602,9 +1689,56 @@ mod tests {
         // two openings with their king studs side by side are framed; the service zone frames them
         // too, with its battens 45 wide, so they are as far apart as its framing needs
         assert!(frame(vec![window(0.5, 0.9, 1.0, 1.2), window(1.5 + 4.0 * 0.045, 0.9, 1.0, 1.2)]).is_ok());
-        // a curtain wall (not framed) takes none
+        // a curtain wall (not framed) is cut where an opening lies
         let curtain = SystemDef { openings: vec![window(1.0, 0.9, 1.0, 1.2)], ..system(3.6, 2.7) };
-        assert_eq!(parts(&curtain).map(|p| p.len()), Err(Refusal::OpeningNotFramed));
+        assert!(parts(&curtain).is_ok());
+    }
+
+    #[test]
+    fn brickwork_is_laid_in_its_bond_and_cut_where_an_opening_lies() {
+        let wall = |id: &str, openings: Vec<Opening>| SystemDef { openings, ..system(4.4, 2.5) }.typed_from(&Library::starter(), id).unwrap();
+        let bricks = |s: &SystemDef| parts(s).unwrap().into_iter().filter(|p| p.class == "IfcPlate").collect::<Vec<_>>();
+        let long = |p: &PartSolid| {
+            let (lo, hi) = p.solid.positions.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), q| (lo.min(q.x), hi.max(q.x)));
+            ((hi - lo) * 1000.0).round() as i64
+        };
+        // stretchers 210 long in a stretcher bond; headers 100 long in every second row of an
+        // English bond, and beside every stretcher of a Flemish one
+        let count = |id: &str, length: i64| bricks(&wall(id, Vec::new())).iter().filter(|p| long(p) == length).count();
+        let (stretchers, headers) = (count("system.masonry-waal-stretcher", 210), count("system.masonry-waal-stretcher", 100));
+        assert!(stretchers > 700 && headers < 60, "{stretchers} {headers}");
+        assert!(count("system.masonry-waal-english", 100) > 700 && count("system.masonry-waal-english", 210) > 350);
+        assert!(count("system.masonry-waal-cross", 100) > 700);
+        let (s, h) = (count("system.masonry-waal-flemish", 210), count("system.masonry-waal-flemish", 100));
+        assert!(s > 450 && h > 450 && (s as i64 - h as i64).abs() < 60, "{s} {h}");
+        assert!(count("system.masonry-waal-quarter", 210) > 700);
+        // a window of 1.0 by 1.2 in it: no brick and no joint reaches into it, and the wall is
+        // less by the window
+        for id in ["system.masonry-waal-stretcher", "system.masonry-waal-english", "system.masonry-waal-flemish", "system.sand-lime-elements-100"] {
+            let (whole, open) = (wall(id, Vec::new()), wall(id, vec![Opening { along: 1.5, sill: 0.9, width: 1.0, height: 1.2, framing: None }]));
+            let made = parts(&open).unwrap();
+            for p in &made {
+                let c = p.solid.positions.iter().fold(DVec3::ZERO, |sum, q| sum + *q) / p.solid.positions.len() as f64;
+                let inside = p.solid.positions.iter().all(|q| q.x > 1.5 + 1e-6 && q.x < 2.5 - 1e-6 && q.z > 0.9 + 1e-6 && q.z < 2.1 - 1e-6);
+                assert!(!inside, "{id}: a part in the window at {c}");
+            }
+            // over it in brickwork a concrete lintel: two courses high less half a joint, bearing 100
+            // either side, and no brick or joint where it lies; sand-lime elements have none
+            let lintels: Vec<&PartSolid> = made.iter().filter(|p| p.class == "IfcBeam").collect();
+            assert_eq!(lintels.len(), usize::from(id.contains("waal")), "{id}");
+            for l in &lintels {
+                let (lo, hi) = l.solid.bounds();
+                assert!(l.material.as_deref() == Some("concrete") && (lo.x - 1.4).abs() < 1e-6 && (hi.x - 2.6).abs() < 1e-6 && (lo.z - 2.1).abs() < 1e-6 && (hi.z - 2.22).abs() < 1e-6, "{id}: {lo} {hi}");
+                for p in made.iter().filter(|p| p.class != "IfcBeam") {
+                    let within = p.solid.positions.iter().all(|q| q.x > 1.4 + 1e-6 && q.x < 2.6 - 1e-6 && q.z > 2.1 + 1e-6 && q.z < 2.22 - 1e-6);
+                    assert!(!within, "{id}: a part in the lintel");
+                }
+            }
+            let volume = |s: &SystemDef| parts(s).unwrap().iter().map(|p| p.solid.volume()).sum::<f64>();
+            let thick = open.panel.max(open.member.y);
+            let less = volume(&whole) - volume(&open);
+            assert!(less > 0.8 * 1.0 * 1.2 * thick.min(open.panel) && less < 1.1 * 1.0 * 1.2 * thick, "{id}: {less}");
+        }
     }
 
     /// `s` with the framing of its own face changed by `change`.

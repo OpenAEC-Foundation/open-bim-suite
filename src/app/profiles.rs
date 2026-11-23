@@ -90,6 +90,12 @@ pub enum ProfileMessage {
     Named(String),
     /// An NL-SfB code of its own, one of the library's; none for the rule's.
     Coded(Option<String>),
+    /// Whether it bears, said by itself; none: as its code and its role say.
+    Bearing(Option<bool>),
+    /// Whether it is external, said by itself; none: as its code says.
+    External(Option<bool>),
+    /// Typed as its fire rating; empty for none.
+    FireRating(String),
     Role(LinearRole),
     /// The material, by its key.
     Material(String),
@@ -322,6 +328,9 @@ impl App {
                 Some(Ok(()))
             }
             ProfileMessage::Coded(code) => picked.as_deref().map(|id| change(&mut self.library, id, |t| t.code = code)),
+            ProfileMessage::Bearing(bears) => picked.as_deref().map(|id| change(&mut self.library, id, |t| t.delivery.load_bearing = bears)),
+            ProfileMessage::External(external) => picked.as_deref().map(|id| change(&mut self.library, id, |t| t.delivery.is_external = external)),
+            ProfileMessage::FireRating(typed) => picked.as_deref().map(|id| change(&mut self.library, id, |t| t.delivery.fire_rating = Some(typed.trim().to_string()).filter(|rating| !rating.is_empty()))),
             ProfileMessage::Named(name) => picked.as_deref().map(|id| change(&mut self.library, id, |t| t.name = (!name.trim().is_empty()).then_some(name))),
             ProfileMessage::Role(role) => picked.as_deref().map(|id| change(&mut self.library, id, |t| t.role = role).map(|()| {
                 // the page follows the type to its role, unless it shows the steel table
@@ -483,6 +492,9 @@ impl App {
         let own = text_input(l.text("volgens materiaal en maat", "by material and size"), t.name.as_deref().unwrap_or_default()).on_input(ProfileMessage::Named).size(12).padding([2, 6]);
         fields = fields.push(stacked(p, own_name, a11y::named(own, Aria::TextField, own_name)));
         fields = fields.push(super::codes::picker(p, l, library, t.rule_code(), t.code.as_deref(), ProfileMessage::Coded));
+        // what a delivery asks of it (BIM basis ILS): said here, or left to its role and its code
+        let coded = LinearType { delivery: Default::default(), ..t.clone() };
+        fields = fields.push(super::buildups::delivery_controls(p, l, coded.load_bearing(), coded.is_external(), &t.delivery, t.missing(), true, ProfileMessage::Bearing, ProfileMessage::External, ProfileMessage::FireRating));
         let act = |label: &'static str, message: ProfileMessage| button(text(label).size(12).color(p.text_secondary)).padding([3, 8]).style(move |_, s| p.row_button(s)).on_press(message);
         let refused = view.refused.as_ref().map(|why| {
             let refused = l.text("Niet overgenomen: het profiel zou dan niet meer kloppen.", "Not taken: the profile would no longer hold together.");
@@ -680,4 +692,26 @@ mod tests {
         let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 800.0), app.profile_pane(app.theme.palette(), l));
         assert!(pane.find("IfcColumnType · COLUMN").is_ok() && pane.find("XDim").is_ok() && pane.find("YDim").is_ok() && pane.find("Own name").is_ok());
     }
+    #[test]
+    fn a_linear_type_says_what_a_delivery_asks_in_its_editor() {
+        let mut app = App::default();
+        let id = app.library.linear_types.iter().find(|t| t.role == LinearRole::Beam).unwrap().id.clone();
+        let _ = app.profile_update(ProfileMessage::Pick(id.clone()));
+        let of = |app: &App| app.library.linear_type(&id).unwrap().clone();
+        assert_eq!((of(&app).load_bearing(), of(&app).delivery.is_empty()), (Some(true), true));
+        {
+            let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 2000.0), app.profile_pane(app.theme.palette(), Language::English));
+            assert!(pane.find("Loadbearing").is_ok() && pane.find("External").is_ok() && pane.find("Fire rating").is_ok());
+        }
+        let _ = app.profile_update(ProfileMessage::Bearing(Some(false)));
+        let _ = app.profile_update(ProfileMessage::External(Some(true)));
+        let _ = app.profile_update(ProfileMessage::FireRating(" R 60 ".into()));
+        let beam = of(&app);
+        assert_eq!((beam.load_bearing(), beam.is_external(), beam.delivery.fire_rating.as_deref()), (Some(false), true, Some("R 60")));
+        let _ = app.profile_update(ProfileMessage::Bearing(None));
+        let _ = app.profile_update(ProfileMessage::External(None));
+        let _ = app.profile_update(ProfileMessage::FireRating("".into()));
+        assert!(of(&app).delivery.is_empty());
+    }
+
 }

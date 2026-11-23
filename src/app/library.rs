@@ -288,7 +288,7 @@ impl App {
                 let pick = Pick::Material(m.key.clone());
                 body = body.push(item(row![swatch, name(m.name(lg).to_string())].spacing(6).align_y(Center).into(), pick.clone()));
                 if view.picked.as_ref() == Some(&pick) {
-                    body = body.push(detail(material_detail(p, m)));
+                    body = body.push(detail(material_detail(p, l, m)));
                 }
             }
         }
@@ -417,16 +417,22 @@ fn small<'a>(s: String, p: Palette) -> Element<'a, Message> {
 }
 
 /// A material's hatch (NEN 47) on a square, and its key.
-pub(super) fn material_detail<'a>(p: Palette, m: &Material) -> Element<'a, Message> {
-    match m.catalogue_hatch() {
+pub(super) fn material_detail<'a>(p: Palette, l: Language, m: &Material) -> Element<'a, Message> {
+    let look: Element<'a, Message> = match m.catalogue_hatch() {
         Some(hatch) => column![super::libraries::tile_hatch_look(hatch, p, 60.0, super::libraries::HATCH_LOOK_SCALE), small(format!("{} · {}", m.key, hatch.key), p)].spacing(4).into(),
         None => column![material_hatch(p, m), small(m.key.clone(), p)].spacing(4).into(),
+    };
+    // what is known of it, each with the level of detail it is filled in from
+    let mut data = Column::new().spacing(2).push(small(l.text("Gegevens per detailniveau", "Data per level of detail").to_string(), p));
+    for datum in m.data(lang(l)) {
+        data = data.push(row![text(datum.from.number().to_string()).size(11).color(p.text_secondary).width(28), text(l.text(datum.nl, datum.en)).size(11).color(p.text_secondary).width(84), text(datum.value).size(11).color(p.text).width(Fill).wrapping(Wrapping::WordOrGlyph)].spacing(4));
     }
+    column![look, data].spacing(6).into()
 }
 
 /// A material's hatch (NEN 47) on a band, as a section through it shows it.
 pub(super) fn material_hatch<'a>(p: Palette, m: &Material) -> Element<'a, Message> {
-    canvas_widget(Section { bands: vec![(1.0, m.hatch, m.colour)], depth: 1.0, line: p.text }).width(Fill).height(60).into()
+    canvas_widget(Section { bands: vec![(1.0, m.hatch, m.colour)], depth: 1.0, line: p.text, plain: false }).width(Fill).height(60).into()
 }
 
 /// A build-up drawn as a section through its layers, the exterior (or the top) at the top, and
@@ -453,7 +459,43 @@ pub(super) fn buildup_detail<'a>(p: Palette, l: Language, lib: &Library, b: &Bui
     }
     let class = b.role.ifc_type_class();
     list = list.push(small(format!("{} mm · {class} {}", mm(total, l), b.role.predefined_type()), p));
-    column![canvas_widget(Section { bands, depth: total, line: p.text }).width(Fill).height(height), list].spacing(6).into()
+    // what it costs per square metre, once each of its materials has a price per cubic metre
+    if let Some(cost) = lib.buildup_cost(b) {
+        let parts: Vec<String> = cost.parts().map(|(resource, price)| format!("{} {price:.2}", l.text(resource.names().0, resource.names().1))).collect();
+        let checked = if cost.verified { "" } else { l.text(", richtprijs", ", a reference price") };
+        list = list.push(small(format!("{} ({}{checked})", cost.label(), l.text("uit zijn materialen", "from its materials")), p)).push(small(parts.join(" · "), p));
+    }
+    // the thermal resistance of its layers together, once each of its materials says how it conducts
+    if let Some(r) = lib.resistance(b) {
+        list = list.push(small(format!("R {r:.2} m²K/W ({})", l.text("alleen de lagen", "the layers alone")), p));
+    }
+    column![canvas_widget(Section { bands, depth: total, line: p.text, plain: false }).width(Fill).height(height), list, buildup_levels(p, l, lib, b)].spacing(6).into()
+}
+
+/// A section through build-up `b` as a drawing of `detail` shows it: its outline, one hatch or
+/// its layers, without hatches where the drawing does not hatch.
+pub(super) fn buildup_drawn<'a>(p: Palette, lib: &Library, b: &BuildUp, detail: bim_library::template::Detail, hatched: bool, height: f32) -> Element<'a, Message> {
+    let bands = b.drawn(detail).iter().map(|band| (band.thickness, band.material.and_then(|key| lib.material(key)).map_or(HatchKind::Generic, |m| m.hatch), [0, 0, 0])).collect::<Vec<_>>();
+    let plain = !hatched || b.drawn(detail).iter().all(|band| band.material.is_none());
+    canvas_widget(Section { bands, depth: b.thickness(), line: p.text, plain }).width(Fill).height(height).into()
+}
+
+/// A build-up at each level of detail, side by side: its outline at 200, its layers with their
+/// hatches at 350, and at 500 as many things known of its materials as there are.
+pub(super) fn buildup_levels<'a>(p: Palette, l: Language, lib: &Library, b: &BuildUp) -> Element<'a, Message> {
+    use bim_library::detail::{Detail, Shown};
+    let total = b.thickness();
+    let height = (total * 300.0).clamp(24.0, 110.0) as f32;
+    let mut levels = iced::widget::Row::new().spacing(6);
+    for detail in Detail::ALL {
+        let bands = b.at(detail).iter().map(|band| (band.thickness, band.material.and_then(|key| lib.material(key)).map_or(HatchKind::Generic, |m| m.hatch), [0, 0, 0])).collect();
+        let look = canvas_widget(Section { bands, depth: total, line: p.text, plain: detail.material() == Shown::Outline }).width(Fill).height(height);
+        // how much is filled in of the materials it is of, at this level
+        let known: usize = b.layers.iter().map(|layer| layer.material.as_str()).collect::<std::collections::BTreeSet<_>>().into_iter().filter_map(|key| lib.material(key)).map(|m| m.data_at(detail, lang(l)).len()).sum();
+        let about = format!("{} {}", known, l.text("gegevens", "data"));
+        levels = levels.push(column![text(detail.name()).size(11).color(p.text), look, small(about, p)].spacing(2).width(Fill));
+    }
+    column![small(l.text("Detailniveaus", "Levels of detail").to_string(), p), levels].spacing(3).into()
 }
 
 /// A build-up's section alone: its layers as bands with their hatches, the exterior or the top up.
@@ -461,7 +503,7 @@ pub(super) fn buildup_section<'a>(p: Palette, lib: &Library, b: &BuildUp) -> Ele
     let bands = b.layers.iter().map(|layer| (layer.thickness, lib.material(&layer.material).map_or(HatchKind::Generic, |m| m.hatch), lib.material(&layer.material).map_or([175, 182, 195], |m| m.colour))).collect();
     let total = b.thickness();
     let height = (total * 400.0).clamp(24.0, 150.0) as f32;
-    canvas_widget(Section { bands, depth: total, line: p.text }).width(Fill).height(height).into()
+    canvas_widget(Section { bands, depth: total, line: p.text, plain: false }).width(Fill).height(height).into()
 }
 
 /// A system type drawn as its face, a few bays and rows of it as the kernel generates them, with a
@@ -559,13 +601,13 @@ pub(super) fn material_look<'a>(p: Palette, m: &Material) -> Element<'a, Message
     if let Some(hatch) = m.catalogue_hatch() {
         return column![super::libraries::tile_hatch_look(hatch, p, 56.0, super::libraries::HATCH_LOOK_SCALE), colour].spacing(4).into();
     }
-    column![canvas_widget(Section { bands: vec![(1.0, m.hatch, m.colour)], depth: 1.0, line: p.text }).width(Fill).height(56), colour].spacing(4).into()
+    column![canvas_widget(Section { bands: vec![(1.0, m.hatch, m.colour)], depth: 1.0, line: p.text, plain: false }).width(Fill).height(56), colour].spacing(4).into()
 }
 
 /// A look at a build-up on a tile: its section, `height` high whatever its thickness.
 pub(super) fn buildup_look<'a>(p: Palette, lib: &Library, b: &BuildUp, height: f32) -> Element<'a, Message> {
     let bands = b.layers.iter().map(|layer| (layer.thickness, lib.material(&layer.material).map_or(HatchKind::Generic, |m| m.hatch), lib.material(&layer.material).map_or([175, 182, 195], |m| m.colour))).collect();
-    canvas_widget(Section { bands, depth: b.thickness(), line: p.text }).width(Fill).height(height).into()
+    canvas_widget(Section { bands, depth: b.thickness(), line: p.text, plain: false }).width(Fill).height(height).into()
 }
 
 /// A look at a system type on a tile: its face, `height` high.
@@ -655,7 +697,7 @@ fn system_section(t: &SystemType, lib: &Library, line: Color) -> Section {
         }
     }
     let depth = bands.iter().map(|b| b.0).sum();
-    Section { bands, depth, line }
+    Section { bands, depth, line, plain: false }
 }
 
 /// A profile drawn as its outline, with its sizes, area and second moments.
@@ -705,6 +747,8 @@ struct Section {
     bands: Vec<(f64, HatchKind, [u8; 3])>,
     depth: f64,
     line: Color,
+    /// Without hatches: the outlines alone, on the paper (a level of detail of 200).
+    plain: bool,
 }
 
 impl canvas::Program<Message> for Section {
@@ -718,7 +762,9 @@ impl canvas::Program<Message> for Section {
         for &(thickness, kind, _) in &self.bands {
             let h = thickness as f32 * scale;
             let band = Rectangle::new(Point::new(1.0, top), Size::new(width, h));
-            draw_hatch(&mut frame, band, kind.pattern(DrawingStandard::Nen47), scale);
+            if !self.plain {
+                draw_hatch(&mut frame, band, kind.pattern(DrawingStandard::Nen47), scale);
+            }
             top += h;
         }
         top = 1.0;

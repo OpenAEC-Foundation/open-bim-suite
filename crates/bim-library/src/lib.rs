@@ -22,22 +22,29 @@
 //! Lengths are metres.
 
 pub mod annotate;
+pub mod aspect;
 pub mod buildup;
+pub mod class;
 pub mod component;
 pub mod connection;
+pub mod cost;
+pub mod detail;
 pub mod drawing;
 pub mod dutch;
 pub mod grade;
 pub mod hatch;
 pub mod house;
 pub mod ifcx;
+pub mod ils;
 pub mod inb;
+pub mod kind;
 pub mod library;
 pub mod lod;
 pub mod material;
 pub mod nlsfb;
 pub mod object;
 pub mod ocondat;
+pub mod physics;
 pub mod profile;
 pub mod remote;
 pub mod service;
@@ -46,12 +53,13 @@ pub mod system;
 pub mod template;
 
 pub use buildup::{BuildUp, Layer, Role};
+pub use class::{Family, StrengthClass};
 pub use hatch::{Hatch, HatchSet};
 pub use library::Library;
 pub use material::{DrawingStandard, HatchKind, HatchPattern, Material, Names};
 pub use standard::{Below, HatchStandard, MaterialHatch};
 pub use profile::{LinearRole, LinearType, ProfileShape, Series, SteelProfile};
-pub use system::{Clearance, Corner, Framing, Gauge, Grid, HeaderBand, StudStart, Members, Panels, Pattern, SystemGroup, SystemLayer, SystemType, Trimmer, Cores, Division};
+pub use system::{Clearance, Corner, Framing, Gauge, Grid, HeaderBand, StudStart, Members, Panels, Pattern, SystemGroup, SystemLayer, SystemType, Trimmer, Lintel, Cores, Division};
 
 use serde::{Deserialize, Serialize};
 
@@ -111,6 +119,8 @@ pub enum LibraryError {
     BadService(String),
     /// A hatch standard or a material's hatch that does not hold together: what it needs.
     BadHatch(String),
+    /// An aspect does not hold together; the text says what it needs.
+    BadAspect(String),
 }
 
 impl std::fmt::Display for LibraryError {
@@ -129,6 +139,7 @@ impl std::fmt::Display for LibraryError {
             LibraryError::BadConnection(what) => write!(f, "Not a connection: it needs {what}."),
             LibraryError::BadService(what) => write!(f, "Not a service type: it needs {what}."),
             LibraryError::BadHatch(what) => write!(f, "Not a hatch: it needs {what}."),
+            LibraryError::BadAspect(what) => write!(f, "Not an aspect: it needs {what}."),
             LibraryError::BadHouseStyle(what) => write!(f, "Not a house style: {what}."),
             LibraryError::BadCode(code) => write!(f, "\"{code}\" is no NL-SfB code (21, 21.2 or 21.22)."),
         }

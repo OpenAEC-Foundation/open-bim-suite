@@ -636,14 +636,14 @@ mod tests {
         assert!(app.service_view.refused.is_some() && app.library.linear_type("pipe.copper.23").is_none());
         // a type of another library comes with its material, once
         let mut other = Library::starter();
-        other.add_material(bim_library::Material::new("stainless-steel", bim_library::material::Names::same("RVS"), bim_library::material::HatchKind::Steel, [200, 204, 210])).unwrap();
+        other.add_material(bim_library::Material::new("duplex-steel", bim_library::material::Names::same("duplex"), bim_library::material::HatchKind::Steel, [200, 204, 210])).unwrap();
         let mut steel = other.service_type("pipe.steel-threaded").cloned().unwrap();
-        (steel.id, steel.material) = ("office.pipe.stainless".into(), "stainless-steel".into());
+        (steel.id, steel.material) = ("office.pipe.stainless".into(), "duplex-steel".into());
         other.add_service_type(steel).unwrap();
-        other.add_cover_type(CoverType::new("office.cover.stainless", Place::Insulation, "stainless-steel", 1.0)).unwrap();
-        assert!(app.library.material("stainless-steel").is_none());
+        other.add_cover_type(CoverType::new("office.cover.stainless", Place::Insulation, "duplex-steel", 1.0)).unwrap();
+        assert!(app.library.material("duplex-steel").is_none());
         assert_eq!(take(&mut app.library, &other, "office.pipe.stainless").as_deref(), Ok("office.pipe.stainless"));
-        assert!(app.library.material("stainless-steel").is_some());
+        assert!(app.library.material("duplex-steel").is_some());
         assert!(take(&mut app.library, &other, "office.pipe.stainless").is_err() && take(&mut app.library, &other, "none").is_err());
         assert_eq!(take_cover(&mut app.library, &other, "office.cover.stainless").as_deref(), Ok("office.cover.stainless"));
         assert!(take_cover(&mut app.library, &other, "office.cover.stainless").is_err());

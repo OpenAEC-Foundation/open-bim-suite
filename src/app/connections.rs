@@ -14,8 +14,11 @@
 //! list the types of the project's library that stand between two members; picking one gives
 //! the join that type's recipe.
 //!
-//! Not yet: a picker with previews, search and favourites, applying a type to all like
-//! meetings at once, and the families the kernel has no recipe for.
+//! The picker lists the favourites first, then the types last given to a join, and leaves only
+//! what typed words find; a favourite and a last used type is also a button to give with a click.
+//!
+//! Not yet: previews in the picker, only the types that fit the meeting, a key, applying a type
+//! to all like meetings at once, and the families the kernel has no recipe for.
 
 use super::libraries::{Category, Shelf};
 use super::{App, Message, FONT_BOLD};
@@ -90,6 +93,10 @@ pub enum ConnectionMessage {
     Remove,
     /// Typed into a size of the picked type of the project.
     Typed(Field, String),
+    /// Make the picked type of the project a favourite, or no longer one.
+    Favourite,
+    /// Typed to find a type for the selected join.
+    Find(String),
 }
 
 /// Which type the right pane shows, why the last change was refused, and what is typed in a
@@ -99,6 +106,10 @@ pub struct ConnectionView {
     pub picked: Option<String>,
     pub refused: Option<String>,
     pub draft: Option<(Field, String)>,
+    /// The types last given to a join, the latest first (five at most).
+    pub recent: Vec<String>,
+    /// What is typed to find a type for the selected join.
+    pub find: String,
 }
 
 /// A type of `from` taken into `library`, with the material its parts are of; its key. A type
@@ -211,8 +222,14 @@ impl App {
                 if let Some(id) = self.connection_view.picked.take() {
                     self.library.connection_types.retain(|c| c.id != id);
                 }
-                self.connection_view = ConnectionView::default();
+                self.connection_view = ConnectionView { recent: std::mem::take(&mut self.connection_view.recent), ..ConnectionView::default() };
             }
+            ConnectionMessage::Favourite => {
+                if let Some(connection) = self.connection_view.picked.clone().and_then(|id| self.library.connection_types.iter_mut().find(|c| c.id == id)) {
+                    connection.favourite = !connection.favourite;
+                }
+            }
+            ConnectionMessage::Find(typed) => self.connection_view.find = typed,
             ConnectionMessage::Typed(field, typed) => {
                 let Some(at) = self.connection_view.picked.as_deref().and_then(|id| self.library.connection_types.iter().position(|c| c.id == id)) else { return };
                 let mut changed = self.library.connection_types[at].clone();
@@ -235,6 +252,11 @@ impl App {
     pub(super) fn set_join_type(&mut self, id: &str) {
         let Some(connection) = self.library.connection_type(id) else { return };
         self.set_join_recipe(kind(&connection.recipe));
+        // the last used are listed first the next time
+        let recent = &mut self.connection_view.recent;
+        recent.retain(|used| used != id);
+        recent.insert(0, id.to_string());
+        recent.truncate(5);
     }
 
     /// The connection types of `family` of the source shown as tiles: what a type does to
@@ -291,7 +313,7 @@ impl App {
         }
         let act = |label: &'static str, message: ConnectionMessage| button(text(label).size(12).color(p.text_secondary)).padding([3, 8]).style(move |_, s| p.row_button(s)).on_press(message);
         let actions = if shelf == Shelf::Project {
-            row![act(l.text("Kopiëren", "Copy"), ConnectionMessage::Copy), act(l.text("Verwijderen", "Remove"), ConnectionMessage::Remove), Space::new().width(Fill)]
+            row![act(if connection.favourite { l.text("★ Favoriet", "★ Favourite") } else { l.text("☆ Favoriet", "☆ Favourite") }, ConnectionMessage::Favourite), act(l.text("Kopiëren", "Copy"), ConnectionMessage::Copy), act(l.text("Verwijderen", "Remove"), ConnectionMessage::Remove), Space::new().width(Fill)]
         } else {
             row![act(l.text("Naar het project", "Take into the project"), ConnectionMessage::Take(shelf, connection.id.clone())), Space::new().width(Fill)]
         };
@@ -305,12 +327,24 @@ impl App {
     /// its own).
     pub(super) fn join_type_picker<'a>(&'a self, p: Palette, l: Language, now: &ConnectionKind) -> Element<'a, Message> {
         let lang = super::library::lang(l);
-        let choices: Vec<Choice> = for_members(&self.library).map(|t| Choice { id: t.id.clone(), name: format!("{} · {}", t.family.name(lang), t.name(lang)) }).collect();
+        let view = &self.connection_view;
+        // the favourites first, then the last used, then the others; only those the typed words find
+        let listed: Vec<&ConnectionType> = bim_library::connection::pick_order(for_members(&self.library), &view.recent).into_iter().filter(|t| bim_library::connection::found(t, &view.find, lang)).collect();
+        let mark = |t: &ConnectionType| if t.favourite { "★ " } else if view.recent.contains(&t.id) { "↺ " } else { "" };
+        let choices: Vec<Choice> = listed.iter().map(|t| Choice { id: t.id.clone(), name: format!("{}{} · {}", mark(t), t.family.name(lang), t.name(lang)) }).collect();
         let of = type_of(&self.library, now).map(|t| t.id.clone());
         let picked = choices.iter().find(|c| Some(&c.id) == of.as_ref()).cloned();
         let label = l.text("Type uit de bibliotheek", "Type of the library");
+        let find_label = l.text("Zoek een type", "Find a type");
+        let find = a11y::named(text_input(find_label, &view.find).on_input(|typed| Message::Connection(ConnectionMessage::Find(typed))).size(12).padding([2, 6]), Aria::TextField, find_label);
         let pick = pick_list(choices, picked, |c: Choice| Message::JoinType(c.id)).placeholder(l.text("eigen maten", "sizes of its own")).text_size(12).padding([2, 6]).width(Fill);
-        column![text(label).size(11).color(p.text_secondary), a11y::named(pick, Aria::ComboBox, label)].spacing(2).into()
+        // the favourites and the last used, each given with one click
+        let mut quick = iced::widget::Row::new().spacing(2);
+        for t in listed.iter().filter(|t| t.favourite || view.recent.contains(&t.id)).take(6) {
+            let name = format!("{}{}", mark(t), t.name(lang));
+            quick = quick.push(button(text(name).size(11).color(p.text_secondary)).padding([2, 6]).style(move |_, s| p.row_button(s)).on_press(Message::JoinType(t.id.clone())));
+        }
+        column![text(label).size(11).color(p.text_secondary), find, a11y::named(pick, Aria::ComboBox, label), quick.wrap()].spacing(2).into()
     }
 }
 
@@ -439,4 +473,45 @@ mod tests {
         let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 200.0), app.join_type_picker(app.theme.palette(), Language::English, &kind_now(&app)));
         assert!(pane.find("Type of the library").is_ok());
     }
+    #[test]
+    fn a_joins_picker_lists_favourites_and_the_last_used_and_finds_by_words() {
+        let mut app = App::default();
+        let p = app.theme.palette();
+        let l = Language::English;
+        let _ = app.libraries_update(crate::app::libraries::LibrariesMessage::Source(crate::app::libraries::Source::Project));
+        // a favourite of the project, set in its pane and kept with the type
+        app.connection_update(ConnectionMessage::Pick("steel.end-plate.m20-2x2".into()));
+        app.connection_update(ConnectionMessage::Favourite);
+        assert!(app.library.connection_type("steel.end-plate.m20-2x2").unwrap().favourite);
+        {
+            let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 900.0), app.connection_pane(p, l, &app.library, Shelf::Project));
+            assert!(pane.find("★ Favourite").is_ok());
+        }
+        // a type given to a join is one of the last used; the latest first, five at most
+        app.set_join_type("steel.fin-plate.m20-3");
+        app.set_join_type("steel.butt");
+        app.set_join_type("steel.fin-plate.m20-3");
+        app.set_join_type("no-such-type");
+        assert_eq!(app.connection_view.recent, ["steel.fin-plate.m20-3", "steel.butt"]);
+        let names = app.library.clone();
+        let name = |id: &str| names.connection_type(id).unwrap().name(Lang::En);
+        {
+            let mut picker = crate::app::test_ui_of(iced::Size::new(340.0, 400.0), app.join_type_picker(p, l, &ConnectionKind::Butt));
+            assert!(picker.find("Type of the library").is_ok());
+            // a button each: the favourite, then the last used
+            assert!(picker.find(format!("★ {}", name("steel.end-plate.m20-2x2"))).is_ok() && picker.find(format!("↺ {}", name("steel.fin-plate.m20-3"))).is_ok() && picker.find(format!("↺ {}", name("steel.butt"))).is_ok());
+        }
+        // typed words leave only what they find
+        app.connection_update(ConnectionMessage::Find("fin".into()));
+        {
+            let mut picker = crate::app::test_ui_of(iced::Size::new(340.0, 400.0), app.join_type_picker(p, l, &ConnectionKind::Butt));
+            assert!(picker.find(format!("↺ {}", name("steel.fin-plate.m20-3"))).is_ok() && picker.find(format!("★ {}", name("steel.end-plate.m20-2x2"))).is_err());
+        }
+        // no longer a favourite; a type removed leaves the last used as they were
+        app.connection_update(ConnectionMessage::Favourite);
+        assert!(!app.library.connection_type("steel.end-plate.m20-2x2").unwrap().favourite);
+        app.connection_update(ConnectionMessage::Remove);
+        assert_eq!(app.connection_view.recent.len(), 2);
+    }
+
 }

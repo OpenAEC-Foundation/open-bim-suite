@@ -266,6 +266,10 @@ pub struct ObjectType {
     /// Properties of its own, by their name and with their unit ("Power", "40 W").
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub properties: Vec<(String, String)>,
+    /// What a delivery asks of it beside its code ([`crate::ils`]): whether it is external and
+    /// its fire rating; what is none follows from its code.
+    #[serde(default, skip_serializing_if = "crate::ils::Delivery::is_empty")]
+    pub delivery: crate::ils::Delivery,
 }
 
 fn is_zero(value: &f64) -> bool {
@@ -275,7 +279,7 @@ fn is_zero(value: &f64) -> bool {
 impl ObjectType {
     /// An object of `group` at LOD 200: generic, of about `size`.
     pub fn new(id: &str, group: ObjectGroup, names: Names, size: [f64; 3]) -> Self {
-        Self { id: id.into(), group, names, size, base: 0.0, lod: Lod::L200, predefined: None, class: None, material: None, code: None, properties: Vec::new() }
+        Self { id: id.into(), group, names, size, base: 0.0, lod: Lod::L200, predefined: None, class: None, material: None, code: None, properties: Vec::new(), delivery: Default::default() }
     }
 
     pub fn name(&self, lang: Lang) -> &str {
@@ -334,7 +338,7 @@ pub fn path(id: &str) -> String {
 /// The node of an object type.
 pub fn node(object: &ObjectType) -> Value {
     let (_, type_class, predefined) = object.ifc();
-    json!({
+    let mut node = json!({
         "path": path(&object.id),
         "attributes": {
             "bsi::ifc::class": {"code": type_class},
@@ -343,7 +347,14 @@ pub fn node(object: &ObjectType) -> Value {
             crate::nlsfb::CLASS: crate::nlsfb::class_value(&object.nlsfb()),
             OBJECT_TYPE: object,
         }
-    })
+    });
+    // what a delivery asks of it, as IFC's own properties (`Pset_DoorCommon` and its likes)
+    if let Some(attributes) = node["attributes"].as_object_mut() {
+        for (name, value) in object.delivery_properties() {
+            attributes.insert(format!("bsi::ifc::prop::{name}"), value);
+        }
+    }
+    node
 }
 
 /// The object types a library starts with: one generic object of each group at LOD 200, to
