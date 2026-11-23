@@ -578,6 +578,7 @@ impl App {
         (profile.draft, profile.refused) = (None, None);
         profile.picked = profile.picked.take().filter(|id| library.linear_type(id).is_some());
         self.view_template_view.typing = None;
+        self.view_template_view.classes = None;
         self.view_template_view.picked = self.view_template_view.picked.take().filter(|key| self.libraries.source != Source::Project || library.view_template(key).is_some());
         // (a drawing set's typed fields are its values again; one taken back is not picked)
         self.drawing_set_view.typing = None;

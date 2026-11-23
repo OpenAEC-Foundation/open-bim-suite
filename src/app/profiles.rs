@@ -494,7 +494,7 @@ impl App {
         fields = fields.push(super::codes::picker(p, l, library, t.rule_code(), t.code.as_deref(), ProfileMessage::Coded));
         // what a delivery asks of it (BIM basis ILS): said here, or left to its role and its code
         let coded = LinearType { delivery: Default::default(), ..t.clone() };
-        fields = fields.push(super::buildups::delivery_controls(p, l, coded.load_bearing(), coded.is_external(), &t.delivery, t.missing(), ProfileMessage::Bearing, ProfileMessage::External, ProfileMessage::FireRating));
+        fields = fields.push(super::buildups::delivery_controls(p, l, coded.load_bearing(), coded.is_external(), &t.delivery, t.missing(), true, ProfileMessage::Bearing, ProfileMessage::External, ProfileMessage::FireRating));
         let act = |label: &'static str, message: ProfileMessage| button(text(label).size(12).color(p.text_secondary)).padding([3, 8]).style(move |_, s| p.row_button(s)).on_press(message);
         let refused = view.refused.as_ref().map(|why| {
             let refused = l.text("Niet overgenomen: het profiel zou dan niet meer kloppen.", "Not taken: the profile would no longer hold together.");

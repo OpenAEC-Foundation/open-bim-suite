@@ -235,6 +235,14 @@ impl ViewTemplate {
         to.map(|to| self.rules.swap(at, to)).is_some()
     }
 
+    /// Adds a rule that is tried last, takes every element and leaves their look as it is, so it
+    /// changes nothing until it is given classes and a look and moved up; its key.
+    pub fn add_rule(&mut self, names: Names) -> String {
+        let key = (1..).map(|n| format!("rule-{n}")).find(|key| self.rules.iter().all(|r| r.key != *key)).unwrap_or_default();
+        self.rules.push(Rule { key: key.clone(), names, filter: Filter::default(), look: Look::default() });
+        key
+    }
+
     /// Takes rule `key` away; whether it had it.
     pub fn remove_rule(&mut self, key: &str) -> bool {
         let before = self.rules.len();
@@ -476,6 +484,29 @@ mod tests {
         assert_eq!(crate::ifcx::read(&file).unwrap().view_template(&key), library.view_template(&key));
         assert!(library.remove_view_template(&key) && !library.remove_view_template(&key));
         assert_eq!(library.view_template("floor-plan-do-100"), Some(&from));
+    }
+
+    #[test]
+    fn a_rule_added_is_tried_last_and_changes_nothing_until_it_is_set() {
+        let mut library = crate::Library::starter();
+        let key = library.copy_view_template(&library.view_template("floor-plan-do-100").unwrap().clone());
+        let template = library.view_template_mut(&key).unwrap();
+        let wall = Described { class: "IfcWall".into(), ..Described::default() };
+        let furniture = Described { class: "IfcFurniture".into(), ..Described::default() };
+        let before = (template.look(&wall), template.look(&furniture));
+        let rule = template.add_rule(Names::same("New rule"));
+        assert_eq!((rule.as_str(), template.rules.last().map(|r| r.key.as_str())), ("rule-1", Some("rule-1")));
+        assert_eq!(template.add_rule(Names::same("New rule")), "rule-2");
+        assert!(template.check().is_ok());
+        // an empty rule at the end takes what no rule took and leaves its look: nothing changes
+        assert_eq!((template.look(&wall), template.look(&furniture)), before);
+        // given classes and a look, and moved before the others, it draws those its way
+        let last = template.rules.last_mut().unwrap();
+        last.filter.classes = vec!["IfcFurniture".into()];
+        last.look = Look::hidden();
+        assert_eq!(template.look(&furniture), before.1, "the rule for furnishing is tried sooner");
+        while template.move_rule("rule-2", true) {}
+        assert!(template.look(&furniture).hidden && template.look(&wall) == before.0);
     }
 
 }

@@ -61,6 +61,10 @@ pub struct Library {
     /// source and a date ([`crate::aspect`]). In a file they are attributes on the items' nodes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aspects: Vec<crate::aspect::Aspect>,
+    /// The level of detail its drawings show its materials at ([`crate::detail`]); none: 350,
+    /// their hatches. At 200 what is cut is an outline alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<crate::detail::Detail>,
 }
 
 /// Names made unique: " (2)", " (3)" after a name given before, in order.
@@ -108,7 +112,7 @@ impl Library {
     /// linear types and system types. The steel profiles are a catalogue
     /// ([`profile::steel_profiles`]) a project takes types from, not starter types.
     pub fn starter() -> Self {
-        Self { materials: material::starter(), buildups: buildup::starter(), linear_types: profile::starter(), system_types: system::starter(), codes: nlsfb::starter(), object_types: object::starter(), connection_types: connection::starter(), service_types: service::starter(), cover_types: service::covers(), hatch_standards: standard::starter(), drawing_sets: annotate::starter(), view_templates: template::starter(), aspects: Vec::new() }
+        Self { materials: material::starter(), buildups: buildup::starter(), linear_types: profile::starter(), system_types: system::starter(), codes: nlsfb::starter(), object_types: object::starter(), connection_types: connection::starter(), service_types: service::starter(), cover_types: service::covers(), hatch_standards: standard::starter(), drawing_sets: annotate::starter(), view_templates: template::starter(), aspects: Vec::new(), detail: None }
     }
 
     pub fn material(&self, key: &str) -> Option<&Material> {
@@ -632,6 +636,16 @@ impl Library {
             }
         }
         added
+    }
+
+    /// The level of detail its drawings show at: what it says, else 350.
+    pub fn shown_detail(&self) -> crate::detail::Detail {
+        self.detail.unwrap_or_default()
+    }
+
+    /// Whether a drawing hatches what it cuts: not at a level of detail of 200.
+    pub fn hatches_cuts(&self) -> bool {
+        self.shown_detail().material() == crate::detail::Shown::Hatch
     }
 
     /// The paths of the nodes of its items: what an aspect can be of.

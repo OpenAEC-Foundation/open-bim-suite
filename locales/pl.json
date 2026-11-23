@@ -1815,6 +1815,22 @@
     "☆ Favourite": "☆ Ulubione",
     "Find a type": "Znajdź typ",
     ", a reference price": ", cena orientacyjna",
-    "from its materials": "z jego materiałów"
+    "from its materials": "z jego materiałów",
+    "at the centre": "na środku",
+    "along the element": "wzdłuż elementu",
+    "above": "powyżej",
+    "below": "poniżej",
+    "left": "po lewej",
+    "right": "po prawej",
+    "leader": "linia odniesienia",
+    "on": "włączona",
+    " (off)": " (wyłączona)",
+    "House style of OpenAEC Blueprint (brand.yaml)": "Styl firmowy OpenAEC Blueprint (brand.yaml)",
+    "Take from a file": "Pobierz z pliku",
+    "Save as a file": "Zapisz jako plik",
+    "Level of detail of the project": "Poziom szczegółowości projektu",
+    "design element: the outline alone": "element projektowy: sam obrys",
+    "as it is built: layers, parts and hatches": "tak jak zbudowane: warstwy, części i kreskowania",
+    "everything there is: every part and all the data": "wszystko, co jest: każda część i wszystkie dane"
   }
 }

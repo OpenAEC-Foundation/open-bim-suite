@@ -545,6 +545,10 @@ pub struct SystemType {
     /// How its bays are divided, where not in equal ones (or, slabs, whole from the start).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub division: Option<Division>,
+    /// What a delivery asks of it beside its code ([`crate::ils`]); what is none follows from
+    /// its group and its code.
+    #[serde(default, skip_serializing_if = "crate::ils::Delivery::is_empty")]
+    pub delivery: crate::ils::Delivery,
 }
 
 /// Whether a grid fits members `width` wide: positive bays and rows, wider than the members.
@@ -756,7 +760,7 @@ pub fn starter() -> Vec<SystemType> {
     use Pattern::*;
     use SystemGroup::*;
     let glass = || Panels::new("glass", 0.024);
-    let upright = |id: &str, group, grid, members, panels| SystemType { id: id.into(), group, grid, members, panels, layers: Vec::new(), corners: Corner::Butt, lying: None, code: None, trimmer: None, lintel: None, whole: false, cores: None, division: None };
+    let upright = |id: &str, group, grid, members, panels| SystemType { id: id.into(), group, grid, members, panels, layers: Vec::new(), corners: Corner::Butt, lying: None, code: None, trimmer: None, lintel: None, whole: false, cores: None, division: None, delivery: Default::default() };
     // aluminium and PVC frames are mitred at their corners
     let mitred = |t: SystemType| SystemType { corners: Corner::Mitre, ..t };
     // boards of `material` laid edge to edge, `bay` wide and `row` high; membranes come in rolls

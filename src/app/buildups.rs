@@ -324,7 +324,7 @@ impl App {
         });
         // what a delivery asks of it (BIM basis ILS): said here, or left to its code
         let coded = BuildUp { delivery: Default::default(), ..b.clone() };
-        let delivery = delivery_controls(p, l, coded.load_bearing(&library.materials), coded.is_external(&library.materials), &b.delivery, b.missing(&library.materials), BuildUpMessage::Bearing, BuildUpMessage::External, BuildUpMessage::FireRating);
+        let delivery = delivery_controls(p, l, coded.load_bearing(&library.materials), coded.is_external(&library.materials), &b.delivery, b.missing(&library.materials), true, BuildUpMessage::Bearing, BuildUpMessage::External, BuildUpMessage::FireRating);
         // what is edited, under the drawing of what it makes
         let editor = column![
             layers,
@@ -359,6 +359,8 @@ pub(super) fn delivery_controls<'a, M: Clone + 'a>(
     external: bool,
     delivery: &bim_library::ils::Delivery,
     lacks: Vec<bim_library::ils::Missing>,
+    // (of an object it is not asked whether it bears: that field is then left out)
+    ask_bearing: bool,
     to_bearing: fn(Option<bool>) -> M,
     to_external: fn(Option<bool>) -> M,
     to_rating: fn(String) -> M,
@@ -385,13 +387,8 @@ pub(super) fn delivery_controls<'a, M: Clone + 'a>(
     .align_y(Center);
     let lacks: Vec<&str> = lacks.into_iter().map(|missing| l.text(missing.names().0, missing.names().1)).collect();
     let says = if lacks.is_empty() { l.text("BIM basis ILS: compleet", "BIM basis ILS: complete").to_string() } else { format!("{}: {}", l.text("BIM basis ILS, ontbreekt nog", "BIM basis ILS, still missing"), lacks.join(", ")) };
-    column![
-        asked(l.text("Dragend", "Loadbearing"), yes_no(bears), delivery.load_bearing, to_bearing),
-        asked(l.text("Uitwendig", "External"), yes_no(Some(external)), delivery.is_external, to_external),
-        rating,
-        text(says).size(11).color(p.text_secondary).wrapping(Wrapping::Word),
-    ]
-    .spacing(8)
+    let bearing = ask_bearing.then(|| asked(l.text("Dragend", "Loadbearing"), yes_no(bears), delivery.load_bearing, to_bearing));
+    Column::new().spacing(8).push(bearing).push(asked(l.text("Uitwendig", "External"), yes_no(Some(external)), delivery.is_external, to_external)).push(rating).push(text(says).size(11).color(p.text_secondary).wrapping(Wrapping::Word))
 }
 
 /// What a build-up says of itself for a delivery (none: as its code says), with its name, to pick.

@@ -1815,6 +1815,22 @@
     "☆ Favourite": "☆ Favori",
     "Find a type": "Tip bul",
     ", a reference price": ", bir referans fiyat",
-    "from its materials": "malzemelerinden"
+    "from its materials": "malzemelerinden",
+    "at the centre": "ortada",
+    "along the element": "eleman boyunca",
+    "above": "üstte",
+    "below": "altta",
+    "left": "solda",
+    "right": "sağda",
+    "leader": "kılavuz çizgi",
+    "on": "açık",
+    " (off)": " (kapalı)",
+    "House style of OpenAEC Blueprint (brand.yaml)": "OpenAEC Blueprint kurum stili (brand.yaml)",
+    "Take from a file": "Dosyadan al",
+    "Save as a file": "Dosya olarak kaydet",
+    "Level of detail of the project": "Projenin ayrıntı düzeyi",
+    "design element: the outline alone": "tasarım elemanı: yalnızca dış hat",
+    "as it is built: layers, parts and hatches": "yapıldığı gibi: katmanlar, parçalar ve taramalar",
+    "everything there is: every part and all the data": "var olan her şey: her parça ve tüm veriler"
   }
 }

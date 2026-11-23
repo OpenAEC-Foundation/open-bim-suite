@@ -63,6 +63,12 @@ pub enum ObjectMessage {
     Level(Lod),
     /// Its own NL-SfB code, or its group's (none).
     Coded(Option<String>),
+    /// Whether it is external, said by itself; none: as its code says.
+    External(Option<bool>),
+    /// Typed as its fire rating; empty for none.
+    FireRating(String),
+    /// (Not asked of an object: nothing changes.)
+    Bearing(Option<bool>),
     /// The material it is of, or none.
     Made(Option<String>),
     /// A property more, to be named.
@@ -298,6 +304,11 @@ impl App {
             }
             ObjectMessage::Level(lod) => self.object_change(|object| object.lod = lod),
             ObjectMessage::Coded(code) => self.object_change(|object| object.code = code),
+            ObjectMessage::External(external) => self.object_change(|object| object.delivery.is_external = external),
+            ObjectMessage::FireRating(typed) => {
+                self.object_change(|object| object.delivery.fire_rating = Some(typed.trim().to_string()).filter(|rating| !rating.is_empty()));
+            }
+            ObjectMessage::Bearing(_) => {}
             ObjectMessage::Made(material) => self.object_change(|object| object.material = material),
             ObjectMessage::AddProperty => self.object_change(|object| object.properties.push((String::new(), String::new()))),
             ObjectMessage::RemoveProperty(at) => self.object_change(|object| {
@@ -336,6 +347,11 @@ impl App {
         let level = pick_list(Lod::ALL.map(Level), Some(Level(object.lod)), |level: Level| ObjectMessage::Level(level.0)).text_size(12).padding([2, 6]).width(Fill);
         fields = fields.push(field(p, "LOD".to_string(), a11y::named(level, Aria::ComboBox, "LOD")));
         fields = fields.push(super::codes::picker(p, l, library, object.group.code(), object.code.as_deref(), ObjectMessage::Coded));
+        // what a delivery asks of what stands in or closes an opening (BIM basis ILS)
+        if !object.delivery_properties().is_empty() {
+            let coded = ObjectType { delivery: Default::default(), ..object.clone() };
+            fields = fields.push(super::buildups::delivery_controls(p, l, None, coded.is_external(), &object.delivery, object.missing(), false, ObjectMessage::Bearing, ObjectMessage::External, ObjectMessage::FireRating));
+        }
         let material = l.text("Materiaal", "Material");
         let none = Made { key: None, label: l.text("geen", "none").to_string() };
         let made: Vec<Made> = std::iter::once(none).chain(library.materials.iter().map(|m| Made { key: Some(m.key.clone()), label: m.name(lang).to_string() })).collect();
@@ -561,4 +577,29 @@ mod tests {
         assert!(!at(Lod::L350).is_empty());
         assert_eq!(app.lod_tiles(app.theme.palette(), l, library, Lod::L200).len(), counts[0]);
     }
+    #[test]
+    fn a_door_says_whether_it_is_external_and_its_fire_rating_in_its_editor() {
+        let mut app = App::default();
+        let l = Language::English;
+        let id = app.library.object_types.iter().find(|t| t.group == ObjectGroup::Door).unwrap().id.clone();
+        app.object_update(ObjectMessage::Pick(id.clone()));
+        let of = |app: &App| app.library.object_type(&id).unwrap().clone();
+        app.object_update(ObjectMessage::External(Some(true)));
+        app.object_update(ObjectMessage::FireRating(" EW 30 ".into()));
+        app.object_update(ObjectMessage::Bearing(Some(true)));
+        let door = of(&app);
+        assert_eq!((door.is_external(), door.delivery.fire_rating.as_deref(), door.delivery.load_bearing), (true, Some("EW 30"), None));
+        {
+            let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 1600.0), app.object_editor(app.theme.palette(), l, &door));
+            assert!(pane.find("External").is_ok() && pane.find("Fire rating").is_ok() && pane.find("Loadbearing").is_err());
+        }
+        app.object_update(ObjectMessage::External(None));
+        app.object_update(ObjectMessage::FireRating("".into()));
+        assert!(of(&app).delivery.is_empty());
+        // a fitting has no such fields
+        let basin = app.library.object_types.iter().find(|t| t.group == ObjectGroup::Sanitary).unwrap().clone();
+        let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 1600.0), app.object_editor(app.theme.palette(), l, &basin));
+        assert!(pane.find("Fire rating").is_err());
+    }
+
 }
