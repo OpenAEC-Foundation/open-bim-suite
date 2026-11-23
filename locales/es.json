@@ -1818,6 +1818,10 @@
     " (off)": " (desactivada)",
     "House style of OpenAEC Blueprint (brand.yaml)": "Estilo de la casa de OpenAEC Blueprint (brand.yaml)",
     "Take from a file": "Tomar de un archivo",
-    "Save as a file": "Guardar como archivo"
+    "Save as a file": "Guardar como archivo",
+    "Level of detail of the project": "Nivel de detalle del proyecto",
+    "design element: the outline alone": "elemento de diseño: solo el contorno",
+    "as it is built: layers, parts and hatches": "tal como se construye: capas, piezas y rayados",
+    "everything there is: every part and all the data": "todo lo que hay: cada pieza y todos los datos"
   }
 }

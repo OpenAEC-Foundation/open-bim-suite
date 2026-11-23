@@ -44,6 +44,8 @@ use serde_json::{json, Map, Value};
 
 /// The attribute of a material node with the library's own data.
 pub const MATERIAL: &str = "openaec::material";
+/// The attribute of the node that says the level of detail a library's drawings show at.
+pub const DETAIL: &str = "openaec::detail";
 /// The attribute of a type node with its build-up.
 pub const BUILDUP: &str = "openaec::buildup";
 /// The attribute of a type node with its linear type.
@@ -204,6 +206,10 @@ pub fn nodes(library: &Library) -> Vec<Value> {
     nodes.extend(library.codes.iter().map(nlsfb::code_node));
     nodes.extend(library.drawing_sets.iter().map(crate::annotate::node));
     nodes.extend(library.view_templates.iter().map(crate::template::node));
+    // the level of detail its drawings show at, where it says one: a node of its own
+    if let Some(detail) = library.detail {
+        nodes.push(json!({"path": uuid("openaec-library/detail"), "attributes": {"bsi::ifc::prop::Name": "Level of detail", DETAIL: detail}}));
+    }
     // the aspects last: each a node with its item's path, composed onto the item's own
     nodes.extend(library.aspects.iter().map(crate::aspect::Aspect::node));
     nodes
@@ -256,6 +262,9 @@ pub fn read(file: &Value) -> Result<Library, LibraryError> {
     let mut aspects: Vec<crate::aspect::Aspect> = Vec::new();
     for path in order {
         let attributes = &composed[path];
+        if let Some(detail) = attributes.get(DETAIL) {
+            library.detail = serde_json::from_value(detail.clone()).ok();
+        }
         for (name, value) in attributes {
             if let Some(kind) = crate::aspect::Kind::of_attribute(name) {
                 aspects.push(crate::aspect::Aspect::read(path, kind, value)?);

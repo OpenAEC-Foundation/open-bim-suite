@@ -127,6 +127,16 @@ pub fn price_read(typed: &[String; 11], unit: bim_library::cost::Unit, verified:
     Ok((cost, bim_library::aspect::Origin { source: text(Price::Source), date: text(Price::Date), region: Some(text(Price::Region)).filter(|r| !r.is_empty()) }))
 }
 
+/// A level of detail with what it shows, to pick.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DetailChoice(pub bim_library::detail::Detail, String);
+
+impl std::fmt::Display for DetailChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.1)
+    }
+}
+
 /// A strength class to pick for a material's grade, shown with its family.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClassChoice {
@@ -164,6 +174,8 @@ impl std::fmt::Display for UnitChoice {
 
 #[derive(Debug, Clone)]
 pub enum MaterialMessage {
+    /// The level of detail the project's drawings show its materials at.
+    Detail(bim_library::detail::Detail),
     /// Typed as a part of its price, or as where the price is from.
     Priced(Price, String),
     /// The unit its price is per.
@@ -523,6 +535,10 @@ impl App {
                     show = false;
                 }
             }
+            MaterialMessage::Detail(detail) => {
+                changed = self.library.shown_detail() != detail;
+                self.library.detail = Some(detail);
+            }
             MaterialMessage::Standard(key) => {
                 changed = self.library.hatch_standard().is_some_and(|s| s.key != key) && self.library.choose_hatch_standard(&key);
                 (self.material_view.from, self.material_view.standard) = (None, None);
@@ -754,6 +770,12 @@ impl App {
         let pick = pick_list(standards, now, |c: StandardChoice| MaterialMessage::Standard(c.key)).text_size(12).padding([2, 6]).width(Fill);
         let more_label = l.text("+ Standaard", "+ Standard");
         let more = a11y::named(button(text(more_label).size(12).color(p.text_secondary)).padding([3, 8]).style(move |_, s| p.row_button(s)).on_press(MaterialMessage::AddStandard), Aria::Button, more_label);
+        // the level of detail the project's drawings show at: at 200 a cut is an outline alone
+        let levels: Vec<DetailChoice> = bim_library::detail::Detail::ALL.map(|d| DetailChoice(d, format!("{} · {}", d.name(), l.text(d.says().0, d.says().1)))).to_vec();
+        let now = levels.iter().find(|c| c.0 == library.shown_detail()).cloned();
+        let level_name = l.text("Detailniveau van het project", "Level of detail of the project");
+        let level = pick_list(levels, now, |c: DetailChoice| MaterialMessage::Detail(c.0)).text_size(12).padding([2, 6]).width(Fill);
+        fields = fields.push(caption(level_name)).push(a11y::named(level, Aria::ComboBox, level_name));
         fields = fields.push(caption(l.text("Arcering volgens standaard", "Hatch by standard"))).push(labelled(p, standard_name, a11y::named(pick, Aria::ComboBox, standard_name))).push(row![Space::new().width(Fill), more]);
         if let Some(standard) = chosen {
             if !given(standard) {
@@ -975,6 +997,24 @@ mod tests {
         assert_eq!(price_of(&app.library, "timber").0[Price::Labour.at()], "12.5");
         let _ = app.material_update(MaterialMessage::PriceRemove);
         assert_eq!((cost(&app), app.material_view.price.clone(), price_of(&app.library, "timber").0[Price::Currency.at()].as_str()), (None, None, "EUR"));
+    }
+
+    #[test]
+    fn the_project_says_the_level_of_detail_its_drawings_show_at() {
+        use bim_library::detail::Detail;
+        let mut app = App::default();
+        let _ = app.material_update(MaterialMessage::Pick("timber".into()));
+        let timber = app.library.material("timber").unwrap().clone();
+        let hatched = |app: &App| crate::hatching::cut_pattern(&app.library, &timber).is_some_and(|p| !p.grids.is_empty() || p.fill.is_some() || p.solid);
+        assert!(hatched(&app) && app.library.shown_detail() == Detail::D350);
+        let _ = app.material_update(MaterialMessage::Detail(Detail::D200));
+        assert!(!hatched(&app) && app.library.detail == Some(Detail::D200));
+        {
+            let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 2600.0), app.material_pane(app.theme.palette(), Language::English));
+            assert!(pane.find("Level of detail of the project").is_ok());
+        }
+        let _ = app.material_update(MaterialMessage::Detail(Detail::D500));
+        assert!(hatched(&app));
     }
 
     #[test]

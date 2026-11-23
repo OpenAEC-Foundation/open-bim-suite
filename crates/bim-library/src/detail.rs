@@ -14,9 +14,11 @@
 //!
 //! The definitions are in `docs/library/levels-of-detail.md`.
 //!
-//! Not yet: a view or a phase does not choose a level, so a drawing shows every element as it
-//! did; linear types, system types and objects are the same at every level; views per level
-//! drawn by hand.
+//! A library says the level its drawings show at ([`crate::Library::detail`]): at 200 what is cut
+//! through one of its materials is an outline alone, without a hatch.
+//!
+//! Not yet: a view or a phase does not choose a level of its own; linear types, system types and
+//! objects are the same at every level; views per level drawn by hand.
 
 use crate::buildup::BuildUp;
 use crate::lod::Lod;
@@ -213,4 +215,21 @@ mod tests {
             assert!(counts[0] == 1 && counts[0] < counts[1] && counts[1] < counts[2], "{}: {counts:?}", m.key);
         }
     }
+    #[test]
+    fn a_library_says_the_level_its_drawings_show_at() {
+        let mut library = Library::starter();
+        assert_eq!((library.detail, library.shown_detail(), library.hatches_cuts()), (None, Detail::D350, true));
+        library.detail = Some(Detail::D200);
+        assert!(!library.hatches_cuts());
+        library.detail = Some(Detail::D500);
+        assert!(library.hatches_cuts());
+        // kept in the library's file where it is said
+        let nodes = |library: &Library| crate::ifcx::nodes(library).len();
+        assert_eq!(nodes(&library), nodes(&Library::starter()) + 1);
+        let file = crate::ifcx::file(&library, "test", "test", "2026-11-23T00:00:00Z");
+        assert_eq!(crate::ifcx::read(&file).unwrap().detail, Some(Detail::D500));
+        let plain = crate::ifcx::file(&Library::starter(), "test", "test", "2026-11-23T00:00:00Z");
+        assert_eq!(crate::ifcx::read(&plain).unwrap().detail, None);
+    }
+
 }
