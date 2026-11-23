@@ -1764,6 +1764,12 @@
     "hatched where cut": "schraffiert, wo geschnitten",
     "Remove the view template": "Ansichtsvorlage entfernen",
     "as the library chooses": "wie die Bibliothek wählt",
-    "Hatches by": "Schraffuren nach"
+    "Hatches by": "Schraffuren nach",
+    "Density ρ (kg/m³)": "Dichte ρ (kg/m³)",
+    "Conductivity λ (W/mK)": "Wärmeleitfähigkeit λ (W/mK)",
+    "Specific heat c (J/kgK)": "Spezifische Wärme c (J/kgK)",
+    "Vapour resistance μ": "Dampfdiffusionswiderstand μ",
+    "Fire class": "Brandklasse",
+    "the layers alone": "nur die Schichten"
   }
 }

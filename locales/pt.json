@@ -1764,6 +1764,12 @@
     "hatched where cut": "tracejado onde é cortado",
     "Remove the view template": "Remover o modelo de vista",
     "as the library chooses": "como a biblioteca escolhe",
-    "Hatches by": "Tramas segundo"
+    "Hatches by": "Tramas segundo",
+    "Density ρ (kg/m³)": "Densidade ρ (kg/m³)",
+    "Conductivity λ (W/mK)": "Condutibilidade λ (W/mK)",
+    "Specific heat c (J/kgK)": "Calor específico c (J/kgK)",
+    "Vapour resistance μ": "Resistência ao vapor μ",
+    "Fire class": "Classe de fogo",
+    "the layers alone": "só as camadas"
   }
 }

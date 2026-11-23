@@ -26,8 +26,53 @@ use iced::{Center, Color, Element, Fill, Length, Task};
 use openaec_ui::design::a11y::{self, Role as Aria};
 use openaec_ui::Language;
 
+/// A property of the picked material that is typed: its physics, and where they are from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Prop {
+    Density,
+    Conductivity,
+    SpecificHeat,
+    Vapour,
+    Fire,
+    Source,
+    Date,
+}
+
+impl Prop {
+    pub const ALL: [Prop; 7] = [Prop::Density, Prop::Conductivity, Prop::SpecificHeat, Prop::Vapour, Prop::Fire, Prop::Source, Prop::Date];
+
+    fn at(self) -> usize {
+        Prop::ALL.iter().position(|p| *p == self).unwrap_or(0)
+    }
+}
+
+/// The physics of a material as its fields show them: each value as text, empty where open.
+pub fn props_of(library: &Library, key: &str) -> [String; 7] {
+    let number = |v: Option<f64>| v.map_or(String::new(), |v| v.to_string());
+    match library.physics(key) {
+        Some((p, origin)) => [number(p.density), number(p.conductivity), number(p.specific_heat), number(p.vapour_resistance), p.fire_class.unwrap_or_default(), origin.source.clone(), origin.date.clone()],
+        None => Default::default(),
+    }
+}
+
+/// The physics the fields say, with where they are from; why not when a field is no value.
+pub fn props_read(typed: &[String; 7]) -> Result<(bim_library::physics::Physics, bim_library::aspect::Origin), &'static str> {
+    let number = |at: Prop| -> Result<Option<f64>, &'static str> {
+        let text = typed[at.at()].trim().replace(',', ".");
+        if text.is_empty() {
+            return Ok(None);
+        }
+        text.parse::<f64>().map(Some).map_err(|_| "a number")
+    };
+    let fire = Some(typed[Prop::Fire.at()].trim().to_string()).filter(|class| !class.is_empty());
+    let physics = bim_library::physics::Physics { density: number(Prop::Density)?, conductivity: number(Prop::Conductivity)?, specific_heat: number(Prop::SpecificHeat)?, vapour_resistance: number(Prop::Vapour)?, fire_class: fire };
+    Ok((physics, bim_library::aspect::Origin { source: typed[Prop::Source.at()].trim().to_string(), date: typed[Prop::Date.at()].trim().to_string(), region: None }))
+}
+
 #[derive(Debug, Clone)]
 pub enum MaterialMessage {
+    /// Typed as a property of its physics, or as their source or their date.
+    Property(Prop, String),
     /// Edit this material of the project.
     Pick(String),
     /// A material more, to be named.
@@ -82,6 +127,9 @@ pub struct MaterialView {
     pub from: Option<String>,
     /// The name of the chosen hatch standard, as it is being typed.
     pub standard: Option<String>,
+    /// Its physics as they are being typed, and why they are not taken yet.
+    pub props: Option<[String; 7]>,
+    pub props_refused: Option<String>,
 }
 
 /// A colour as it is typed: "#b9b9b9".
@@ -331,6 +379,19 @@ impl App {
                     self.follow_material(key);
                 }
             }
+            MaterialMessage::Property(prop, typed) => {
+                if let Some(key) = picked.as_deref() {
+                    let mut fields = self.material_view.props.clone().unwrap_or_else(|| props_of(&self.library, key));
+                    fields[prop.at()] = typed;
+                    // taken when the fields make physics with a source and a date; else they stay as typed
+                    let taken = props_read(&fields).map_err(str::to_string).and_then(|(physics, origin)| self.library.set_physics(key, &physics, origin).map_err(|why| why.to_string()));
+                    self.material_view.props_refused = taken.err();
+                    self.material_view.props = Some(fields);
+                    changed = self.material_view.props_refused.is_none();
+                    // (physics change no drawing)
+                    show = false;
+                }
+            }
             MaterialMessage::Standard(key) => {
                 changed = self.library.hatch_standard().is_some_and(|s| s.key != key) && self.library.choose_hatch_standard(&key);
                 (self.material_view.from, self.material_view.standard) = (None, None);
@@ -484,6 +545,24 @@ impl App {
                 fields = fields.push(text(l.text("Geen sterkteklasse van een norm: er zijn geen waarden bij.", "No strength class of a standard: it has no values.")).size(11).color(p.text_secondary).wrapping(Wrapping::Word));
             }
             None => {}
+        }
+        // its physics, with where they are from: taken once they have a source and a date
+        let props = view.props.clone().unwrap_or_else(|| props_of(library, &m.key));
+        fields = fields.push(caption(l.text("Bouwfysica", "Physics")));
+        for (prop, label, hint) in [
+            (Prop::Density, l.text("Dichtheid ρ (kg/m³)", "Density ρ (kg/m³)"), "2400"),
+            (Prop::Conductivity, l.text("Warmtegeleiding λ (W/mK)", "Conductivity λ (W/mK)"), "0.035"),
+            (Prop::SpecificHeat, l.text("Soortelijke warmte c (J/kgK)", "Specific heat c (J/kgK)"), "1030"),
+            (Prop::Vapour, l.text("Dampdiffusieweerstand μ", "Vapour resistance μ"), "1"),
+            (Prop::Fire, l.text("Brandklasse", "Fire class"), "A2-s1,d0"),
+            (Prop::Source, l.text("Bron", "Source"), ""),
+            (Prop::Date, l.text("Datum", "Date"), "2026-11-23"),
+        ] {
+            let input = text_input(hint, &props[prop.at()]).on_input(move |typed| MaterialMessage::Property(prop, typed)).size(12).padding([2, 6]);
+            fields = fields.push(labelled(p, label, a11y::named(input, Aria::TextField, label)));
+        }
+        if let Some(why) = &view.props_refused {
+            fields = fields.push(text(format!("{} ({why})", l.text("Niet overgenomen.", "Not taken."))).size(11).color(p.accent).wrapping(Wrapping::Word));
         }
         // its own hatch of the catalogue: the sign of its kind of material, in its colour
         let own_hatch = l.text("Eigen arcering", "Hatch of its own");
@@ -663,6 +742,34 @@ mod tests {
     fn a_scale_is_typed_with_or_without_its_one() {
         assert_eq!((scale_of("100"), scale_of("1:50"), scale_of(" 1 : 200 "), scale_of(""), scale_of("12,5")), (Some(100.0), Some(50.0), Some(200.0), Some(0.0), Some(12.5)));
         assert_eq!((scale_of("-5"), scale_of("x"), scale_of("1:")), (None, None, None));
+    }
+
+    #[test]
+    fn the_physics_of_a_material_are_typed_and_taken_with_a_source_and_a_date() {
+        let mut app = App::default();
+        let _ = app.material_update(MaterialMessage::Pick("timber".into()));
+        let physics = |app: &App| app.library.physics("timber").map(|(p, o)| (p.conductivity, p.density, p.fire_class, o.source.clone(), o.date.clone()));
+        // a value alone is not taken: it needs a source and a date, and the pane says so
+        let _ = app.material_update(MaterialMessage::Property(Prop::Conductivity, "0,13".into()));
+        assert_eq!((physics(&app), app.material_view.props_refused.is_some()), (None, true));
+        {
+            let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 1600.0), app.material_pane(app.theme.palette(), Language::English));
+            assert!(pane.find("Physics").is_ok() && pane.find("Conductivity λ (W/mK)").is_ok() && pane.find("Fire class").is_ok() && pane.find("Not taken. (Not an aspect: it needs a source.)").is_ok());
+        }
+        let _ = app.material_update(MaterialMessage::Property(Prop::Source, "the maker".into()));
+        assert!(app.material_view.props_refused.is_some());
+        let _ = app.material_update(MaterialMessage::Property(Prop::Date, "2026-11-23".into()));
+        assert_eq!((physics(&app), app.material_view.props_refused.clone()), (Some((Some(0.13), None, None, "the maker".to_string(), "2026-11-23".to_string())), None));
+        // more values; what is no value stays in its field and what was taken stays
+        let _ = app.material_update(MaterialMessage::Property(Prop::Density, "460".into()));
+        let _ = app.material_update(MaterialMessage::Property(Prop::Fire, "D-s2,d0".into()));
+        let _ = app.material_update(MaterialMessage::Property(Prop::Fire, "Z".into()));
+        let _ = app.material_update(MaterialMessage::Property(Prop::Density, "heavy".into()));
+        assert_eq!(physics(&app).map(|p| (p.1, p.2)), Some((Some(460.0), Some("D-s2,d0".to_string()))));
+        assert_eq!((app.material_view.props.as_ref().map(|f| f[Prop::Density.at()].as_str()), app.material_view.props_refused.is_some()), (Some("heavy"), true));
+        // another material shows its own fields
+        let _ = app.material_update(MaterialMessage::Pick("steel".into()));
+        assert_eq!((app.material_view.props.clone(), props_of(&app.library, "steel"), props_of(&app.library, "timber")[1].as_str()), (None, Default::default(), "0.13"));
     }
 
     #[test]

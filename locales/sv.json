@@ -1764,6 +1764,12 @@
     "hatched where cut": "skrafferad där den skärs",
     "Remove the view template": "Ta bort vymallen",
     "as the library chooses": "som biblioteket väljer",
-    "Hatches by": "Skrafferingar enligt"
+    "Hatches by": "Skrafferingar enligt",
+    "Density ρ (kg/m³)": "Densitet ρ (kg/m³)",
+    "Conductivity λ (W/mK)": "Värmeledningsförmåga λ (W/mK)",
+    "Specific heat c (J/kgK)": "Specifik värme c (J/kgK)",
+    "Vapour resistance μ": "Ångmotstånd μ",
+    "Fire class": "Brandklass",
+    "the layers alone": "endast skikten"
   }
 }

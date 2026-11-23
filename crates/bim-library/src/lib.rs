@@ -42,6 +42,7 @@ pub mod material;
 pub mod nlsfb;
 pub mod object;
 pub mod ocondat;
+pub mod physics;
 pub mod profile;
 pub mod remote;
 pub mod service;

@@ -1764,6 +1764,12 @@
     "hatched where cut": "kreskowane w miejscu przekroju",
     "Remove the view template": "Usuń szablon widoku",
     "as the library chooses": "tak jak wybiera biblioteka",
-    "Hatches by": "Kreskowania według"
+    "Hatches by": "Kreskowania według",
+    "Density ρ (kg/m³)": "Gęstość ρ (kg/m³)",
+    "Conductivity λ (W/mK)": "Przewodność λ (W/mK)",
+    "Specific heat c (J/kgK)": "Ciepło właściwe c (J/kgK)",
+    "Vapour resistance μ": "Opór dyfuzyjny μ",
+    "Fire class": "Klasa ogniowa",
+    "the layers alone": "same warstwy"
   }
 }

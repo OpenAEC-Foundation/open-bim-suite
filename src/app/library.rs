@@ -459,6 +459,10 @@ pub(super) fn buildup_detail<'a>(p: Palette, l: Language, lib: &Library, b: &Bui
     }
     let class = b.role.ifc_type_class();
     list = list.push(small(format!("{} mm · {class} {}", mm(total, l), b.role.predefined_type()), p));
+    // the thermal resistance of its layers together, once each of its materials says how it conducts
+    if let Some(r) = lib.resistance(b) {
+        list = list.push(small(format!("R {r:.2} m²K/W ({})", l.text("alleen de lagen", "the layers alone")), p));
+    }
     column![canvas_widget(Section { bands, depth: total, line: p.text, plain: false }).width(Fill).height(height), list, buildup_levels(p, l, lib, b)].spacing(6).into()
 }
 

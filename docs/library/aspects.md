@@ -32,7 +32,7 @@ issue 314.
 | Costs | `openaec::aspect::cost` | A price per unit, split into material, labour, equipment, subcontractor and other; a currency; the index on its day | An office's own prices and offers; Open Calc Studio's catalogues. No open price list was found to pass on | **Built** (the shape; no prices) |
 | Strength | (on the material: `openaec::strengthclass`) | The values of a strength class with their standard | The Eurocodes' formulae; the Normenatlas once it has values | **Built** (issue 313), not as an aspect: it follows from the grade |
 | Environment | `openaec::aspect::environment` | Indicators per unit over the life cycle | EPDs of makers; national databases. Which of them may be passed on is **not checked** | Frame only |
-| Physics | `openaec::aspect::physics` | Thermal conductivity, vapour resistance, density, sound, fire class | Makers' declarations; design values of standards (to be computed or cited, not copied) | Frame only |
+| Physics | `openaec::aspect::physics` | Density, thermal conductivity, specific heat, vapour resistance factor, reaction to fire class (`bim_library::physics::Physics`) | Makers' declarations; design values of standards (to be computed or cited, not copied) | **Built** (the shape and an editor on a material; no values). Not yet: sound |
 | Planning | `openaec::aspect::planning` | Production rates: hours per unit, crew | An office's own norms; Open Planner Studio | Frame only |
 | Maintenance | `openaec::aspect::maintenance` | Life span, cycle of upkeep | An office's own data; standards for condition (to be cited) | Frame only |
 | Maker | `openaec::aspect::maker` | Article number, GTIN, a link | The maker | Frame only |
@@ -62,7 +62,8 @@ price, the region (it writes one but does not read it) and the index.
 
 ## Not yet
 
-- No prices are in the library, and the app has no editor for an aspect: one comes from a file.
+- No prices and no physical values are in the library. The physics of a material are typed in
+  the material editor; costs and the other kinds have no editor: they come from a file.
 - VAT is not recorded; labour is a price, not hours at a rate.
 - The IFCX tab's aspects (issue 216) do not show these yet.
 - A type that gets another id when a library is merged leaves its aspects behind.
