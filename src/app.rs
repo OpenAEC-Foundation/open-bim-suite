@@ -380,6 +380,9 @@ pub struct App {
     pub note_text: String,
     /// What is picked on the view shown in its tab: a dimension or a text.
     pub mark_pick: Option<marks::MarkPick>,
+    /// The lines drawn on the view picked beside `mark_pick` (a box drawn over several): they
+    /// count only while that one is a line (see `App::lines_picked`).
+    pub more_marks: Vec<usize>,
     /// Groups of layers opened in the explorer (closed by default).
     pub open_layer_groups: HashSet<String>,
     /// Sheets open in a document tab, in tab order, and the one shown in the workspace.
@@ -1154,6 +1157,7 @@ impl Default for App {
             draw_tool: None,
             note_text: String::new(),
             mark_pick: None,
+            more_marks: Vec::new(),
             open_layer_groups: HashSet::new(),
             open_sheets: Vec::new(),
             active_sheet: None,
@@ -2836,9 +2840,9 @@ impl App {
                     // in the sketch of a floor: the picked line goes
                 } else if self.modeller.edit.is_some() {
                     // in edit mode Delete takes nothing: the element stays
-                } else if self.delete_modelled() | self.delete_picked_grid() {
-                    // modelled elements selected and the picked grid lines of the modelled
-                    // project: they go
+                } else if self.delete_modelled() | self.delete_picked_grid() | self.remove_lines_picked() {
+                    // modelled elements selected, the picked grid lines of the modelled project
+                    // and the picked lines drawn on the view: they go
                 } else if self.active_doc_sheet.is_some() {
                     if self.sheet_pick.is_some() {
                         self.remove_picked();
@@ -3646,6 +3650,16 @@ impl App {
         self.sel.extend(items);
         self.selection_changed();
         self.set_picked_grids(grids);
+        // and the lines and shapes drawn on the view shown
+        let mut lines = if add { self.lines_picked() } else { Vec::new() };
+        for k in self.lines_in_box(rect, width, height) {
+            if !lines.contains(&k) {
+                lines.push(k);
+            }
+        }
+        if !lines.is_empty() || !add {
+            self.set_lines_picked(lines);
+        }
     }
 
     /// What is shown now, for undo.
@@ -4903,7 +4917,7 @@ impl App {
             item(l.text("Laag selecteren", "Select layer"), "", MenuItem::SelectLayer, !self.sel.is_empty()),
             item(l.text("Selectie opheffen", "Clear selection"), "Esc", MenuItem::ClearSelection, selected),
             rule::horizontal(1),
-            item(l.text("Verwijderen", "Delete"), "Del", MenuItem::Delete, self.modeller.in_modeller && (!self.selected_modelled().is_empty() || !self.picked_modelled_grids().is_empty())),
+            item(l.text("Verwijderen", "Delete"), "Del", MenuItem::Delete, self.modeller.in_modeller && (!self.selected_modelled().is_empty() || !self.picked_modelled_grids().is_empty() || self.mark_pick.is_some())),
             rule::horizontal(1),
             item(l.text("Ongedaan maken", "Undo"), Shortcut::ctrl('z').label(), MenuItem::Undo, self.can_undo()),
         ]

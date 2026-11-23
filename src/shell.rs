@@ -1456,7 +1456,7 @@ impl Studio {
                 .enabled(app.wants_tab()),
             Command::new("model.delete", l.text("Verwijderen", "Delete"), go(Message::DeletePicked))
                 .icon(small("edit.delete"), large("edit.delete"))
-                .enabled(!app.selected_modelled().is_empty() || !app.picked_modelled_grids().is_empty()),
+                .enabled(!app.selected_modelled().is_empty() || !app.picked_modelled_grids().is_empty() || app.mark_pick.is_some()),
         ];
         // in an environment with Blender (the web app): a render of the file opened from Docs
         #[cfg(target_arch = "wasm32")]

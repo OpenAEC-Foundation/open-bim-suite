@@ -330,6 +330,7 @@ impl App {
             sections: if is_plan { self.document.sections().iter().map(|s| (s.mark(), s.from, s.to)).collect() } else { Vec::new() },
             word: l.text("Doorsnede", "Section"),
             pick: self.mark_pick,
+            more: self.lines_picked(),
             palette: p,
             on_paper: self.drawing_on_paper,
             // on paper the view draws its grid lines and levels itself; over the model the
@@ -453,9 +454,81 @@ impl App {
         Some(container(rows).padding([2, 8]).into())
     }
 
+    /// The lines drawn on the view shown that are picked, each shape by its first line: the one
+    /// picked by a click, and those a selection box took with it.
+    pub(crate) fn lines_picked(&self) -> Vec<usize> {
+        let (Some(view), Some(MarkPick::Line(first))) = (self.shown_view(), self.mark_pick) else { return Vec::new() };
+        let own = self.document.view_lines(view).len();
+        let mut picked: Vec<usize> = Vec::new();
+        for k in std::iter::once(first).chain(self.more_marks.iter().copied()).filter(|k| *k < own) {
+            let start = self.document.shape_of(view, k).0.start;
+            if !picked.contains(&start) {
+                picked.push(start);
+            }
+        }
+        picked
+    }
+
+    /// Picks lines `lines` drawn on the view shown (none: lets a picked line go).
+    pub(crate) fn set_lines_picked(&mut self, lines: Vec<usize>) {
+        if lines.is_empty() {
+            if matches!(self.mark_pick, Some(MarkPick::Line(_))) {
+                self.mark_pick = None;
+            }
+            self.more_marks.clear();
+            return;
+        }
+        self.mark_pick = Some(MarkPick::Line(lines[0]));
+        self.more_marks = lines[1..].to_vec();
+    }
+
+    /// The lines and shapes drawn on the view shown that a selection box takes, each by its first
+    /// line: drawn to the right those that lie in it whole, to the left those it touches too.
+    pub(crate) fn lines_in_box(&self, rect: (glam::Vec2, glam::Vec2), width: f32, height: f32) -> Vec<usize> {
+        let Some(marks) = self.marks_layer(self.theme.palette(), crate::app::standalone_language()) else { return Vec::new() };
+        let screen = marks.screen(Rectangle::new(Point::ORIGIN, Size::new(width.max(1.0), height.max(1.0))));
+        let (lo, hi) = (rect.0.min(rect.1), rect.0.max(rect.1));
+        let touching = rect.1.x < rect.0.x;
+        let inside = |p: Point| p.x >= lo.x && p.x <= hi.x && p.y >= lo.y && p.y <= hi.y;
+        let corners = [Point::new(lo.x, lo.y), Point::new(hi.x, lo.y), Point::new(hi.x, hi.y), Point::new(lo.x, hi.y)];
+        let crosses = |a: Point, b: Point, c: Point, d: Point| {
+            let side = |p: Point, q: Point, r: Point| (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+            side(a, b, c) * side(a, b, d) <= 0.0 && side(c, d, a) * side(c, d, b) <= 0.0
+        };
+        let own = marks.own_lines.min(marks.lines.len());
+        let mut taken = Vec::new();
+        let mut k = 0;
+        while k < own {
+            let run = marks.run_of(k);
+            let ends: Vec<(Point, Point)> = marks.lines[run.start..run.end.min(own)].iter().filter_map(|g| marks.px(&screen, g[0]).zip(marks.px(&screen, g[1]))).collect();
+            let whole = !ends.is_empty() && ends.len() == run.len() && ends.iter().all(|(a, b)| inside(*a) && inside(*b));
+            let touched = ends.iter().any(|(a, b)| inside(*a) || inside(*b) || (0..4).any(|c| crosses(*a, *b, corners[c], corners[(c + 1) % 4])));
+            if whole || (touching && touched) {
+                taken.push(run.start);
+            }
+            k = run.end.max(k + 1);
+        }
+        taken
+    }
+
+    /// Removes the lines and shapes drawn on the view shown that are picked. False when none is.
+    pub(crate) fn remove_lines_picked(&mut self) -> bool {
+        let mut lines = self.lines_picked();
+        let Some(view) = self.shown_view().map(str::to_string).filter(|_| !lines.is_empty() && self.active_doc_sheet.is_none()) else { return false };
+        // from the last on, so the others keep their place
+        lines.sort_unstable();
+        for k in lines.into_iter().rev() {
+            self.document.remove_view_line(&view, k);
+        }
+        self.mark_pick = None;
+        self.more_marks.clear();
+        true
+    }
+
     /// Picks a dimension or text of the view shown; a picked text's wording can then be edited.
     pub(super) fn pick_mark(&mut self, pick: Option<MarkPick>) {
         self.mark_pick = pick;
+        self.more_marks.clear();
         self.modeller.dimension_value = None;
         if let (Some(MarkPick::Note(k)), Some(view)) = (pick, self.shown_view()) {
             if let Some(note) = self.document.view_notes(view).and_then(|n| n.get(k)) {
@@ -671,6 +744,8 @@ pub(super) struct ViewMarks {
     datums: Vec<crate::drawing2d::Datum2>,
     /// The elements selected: what the view cuts of them shows as a whole in the accent colour.
     selected: Vec<u64>,
+    /// The lines picked beside `pick`, each shape by its first line.
+    more: Vec<usize>,
     /// The drawing tool that is on.
     drawing: Option<DrawKind>,
     /// How many of `lines` are the view's own (the first ones): those can be picked.
@@ -1314,7 +1389,8 @@ impl canvas::Program<Message> for ViewMarks {
                 }
             })
         };
-        if let Some(MarkPick::Line(k)) = self.pick.filter(|pick| matches!(pick, MarkPick::Line(k) if *k < self.own_lines.min(self.lines.len()))) {
+        let first = self.pick.and_then(|pick| if let MarkPick::Line(k) = pick { Some(k) } else { None });
+        for k in first.into_iter().chain(self.more.iter().copied().filter(|k| Some(*k) != first)).filter(|k| *k < self.own_lines.min(self.lines.len())) {
             let run = self.run_of(k);
             frame.stroke(&through(&self.lines[run.start..run.end.min(self.lines.len())]), Stroke::default().with_color(p.accent).with_width(2.5));
         }
@@ -1740,6 +1816,40 @@ mod tests {
         assert_eq!(snap([32.7, 10.0], Some([32.7, 14.0])), Some(([32.7, 10.0], Osnap::Square)));
         // away from everything: no object snap
         assert_eq!(snap([40.0, 30.0], None), None);
+    }
+
+    #[test]
+    fn a_selection_box_takes_the_lines_drawn_and_delete_removes_them_together() {
+        use crate::viewport::Navigate;
+        let (mut app, plan) = plan_shown();
+        // three lines and a rectangle, away from the model
+        for y in [20.0, 21.0, 22.0] {
+            let _ = app.update(Message::AddShape(plan.clone(), DrawKind::Line, DrawKind::Line.shape_lines(&[[20.0, y], [24.0, y]])));
+        }
+        let _ = app.update(Message::AddShape(plan.clone(), DrawKind::Rectangle, DrawKind::Rectangle.shape_lines(&[[26.0, 20.0], [28.0, 22.0]])));
+        assert_eq!(app.document.view_lines(&plan).len(), 3 + 4);
+        let size = bounds();
+        let boxed = |app: &mut App, a: [f64; 2], b: [f64; 2]| {
+            let (p, q) = (on_screen(app, a), on_screen(app, b));
+            let _ = app.update(Message::Navigate(Navigate::Box { x0: p.x, y0: p.y, x1: q.x, y1: q.y, width: size.width, height: size.height, done: true, add: false }));
+        };
+        // a box round the first two lines, whichever way it is on screen drawn to the right
+        let (p, q) = (on_screen(&app, [19.5, 19.5]), on_screen(&app, [24.5, 21.5]));
+        let (lo, hi) = (Point::new(p.x.min(q.x), p.y.min(q.y)), Point::new(p.x.max(q.x), p.y.max(q.y)));
+        let _ = app.update(Message::Navigate(Navigate::Box { x0: lo.x, y0: lo.y, x1: hi.x, y1: hi.y, width: size.width, height: size.height, done: true, add: false }));
+        assert_eq!(app.lines_picked(), [0, 1]);
+        // drawn to the left over a corner of the rectangle: all of it, by its first line
+        let _ = app.update(Message::Navigate(Navigate::Box { x0: hi.x, y0: hi.y, x1: lo.x, y1: lo.y, width: size.width, height: size.height, done: true, add: false }));
+        assert_eq!(app.lines_picked(), [0, 1]);
+        let _ = boxed;
+        let (p, q) = (on_screen(&app, [25.5, 19.5]), on_screen(&app, [26.5, 20.5]));
+        let (lo, hi) = (Point::new(p.x.min(q.x), p.y.min(q.y)), Point::new(p.x.max(q.x), p.y.max(q.y)));
+        let _ = app.update(Message::Navigate(Navigate::Box { x0: hi.x, y0: hi.y, x1: lo.x, y1: lo.y, width: size.width, height: size.height, done: true, add: true }));
+        assert_eq!(app.lines_picked(), [0, 1, 3]);
+        // Delete takes the two lines and the rectangle; the third line stays
+        let _ = app.update(Message::DeletePicked);
+        assert_eq!(app.document.view_lines(&plan), [[[20.0, 22.0], [24.0, 22.0]]]);
+        assert!(app.lines_picked().is_empty());
     }
 
     #[test]
