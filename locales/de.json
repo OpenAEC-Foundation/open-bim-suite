@@ -1757,6 +1757,11 @@
     "Scale (empty: every scale)": "Maßstab (leer: jeder Maßstab)",
     "Copy to the project": "In das Projekt kopieren",
     "+ Rule": "+ Regel",
-    "Remove the drawing set": "Zeichnungssatz entfernen"
+    "Remove the drawing set": "Zeichnungssatz entfernen",
+    "Sample wall, as this template draws it": "Beispielwand, wie diese Vorlage sie zeichnet",
+    "detail by the scale": "Detail nach Maßstab",
+    "show": "zeigen",
+    "hatched where cut": "schraffiert, wo geschnitten",
+    "Remove the view template": "Ansichtsvorlage entfernen"
   }
 }

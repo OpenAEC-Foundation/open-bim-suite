@@ -471,6 +471,26 @@ impl Library {
         self.view_templates.iter().find(|t| t.key == key)
     }
 
+    /// The view template `key` of the library, to change.
+    pub fn view_template_mut(&mut self, key: &str) -> Option<&mut ViewTemplate> {
+        self.view_templates.iter_mut().find(|t| t.key == key)
+    }
+
+    /// Takes a view template as a copy under a key of its own ("-2", "-3" after one it has);
+    /// its key.
+    pub fn copy_view_template(&mut self, from: &ViewTemplate) -> String {
+        let key = std::iter::once(from.key.clone()).chain((2..).map(|n| format!("{}-{n}", from.key))).find(|key| self.view_template(key).is_none()).unwrap_or_default();
+        self.view_templates.push(ViewTemplate { key: key.clone(), ..from.clone() });
+        key
+    }
+
+    /// Takes view template `key` away; whether the library had it.
+    pub fn remove_view_template(&mut self, key: &str) -> bool {
+        let before = self.view_templates.len();
+        self.view_templates.retain(|t| t.key != key);
+        self.view_templates.len() != before
+    }
+
     /// Adds a view template. Refused when it does not hold together or the library has its key.
     pub fn add_view_template(&mut self, template: ViewTemplate) -> Result<(), LibraryError> {
         template.check()?;

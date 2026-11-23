@@ -462,6 +462,14 @@ pub(super) fn buildup_detail<'a>(p: Palette, l: Language, lib: &Library, b: &Bui
     column![canvas_widget(Section { bands, depth: total, line: p.text, plain: false }).width(Fill).height(height), list, buildup_levels(p, l, lib, b)].spacing(6).into()
 }
 
+/// A section through build-up `b` as a drawing of `detail` shows it: its outline, one hatch or
+/// its layers, without hatches where the drawing does not hatch.
+pub(super) fn buildup_drawn<'a>(p: Palette, lib: &Library, b: &BuildUp, detail: bim_library::template::Detail, hatched: bool, height: f32) -> Element<'a, Message> {
+    let bands = b.drawn(detail).iter().map(|band| (band.thickness, band.material.and_then(|key| lib.material(key)).map_or(HatchKind::Generic, |m| m.hatch), [0, 0, 0])).collect::<Vec<_>>();
+    let plain = !hatched || b.drawn(detail).iter().all(|band| band.material.is_none());
+    canvas_widget(Section { bands, depth: b.thickness(), line: p.text, plain }).width(Fill).height(height).into()
+}
+
 /// A build-up at each level of detail, side by side: its outline at 200, its layers with their
 /// hatches at 350, and at 500 as many things known of its materials as there are.
 pub(super) fn buildup_levels<'a>(p: Palette, l: Language, lib: &Library, b: &BuildUp) -> Element<'a, Message> {

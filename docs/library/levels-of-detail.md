@@ -46,8 +46,9 @@ Not yet compared with what the Dutch sector's own documents say of these levels.
 
 ## Not yet
 
-- A view (through its view template, issue 309) or a phase of a project does not choose a level:
-  a drawing shows every element as it did.
+- A view template names the level it asks (`ViewTemplate::level`: an outline is 200, one hatch
+  and the layers 350, all of it 500), and its editor draws a sample wall at it. A drawing of the
+  Modeller does not follow a template yet, so it shows every element as it did.
 - Linear types, system types and objects are the same at every level.
 - Views per level drawn by hand (3D, plan, section, elevation).
 - How the kernel shows a wall at a level (issue 302, with Quint).
