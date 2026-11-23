@@ -1815,6 +1815,9 @@
     "right": "sağda",
     "leader": "kılavuz çizgi",
     "on": "açık",
-    " (off)": " (kapalı)"
+    " (off)": " (kapalı)",
+    "House style of OpenAEC Blueprint (brand.yaml)": "OpenAEC Blueprint kurum stili (brand.yaml)",
+    "Take from a file": "Dosyadan al",
+    "Save as a file": "Dosya olarak kaydet"
   }
 }

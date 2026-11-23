@@ -1815,6 +1815,9 @@
     "right": "po prawej",
     "leader": "linia odniesienia",
     "on": "włączona",
-    " (off)": " (wyłączona)"
+    " (off)": " (wyłączona)",
+    "House style of OpenAEC Blueprint (brand.yaml)": "Styl firmowy OpenAEC Blueprint (brand.yaml)",
+    "Take from a file": "Pobierz z pliku",
+    "Save as a file": "Zapisz jako plik"
   }
 }

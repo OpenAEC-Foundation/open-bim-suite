@@ -1815,6 +1815,9 @@
     "right": "à droite",
     "leader": "ligne de repère",
     "on": "activée",
-    " (off)": " (désactivée)"
+    " (off)": " (désactivée)",
+    "House style of OpenAEC Blueprint (brand.yaml)": "Charte graphique d'OpenAEC Blueprint (brand.yaml)",
+    "Take from a file": "Reprendre d'un fichier",
+    "Save as a file": "Enregistrer comme fichier"
   }
 }
