@@ -1850,6 +1850,13 @@ mod tests {
         let _ = app.update(Message::DeletePicked);
         assert_eq!(app.document.view_lines(&plan), [[[20.0, 22.0], [24.0, 22.0]]]);
         assert!(app.lines_picked().is_empty());
+        // Ctrl+Z gives them back, and again takes back the rectangle's drawing
+        let _ = app.update(Message::Undo);
+        assert_eq!(app.document.view_lines(&plan).len(), 3 + 4);
+        let _ = app.update(Message::Undo);
+        assert_eq!(app.document.view_lines(&plan).len(), 3);
+        let _ = app.update(Message::Redo);
+        assert_eq!(app.document.view_lines(&plan).len(), 3 + 4);
     }
 
     #[test]

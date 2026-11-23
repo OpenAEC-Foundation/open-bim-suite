@@ -332,6 +332,8 @@ pub struct Step {
     pub standard: Option<Arc<bim_library::drawing::Standard>>,
     /// The house style the project follows, kept as the library is.
     pub house: Option<Arc<bim_library::house::HouseStyle>>,
+    /// What is drawn by hand on the views: a line drawn, moved or removed is a step too.
+    pub drawn: Arc<crate::document::Drawn>,
 }
 
 impl App {
