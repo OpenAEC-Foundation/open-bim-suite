@@ -26,6 +26,7 @@ pub mod buildup;
 pub mod class;
 pub mod component;
 pub mod connection;
+pub mod detail;
 pub mod drawing;
 pub mod dutch;
 pub mod grade;

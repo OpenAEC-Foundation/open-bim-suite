@@ -1739,6 +1739,10 @@
     "Licence": "Lizenz",
     "Source": "Quelle",
     "The drawing itself is not in the library yet: a view cannot place it yet.": "Die Zeichnung selbst ist noch nicht in der Bibliothek: eine Ansicht kann sie noch nicht platzieren.",
-    "No strength class of a standard: it has no values.": "Keine Festigkeitsklasse einer Norm: es gibt keine Werte dazu."
+    "No strength class of a standard: it has no values.": "Keine Festigkeitsklasse einer Norm: es gibt keine Werte dazu.",
+    "Levels of detail": "Detaillierungsgrade",
+    "Data per level of detail": "Daten je Detaillierungsgrad",
+    "data": "Daten",
+    "Strength class": "Festigkeitsklasse"
   }
 }
