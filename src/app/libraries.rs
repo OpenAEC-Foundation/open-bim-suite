@@ -1850,6 +1850,32 @@ mod tests {
     }
 
     #[test]
+    fn a_build_up_shows_its_price_and_its_resistance_from_its_materials() {
+        use bim_library::aspect::Origin;
+        use bim_library::cost::{Cost, Unit};
+        use bim_library::physics::Physics;
+        let mut app = App::default();
+        let l = Language::English;
+        let palette = app.theme.palette();
+        let wall = app.library.buildups[0].clone();
+        let origin = Origin { source: "an offer".into(), date: "2026-03-12".into(), region: None };
+        let item = Item::BuildUp(Shelf::Project, wall.id.clone());
+        {
+            let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 1400.0), app.look_pane(palette, l, &item));
+            assert!(pane.find("the layers alone").is_err());
+        }
+        for layer in &wall.layers {
+            let path = bim_library::ifcx::material_path(&layer.material);
+            app.library.set_cost(&path, &Cost { unit: Unit::CubicMetre, currency: "EUR".into(), material: 200.0, labour: 100.0, ..Cost::default() }, origin.clone()).unwrap();
+            app.library.set_physics(&layer.material, &Physics { conductivity: Some(1.0), ..Physics::default() }, origin.clone()).unwrap();
+        }
+        let price = wall.thickness() * 300.0;
+        let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 1400.0), app.look_pane(palette, l, &item));
+        assert!(pane.find(format!("{price:.2} EUR/m² (from its materials, a reference price)")).is_ok());
+        assert!(pane.find(format!("R {:.2} m²K/W (the layers alone)", wall.thickness())).is_ok());
+    }
+
+    #[test]
     fn a_component_is_drawn_fitted_in_its_tile() {
         let drawing = bim_library::component::drawing("gen-betonanker-m10").expect("the anchor's drawing");
         let look = ComponentLook { runs: drawing.runs(12.0), size: drawing.size(), line: Color::BLACK };
