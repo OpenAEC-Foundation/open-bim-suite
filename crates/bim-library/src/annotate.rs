@@ -56,6 +56,66 @@ pub enum LabelField {
     Text(String),
 }
 
+impl LabelField {
+    /// The field as it is typed: its word ("name", "thickness"), a property as `prop:Key`, a
+    /// fixed text between quotes.
+    pub fn word(&self) -> String {
+        match self {
+            LabelField::Name => "name".into(),
+            LabelField::Type => "type".into(),
+            LabelField::Code => "code".into(),
+            LabelField::Material => "material".into(),
+            LabelField::Thickness => "thickness".into(),
+            LabelField::Profile => "profile".into(),
+            LabelField::Length => "length".into(),
+            LabelField::Area => "area".into(),
+            LabelField::Level => "level".into(),
+            LabelField::Grade => "grade".into(),
+            LabelField::Property(key) => format!("prop:{key}"),
+            LabelField::Text(text) => format!("\"{text}\""),
+        }
+    }
+
+    /// The field a typed word names, whatever its case; none for a word that names no field.
+    pub fn of_word(word: &str) -> Option<LabelField> {
+        let word = word.trim();
+        if let Some(text) = word.strip_prefix('"').and_then(|rest| rest.strip_suffix('"')) {
+            return (!text.is_empty()).then(|| LabelField::Text(text.to_string()));
+        }
+        if let Some(key) = word.strip_prefix("prop:").or_else(|| word.strip_prefix("PROP:")) {
+            return (!key.trim().is_empty()).then(|| LabelField::Property(key.trim().to_string()));
+        }
+        Some(match word.to_lowercase().as_str() {
+            "name" => LabelField::Name,
+            "type" => LabelField::Type,
+            "code" => LabelField::Code,
+            "material" => LabelField::Material,
+            "thickness" => LabelField::Thickness,
+            "profile" => LabelField::Profile,
+            "length" => LabelField::Length,
+            "area" => LabelField::Area,
+            "level" => LabelField::Level,
+            "grade" => LabelField::Grade,
+            _ => return None,
+        })
+    }
+
+    /// The fields a typed list names ("name, profile, grade"); none when a word names no field
+    /// or the list is empty.
+    pub fn list(typed: &str) -> Option<Vec<LabelField>> {
+        let fields: Option<Vec<LabelField>> = list(typed).iter().map(|word| LabelField::of_word(word)).collect();
+        fields.filter(|fields| !fields.is_empty())
+    }
+}
+
+impl Frame {
+    pub const ALL: [Frame; 5] = [Frame::None, Frame::Rectangle, Frame::Rounded, Frame::Circle, Frame::Hexagon];
+}
+
+impl Place {
+    pub const ALL: [Place; 6] = [Place::Centre, Place::Along, Place::Above, Place::Below, Place::Left, Place::Right];
+}
+
 /// What is drawn round a label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -610,6 +670,19 @@ mod tests {
         // as a field it is written and read as the others
         let field = serde_json::to_value(LabelField::Grade).unwrap();
         assert_eq!(serde_json::from_value::<LabelField>(field).unwrap(), LabelField::Grade);
+    }
+
+    #[test]
+    fn the_fields_of_a_label_are_typed_as_words() {
+        use LabelField::*;
+        let all = vec![Name, Type, Code, Material, Thickness, Profile, Length, Area, Level, Grade, Property("FireRating".into()), Text("d=".into())];
+        let typed = all.iter().map(LabelField::word).collect::<Vec<_>>().join(", ");
+        assert_eq!(typed, "name, type, code, material, thickness, profile, length, area, level, grade, prop:FireRating, \"d=\"");
+        assert_eq!(LabelField::list(&typed), Some(all));
+        assert_eq!(LabelField::list(" Name ,PROFILE, "), Some(vec![Name, Profile]));
+        // a word that names no field, or nothing at all, is no list
+        assert_eq!((LabelField::list("name, colour"), LabelField::list(" , "), LabelField::list("prop:"), LabelField::list("\"\"")), (None, None, None, None));
+        assert_eq!((Frame::ALL.len(), Place::ALL.len()), (5, 6));
     }
 
 }
