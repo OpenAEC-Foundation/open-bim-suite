@@ -36,6 +36,77 @@ const SEAMS: usize = 16;
 struct Member {
     u: (f64, f64),
     v: (f64, f64),
+    /// What it looks like in the face where that is not the rectangle of `u` and `v`: a member
+    /// that slopes, or one cut on a slope.
+    shape: Option<Shape2>,
+}
+
+/// The outline of a part in the face that is not a level rectangle: its corners in order (the
+/// first `n` of `points`), and its size as it is cut: its width and its length along itself.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Shape2 {
+    points: [[f64; 2]; 8],
+    n: usize,
+    size: (f64, f64),
+}
+
+impl Shape2 {
+    /// The outline of `points` in the face (their convex hull), when it is not the level
+    /// rectangle that holds them: none for a plain stud, plate or board.
+    fn of(points: &[[f64; 2]]) -> Option<Self> {
+        let mut sorted: Vec<[f64; 2]> = points.to_vec();
+        sorted.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
+        sorted.dedup_by(|a, b| (a[0] - b[0]).abs() < 1e-7 && (a[1] - b[1]).abs() < 1e-7);
+        if sorted.len() < 3 {
+            return None;
+        }
+        let turn = |o: [f64; 2], a: [f64; 2], b: [f64; 2]| (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+        let mut hull: Vec<[f64; 2]> = Vec::with_capacity(sorted.len() + 1);
+        for pass in 0..2 {
+            let start = hull.len();
+            let walk: Box<dyn Iterator<Item = &[f64; 2]>> = if pass == 0 { Box::new(sorted.iter()) } else { Box::new(sorted.iter().rev()) };
+            for q in walk {
+                while hull.len() >= start + 2 && turn(hull[hull.len() - 2], hull[hull.len() - 1], *q) <= 1e-12 {
+                    hull.pop();
+                }
+                hull.push(*q);
+            }
+            hull.pop();
+        }
+        let n = hull.len();
+        if !(3..=8).contains(&n) {
+            return None;
+        }
+        // a side that is neither level nor plumb, long enough to be cut so
+        let slopes = (0..n).any(|i| {
+            let (a, b) = (hull[i], hull[(i + 1) % n]);
+            (a[0] - b[0]).abs() > 1e-4 && (a[1] - b[1]).abs() > 1e-4 && (a[0] - b[0]).hypot(a[1] - b[1]) > 0.005
+        });
+        if !slopes {
+            return None;
+        }
+        // as it is cut: the narrowest it is across any of its sides, and how long it is along that side
+        let mut size = (f64::INFINITY, 0.0);
+        for i in 0..n {
+            let (a, b) = (hull[i], hull[(i + 1) % n]);
+            let long = (b[0] - a[0]).hypot(b[1] - a[1]);
+            if long < 1e-9 {
+                continue;
+            }
+            let (dx, dy) = ((b[0] - a[0]) / long, (b[1] - a[1]) / long);
+            let (mut wide, mut from, mut to) = (0.0_f64, f64::INFINITY, f64::NEG_INFINITY);
+            for q in &hull {
+                let (along, off) = ((q[0] - a[0]) * dx + (q[1] - a[1]) * dy, ((q[0] - a[0]) * dy - (q[1] - a[1]) * dx).abs());
+                (wide, from, to) = (wide.max(off), from.min(along), to.max(along));
+            }
+            if wide < size.0 {
+                size = (wide, to - from);
+            }
+        }
+        let mut points = [[0.0; 2]; 8];
+        points[..n].copy_from_slice(&hull);
+        Some(Shape2 { points, n, size })
+    }
 }
 
 /// A part of the system in its face, with where it is across it (to its exterior positive).
@@ -50,6 +121,9 @@ impl Member {
     /// Its size in the face and its length (metres): a stud's width and height, a plate's height
     /// and length.
     fn section(&self) -> (f64, f64) {
+        if let Some(shape) = self.shape {
+            return shape.size;
+        }
         let (du, dv) = (self.u.1 - self.u.0, self.v.1 - self.v.0);
         (du.min(dv), du.max(dv))
     }
@@ -98,7 +172,8 @@ pub fn element_drawings(model: &Model, element: &Element, named: &dyn Fn(&str) -
                 v = (v.0.min(b), v.1.max(b));
                 across = (across.0.min(c), across.1.max(c));
             }
-            Item { at: Member { u, v }, across, member: p.class == "IfcMember", material: p.material.as_deref() }
+            let face: Vec<[f64; 2]> = p.solid.positions.iter().map(|q| [(DVec2::new(q.x, q.y) - s.start).dot(dir), q.z - s.base]).collect();
+            Item { at: Member { u, v, shape: Shape2::of(&face) }, across, member: p.class == "IfcMember", material: p.material.as_deref() }
         })
         .collect();
     // the members of the frame itself: of the frame's material, inside the frame and as deep as
@@ -122,6 +197,14 @@ pub fn element_drawings(model: &Model, element: &Element, named: &dyn Fn(&str) -
         }
     };
     let outline = |d: &mut Drawing2d, pen: Pen, m: &Member, lo: f64| {
+        // a member that slopes or is cut on a slope as it is; any other as its rectangle
+        if let Some(shape) = m.shape {
+            for i in 0..shape.n {
+                let (a, b) = (shape.points[i], shape.points[(i + 1) % shape.n]);
+                d.lines.push(Line2d::new(pen, [a[0] - lo, a[1]], [b[0] - lo, b[1]]));
+            }
+            return;
+        }
         let (x0, x1, y0, y1) = (m.u.0 - lo, m.u.1 - lo, m.v.0, m.v.1);
         for (a, b) in [([x0, y0], [x1, y0]), ([x1, y0], [x1, y1]), ([x1, y1], [x0, y1]), ([x0, y1], [x0, y0])] {
             d.lines.push(Line2d::new(pen, a, b));
@@ -230,7 +313,7 @@ pub fn element_drawings(model: &Model, element: &Element, named: &dyn Fn(&str) -
             };
             // what runs on past the unit (the plates of a layer that is not made in units) is
             // drawn as far as the unit goes
-            let within = |i: &Item| Member { u: (if first { i.at.u.0 } else { i.at.u.0.max(lo) }, if last { i.at.u.1 } else { i.at.u.1.min(hi) }), v: i.at.v };
+            let within = |i: &Item| Member { u: (if first { i.at.u.0 } else { i.at.u.0.max(lo) }, if last { i.at.u.1 } else { i.at.u.1.min(hi) }), v: i.at.v, shape: i.at.shape };
             let mut own: Vec<Item> = items.iter().filter(of_layer).map(|i| Item { at: within(i), across: i.across, member: i.member, material: i.material }).collect();
             // a batten layer shows its battens; the wool between them is not cut to a list
             if own.iter().any(|i| i.member) {
@@ -466,7 +549,7 @@ fn elevation(model: &Model, element: &Element, s: &bim_core::SystemDef, t: &bim_
             let (a, b) = ((DVec2::new(q.x, q.y) - s.start).dot(dir), q.z - s.base);
             (u, v) = ((u.0.min(a), u.1.max(a)), (v.0.min(b), v.1.max(b)));
         }
-        Member { u, v }
+        Member { u, v, shape: None }
     };
     let own = || parts.iter().filter(|p| p.tile == element.tile);
     let panels: Vec<Member> = own().filter(|p| p.class == "IfcPlate" && p.material.as_deref() == Some(t.panel_material.as_str())).map(faced).collect();
@@ -486,7 +569,7 @@ fn elevation(model: &Model, element: &Element, s: &bim_core::SystemDef, t: &bim_
     let (u0, u1) = all().fold((f64::INFINITY, f64::NEG_INFINITY), |acc, m| (acc.0.min(m.u.0), acc.1.max(m.u.1)));
     let (v0, v1) = all().fold((f64::INFINITY, f64::NEG_INFINITY), |acc, m| (acc.0.min(m.v.0), acc.1.max(m.v.1)));
     if many {
-        outline(Pen::Cut, &Member { u: (u0, u1), v: (v0, v1) });
+        outline(Pen::Cut, &Member { u: (u0, u1), v: (v0, v1), shape: None });
     } else {
         for m in members.iter().filter(drawn) {
             outline(Pen::Cut, m);
@@ -903,6 +986,25 @@ mod tests {
             assert!(lo > -0.3 && hi < units[unit] + 0.3, "{}: {lo} to {hi} in a unit of {}", d.name, units[unit]);
         }
     }
+    #[test]
+    fn a_frame_with_a_corner_off_is_drawn_as_it_is_cut() {
+        // 3 m of frame, 1.2 by 0.9 off its top at its end
+        let (mut m, id) = frame(3.0, Vec::new());
+        let mut cut = m.get(id).unwrap().clone();
+        let Shape::System(s) = &mut cut.shape else { panic!("a system") };
+        let p = DVec2::new;
+        s.outline = vec![p(0.0, 0.0), p(3.0, 0.0), p(3.0, 1.8), p(1.8, 2.7), p(0.0, 2.7)];
+        m.replace(cut).unwrap();
+        let all = element_drawings(&m, m.get(id).unwrap(), &|key| key.to_string());
+        let d = all.iter().find(|d| is_frame(d)).unwrap();
+        // the plate along the cut slopes, and so do the heads of the studs under it
+        let sloping = d.lines.iter().filter(|l| l.pen == Pen::Cut && l.a[1] <= 2.7 + 1e-6 && (l.a[0] - l.b[0]).abs() > 1e-6 && (l.a[1] - l.b[1]).abs() > 1e-6).count();
+        assert!(sloping >= 4, "{sloping}");
+        // in the list as it is cut: 38 wide and 1500 long, not the 1200 by 900 it reaches over
+        let texts: Vec<&str> = d.texts.iter().map(|t| t.text.as_str()).collect();
+        assert!(texts.iter().any(|t| t.starts_with("1 × 38×140 L=15")), "{texts:?}");
+    }
+
     #[test]
     fn a_system_on_a_grid_gets_an_elevation_with_its_panels_and_members() {
         // a curtain wall of 6 m, bays of 1500: four panes over one another in rows of 1800
