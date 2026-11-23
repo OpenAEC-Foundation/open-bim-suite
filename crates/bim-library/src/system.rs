@@ -462,7 +462,8 @@ impl Trimmer {
 
 /// How brickwork is carried over an opening: by a prefab concrete lintel as thick as the bricks,
 /// at least `height` high and as many whole courses as that takes (up to the joint under the
-/// course above it), bearing `bearing` on the brickwork either side of the opening.
+/// course above it; in courses far higher than that, of elements, `height` high with the
+/// elements over it cut to fit), bearing `bearing` on the brickwork either side of the opening.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Lintel {
     pub height: f64,
@@ -926,7 +927,7 @@ pub fn starter() -> Vec<SystemType> {
         SystemType { lintel: Some(Lintel::BRICKWORK), ..upright("system.masonry-waal-english", Masonry, Grid::new(0.22, 0.0625, English), Members::new(0.01, 0.2, "mortar"), Panels::new("brick", 0.21)) },
         SystemType { lintel: Some(Lintel::BRICKWORK), ..upright("system.masonry-waal-cross", Masonry, Grid::new(0.22, 0.0625, EnglishCross), Members::new(0.01, 0.2, "mortar"), Panels::new("brick", 0.21)) },
         SystemType { lintel: Some(Lintel::BRICKWORK), ..upright("system.masonry-waal-flemish", Masonry, Grid::new(0.22, 0.0625, Flemish), Members::new(0.01, 0.2, "mortar"), Panels::new("brick", 0.21)) },
-        upright("system.sand-lime-elements-100", Masonry, Grid::new(0.9, 0.6465, RunningBond), Members::new(0.003, 0.1, "glue"), Panels::new("sand-lime", 0.1)),
+        SystemType { lintel: Some(Lintel::BRICKWORK), ..upright("system.sand-lime-elements-100", Masonry, Grid::new(0.9, 0.6465, RunningBond), Members::new(0.003, 0.1, "glue"), Panels::new("sand-lime", 0.1)) },
         upright("system.cladding-zinc-standing-seam-430", Cladding, Grid::new(0.43, 6.0, Stack), Members::new(0.006, 0.04, "zinc"), Panels::new("zinc", 0.0008)),
         upright("system.cladding-timber-boards-140", Cladding, Grid::new(4.0, 0.14, RunningBond), Members::new(0.004, 0.012, "timber"), Panels::new("timber-cladding", 0.018)),
         upright("system.cladding-hpl-1200x3000", Cladding, Grid::new(1.2, 3.0, Stack), Members::new(0.008, 0.004, "aluminium"), Panels::new("hpl", 0.008)),
