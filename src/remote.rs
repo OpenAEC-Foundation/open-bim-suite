@@ -465,6 +465,24 @@ impl App {
                 Ok(json!({ "clicks": points.len(), "messages": sent }))
             }
             "drag_handle" => self.remote_drag_handle(a),
+            "drag" => {
+                let point = |key: &str| -> Result<(f32, f32), String> {
+                    let p = a.get(key).and_then(|v| v.as_array()).filter(|p| p.len() == 2).ok_or_else(|| format!("{key} is required: [x, y]"))?;
+                    Ok((p[0].as_f64().ok_or("a number")? as f32, p[1].as_f64().ok_or("a number")? as f32))
+                };
+                let ((x0, y0), (x1, y1)) = (point("from")?, point("to")?);
+                if !self.drag_selects() {
+                    return Err("a drag selects only in the Modeller with the Select tool on: switch the tool that is on off first".into());
+                }
+                let add = a.get("add").and_then(|v| v.as_bool()).unwrap_or(false);
+                let (width, height) = self.viewport_size;
+                let grids_before = self.modeller.model.grids().to_vec();
+                for done in [false, true] {
+                    let _ = self.update(Message::Navigate(crate::viewport::Navigate::Box { x0, y0, x1, y1, width, height, done, add }));
+                }
+                let moved = self.modeller.model.grids() != grids_before.as_slice();
+                Ok(json!({ "moved_grid_lines": moved, "selected_elements": self.sel.items().len(), "picked_grid_lines": self.grids_picked() }))
+            }
             "open_drawing" => {
                 // the project's own drawings: its floor plans, sections and elevations, and sheets
                 let plans = self.document.plans().iter().map(|p| ("plan", p.name.clone(), p.path.clone()));
