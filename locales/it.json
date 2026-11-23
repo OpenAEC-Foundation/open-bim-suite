@@ -1739,6 +1739,10 @@
     "Licence": "Licenza",
     "Source": "Fonte",
     "The drawing itself is not in the library yet: a view cannot place it yet.": "Il disegno stesso non è ancora nella libreria: una vista non può ancora posizionarlo.",
-    "No strength class of a standard: it has no values.": "Nessuna classe di resistenza di una norma: non ha valori."
+    "No strength class of a standard: it has no values.": "Nessuna classe di resistenza di una norma: non ha valori.",
+    "Levels of detail": "Livelli di dettaglio",
+    "Data per level of detail": "Dati per livello di dettaglio",
+    "data": "dati",
+    "Strength class": "Classe di resistenza"
   }
 }

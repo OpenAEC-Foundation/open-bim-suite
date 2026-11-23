@@ -925,7 +925,7 @@ impl App {
         let lang = super::library::lang(l);
         let copy_label = l.text("Bewerk een kopie in het project", "Edit a copy in the project");
         let found: Option<(String, Element<'_, Message>, Option<(&'static str, Message)>)> = match item {
-            Item::Material(shelf, key) => self.shelf(*shelf).material(key).map(|m| (m.name(lang).to_string(), material_detail(p, m), Some((copy_label, Message::Material(MaterialMessage::Copy(*shelf, key.clone())))))),
+            Item::Material(shelf, key) => self.shelf(*shelf).material(key).map(|m| (m.name(lang).to_string(), material_detail(p, l, m), Some((copy_label, Message::Material(MaterialMessage::Copy(*shelf, key.clone())))))),
             Item::BuildUp(shelf, id) => {
                 let library = self.shelf(*shelf);
                 library.buildup(id).map(|b| (library.name(id, lang).unwrap_or_default(), buildup_detail(p, l, library, b), Some((copy_label, Message::BuildUp(BuildUpMessage::Copy(*shelf, id.clone()))))))
@@ -1709,6 +1709,27 @@ mod tests {
         let _ = app.libraries_update(LibrariesMessage::Source(Source::General));
         let general = app.category_code(l, Category::Planar(Role::Wall));
         assert!(matches!(general[0].1, Some(Message::Libraries(LibrariesMessage::Look(Item::BuildUp(Shelf::General, _))))));
+    }
+
+    #[test]
+    fn a_build_up_and_a_material_show_their_levels_of_detail() {
+        let app = App::default();
+        let l = Language::English;
+        let palette = app.theme.palette();
+        // a layered build-up of the general library: the three levels side by side
+        let layered = general().buildups.iter().find(|b| b.layers.len() >= 3).expect("a layered build-up");
+        let id = layered.id.clone();
+        {
+            let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 900.0), app.look_pane(palette, l, &Item::BuildUp(Shelf::General, id)));
+            assert!(pane.find("Levels of detail").is_ok() && pane.find("LOD 200").is_ok() && pane.find("LOD 350").is_ok() && pane.find("LOD 500").is_ok());
+            // at 200 only the names of its materials are filled in
+            let materials = layered.layers.iter().map(|layer| layer.material.as_str()).collect::<std::collections::BTreeSet<_>>().len();
+            assert!(pane.find(format!("{materials} data")).is_ok());
+        }
+        // a graded material: what is known of it, and from which level
+        let (shelf, graded) = [Shelf::General, Shelf::Netherlands].into_iter().find_map(|shelf| app.shelf(shelf).materials.iter().find(|m| m.class().is_some()).map(|m| (shelf, m))).expect("a material with a strength class");
+        let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 900.0), app.look_pane(palette, l, &Item::Material(shelf, graded.key.clone())));
+        assert!(pane.find("Data per level of detail").is_ok() && pane.find("Strength class").is_ok() && pane.find("Source").is_ok() && pane.find("Grade").is_ok());
     }
 
     #[test]
