@@ -1762,6 +1762,8 @@
     "detail by the scale": "ölçeğe göre ayrıntı",
     "show": "göster",
     "hatched where cut": "kesildiği yerde taranmış",
-    "Remove the view template": "Görünüm şablonunu kaldır"
+    "Remove the view template": "Görünüm şablonunu kaldır",
+    "as the library chooses": "kitaplığın seçtiği gibi",
+    "Hatches by": "Taramalar şuna göre"
   }
 }

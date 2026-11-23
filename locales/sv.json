@@ -1762,6 +1762,8 @@
     "detail by the scale": "detalj enligt skalan",
     "show": "visa",
     "hatched where cut": "skrafferad där den skärs",
-    "Remove the view template": "Ta bort vymallen"
+    "Remove the view template": "Ta bort vymallen",
+    "as the library chooses": "som biblioteket väljer",
+    "Hatches by": "Skrafferingar enligt"
   }
 }

@@ -1762,6 +1762,8 @@
     "detail by the scale": "dettaglio secondo la scala",
     "show": "mostra",
     "hatched where cut": "tratteggiato dove è sezionato",
-    "Remove the view template": "Rimuovi il modello di vista"
+    "Remove the view template": "Rimuovi il modello di vista",
+    "as the library chooses": "come sceglie la libreria",
+    "Hatches by": "Tratteggi secondo"
   }
 }
