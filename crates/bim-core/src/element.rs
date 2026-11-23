@@ -319,7 +319,10 @@ pub struct SystemDef {
     pub breaks: Vec<f64>,
     /// A lying system (a floor, a ceiling) laid in an outline: the outline in plan. It is laid
     /// along its line over the rectangle that holds the outline and cut to it; its openings are
-    /// measured from its line's start. Empty: the rectangle its line and its `height` make.
+    /// measured from its line's start. A standing system that is not a rectangle (a corner off,
+    /// a gable): the outline in its own face, each point along its line from its start and up
+    /// from its base; it is made as the rectangle and cut to it. Empty: the rectangle its line
+    /// and its `height` make.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outline: Vec<DVec2>,
     /// How its bays are divided along its line, where this system does not follow its type:
@@ -533,7 +536,10 @@ impl Shape {
             Shape::System(s) => {
                 s.start += flat;
                 s.end += flat;
-                s.outline.iter_mut().for_each(|p| *p += flat);
+                // a lying system's outline is in plan; a standing one's is in its own face
+                if s.lies() {
+                    s.outline.iter_mut().for_each(|p| *p += flat);
+                }
                 s.base += delta.z;
             }
             Shape::Connection(_) => {}

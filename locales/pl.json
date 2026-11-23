@@ -1736,6 +1736,8 @@
     "Orbiting turns about the point under the cursor. A double click or the right-click menu sets a fixed pivot; it stays until a double click in empty space or the menu clears it. Looking around holds the cursor in place, as in a game. Shift + left pans, Shift + wheel orbits.": "Obrót odbywa się wokół punktu pod kursorem. Dwukrotne kliknięcie lub menu kontekstowe ustala stały punkt obrotu; pozostaje, dopóki dwukrotne kliknięcie w pustym miejscu lub menu go nie usunie. Podczas rozglądania się kursor zostaje w miejscu, jak w grze. Shift + lewy przesuwa, Shift + kółko obraca.",
     "Set pivot here": "Ustaw tu punkt obrotu",
     "double click": "dwukrotne kliknięcie",
-    "Clear pivot": "Usuń punkt obrotu"
+    "Clear pivot": "Usuń punkt obrotu",
+    "An opening in a wall is a rectangle, level and plumb": "Otwór w ścianie jest prostokątem, w poziomie i w pionie",
+    "Wall sketch": "Szkic ściany"
   }
 }

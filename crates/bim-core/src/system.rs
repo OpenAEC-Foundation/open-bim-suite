@@ -61,6 +61,7 @@ use std::iter::once;
 mod assembly;
 mod corner;
 mod lying;
+mod shaped;
 mod tee;
 
 pub(crate) use corner::{connection, connection_node, joined_parts};
@@ -514,6 +515,12 @@ fn build(s: &SystemDef, ends: &Ends) -> Result<Vec<PartSolid>, Refusal> {
         Some((rectangle, outline)) => (rectangle, Some(outline.as_slice())),
         None => (s, None),
     };
+    // a standing one with an outline in its face is made as its rectangle and cut to it
+    let shaped = shaped::bounded(s)?;
+    let (s, face) = match &shaped {
+        Some((rectangle, face)) => (rectangle, Some(face.as_slice())),
+        None => (s, None),
+    };
     let plan = plan(s, ends)?;
     // a standing face runs up; a lying one runs level to the left of its line, its layers stacked
     // upwards, the top of the highest at the system's base
@@ -531,7 +538,10 @@ fn build(s: &SystemDef, ends: &Ends) -> Result<Vec<PartSolid>, Refusal> {
         let length = plan.spans[0].hi - plan.spans[0].lo;
         return lying::finish(s, &plan.faces[0], length, s.base - sunk + own, outline, parts);
     }
-    Ok(parts)
+    match face {
+        Some(face) => shaped::cut(s, face, parts),
+        None => Ok(parts),
+    }
 }
 
 /// Checks system `s`, its faces ending as `ends` say, and lays it out: every face on its span, the

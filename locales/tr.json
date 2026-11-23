@@ -1736,6 +1736,8 @@
     "Orbiting turns about the point under the cursor. A double click or the right-click menu sets a fixed pivot; it stays until a double click in empty space or the menu clears it. Looking around holds the cursor in place, as in a game. Shift + left pans, Shift + wheel orbits.": "Döndürme imlecin altındaki nokta etrafında yapılır. Çift tıklama veya sağ tık menüsü sabit bir döndürme noktası belirler; boşluğa çift tıklama veya menü onu kaldırana kadar kalır. Etrafa bakarken imleç, bir oyundaki gibi yerinde kalır. Shift + sol kaydırır, Shift + tekerlek döndürür.",
     "Set pivot here": "Döndürme noktasını buraya koy",
     "double click": "çift tıklama",
-    "Clear pivot": "Döndürme noktasını kaldır"
+    "Clear pivot": "Döndürme noktasını kaldır",
+    "An opening in a wall is a rectangle, level and plumb": "Duvardaki bir boşluk, terazisinde ve şakülünde bir dikdörtgendir",
+    "Wall sketch": "Duvar eskizi"
   }
 }
