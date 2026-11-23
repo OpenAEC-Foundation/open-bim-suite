@@ -1790,6 +1790,17 @@
     "reinforcing steel": "acier d'armature",
     "bolts": "boulons",
     "timber": "bois",
-    "grade": "qualité"
+    "grade": "qualité",
+    "by its code: yes": "selon son code : oui",
+    "by its code: no": "selon son code : non",
+    "by its code: unknown": "selon son code : inconnu",
+    "Loadbearing": "Porteur",
+    "External": "Extérieur",
+    "Fire rating": "Résistance au feu",
+    "BIM basis ILS: complete": "BIM basis ILS : complet",
+    "BIM basis ILS, still missing": "BIM basis ILS, il manque encore",
+    "NL-SfB code of four digits": "code NL-SfB à quatre chiffres",
+    "loadbearing or not": "porteur ou non",
+    "fire rating": "résistance au feu"
   }
 }

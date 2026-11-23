@@ -150,6 +150,12 @@ pub fn nodes(library: &Library) -> Vec<Value> {
                 BUILDUP: b,
             }
         }));
+        // what a delivery asks of it, as IFC's own properties (`Pset_WallCommon` and its likes)
+        if let Some(attributes) = nodes.last_mut().and_then(|node| node["attributes"].as_object_mut()) {
+            for (name, value) in b.delivery_properties(&library.materials) {
+                attributes.insert(format!("bsi::ifc::prop::{name}"), value);
+            }
+        }
     }
     for t in &library.linear_types {
         let name = library.linear_name(&t.id, Lang::En).unwrap_or_default();

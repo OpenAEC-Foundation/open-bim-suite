@@ -1790,6 +1790,17 @@
     "reinforcing steel": "acero de armar",
     "bolts": "tornillos",
     "timber": "madera",
-    "grade": "calidad"
+    "grade": "calidad",
+    "by its code: yes": "según su código: sí",
+    "by its code: no": "según su código: no",
+    "by its code: unknown": "según su código: desconocido",
+    "Loadbearing": "Portante",
+    "External": "Exterior",
+    "Fire rating": "Resistencia al fuego",
+    "BIM basis ILS: complete": "BIM basis ILS: completo",
+    "BIM basis ILS, still missing": "BIM basis ILS, aún falta",
+    "NL-SfB code of four digits": "código NL-SfB de cuatro cifras",
+    "loadbearing or not": "portante o no",
+    "fire rating": "resistencia al fuego"
   }
 }
