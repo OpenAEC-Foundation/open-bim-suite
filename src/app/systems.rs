@@ -76,6 +76,12 @@ pub enum Lie {
 
 #[derive(Debug, Clone)]
 pub enum SystemMessage {
+    /// Whether it bears, said by itself; none: as its code and its group say.
+    Bearing(Option<bool>),
+    /// Whether it is external, said by itself; none: as its code says.
+    External(Option<bool>),
+    /// Typed as its fire rating; empty for none.
+    FireRating(String),
     /// Show the types of this group on the Project page.
     Open(SystemGroup),
     /// Edit this type of the project.
@@ -498,6 +504,9 @@ impl App {
                 regroup(&mut self.library, &general, id, group).map(|()| self.set_category(Category::Systems(group)))
             }),
             SystemMessage::Coded(code) => picked.as_deref().map(|id| change(&mut self.library, id, |t| t.code = code)),
+            SystemMessage::Bearing(bears) => picked.as_deref().map(|id| change(&mut self.library, id, |t| t.delivery.load_bearing = bears)),
+            SystemMessage::External(external) => picked.as_deref().map(|id| change(&mut self.library, id, |t| t.delivery.is_external = external)),
+            SystemMessage::FireRating(typed) => picked.as_deref().map(|id| change(&mut self.library, id, |t| t.delivery.fire_rating = Some(typed.trim().to_string()).filter(|rating| !rating.is_empty()))),
             SystemMessage::Corners(corners) => picked.as_deref().map(|id| change(&mut self.library, id, |t| t.corners = corners)),
             SystemMessage::Done => match (picked.as_deref(), self.system_view.draft.clone()) {
                 (Some(id), Some((part, size, typed))) => Some(set(&mut self.library, id, part, size, &typed)),
@@ -684,6 +693,11 @@ impl App {
             .push(closed)
             .push(text(total).size(11).color(p.text_secondary))
             .push(super::codes::picker(p, l, library, t.rule_code(), t.code.as_deref(), SystemMessage::Coded))
+            .push({
+                // what a delivery asks of it (BIM basis ILS): said here, or left to its group and its code
+                let coded = SystemType { delivery: Default::default(), ..t.clone() };
+                super::buildups::delivery_controls(p, l, coded.load_bearing(), coded.is_external(), &t.delivery, t.missing(), SystemMessage::Bearing, SystemMessage::External, SystemMessage::FireRating)
+            })
             .push(row![act(l.text("Dupliceren", "Duplicate"), SystemMessage::Duplicate), act(l.text("Verwijderen", "Remove"), SystemMessage::Remove), Space::new().width(Fill)].spacing(4))
             .push(refused)
             .push(text(l.text("De naam volgt de stijlen of de panelen.", "The name follows the members or the panels.")).size(11).color(p.text_muted).wrapping(Wrapping::Word))
@@ -965,4 +979,26 @@ mod tests {
         click(&mut app, false, "Brickwork 100 220×62.5 stretcher bond");
         assert_eq!(app.system_view.picked.as_deref(), Some("system.masonry-waal-stretcher"));
     }
+    #[test]
+    fn a_system_type_says_what_a_delivery_asks_in_its_editor() {
+        let mut app = App::default();
+        let id = app.library.system_types.iter().find(|t| t.group == SystemGroup::TimberFrame).unwrap().id.clone();
+        let _ = app.system_update(SystemMessage::Pick(id.clone()));
+        let of = |app: &App| app.library.system_type(&id).unwrap().clone();
+        assert_eq!((of(&app).load_bearing(), of(&app).delivery.is_empty()), (None, true));
+        {
+            let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 3000.0), app.system_pane(app.theme.palette(), Language::English));
+            assert!(pane.find("Loadbearing").is_ok() && pane.find("External").is_ok() && pane.find("Fire rating").is_ok());
+        }
+        let _ = app.system_update(SystemMessage::Bearing(Some(true)));
+        let _ = app.system_update(SystemMessage::External(Some(false)));
+        let _ = app.system_update(SystemMessage::FireRating(" REI 60 ".into()));
+        let frame = of(&app);
+        assert_eq!((frame.load_bearing(), frame.is_external(), frame.delivery.fire_rating.as_deref()), (Some(true), false, Some("REI 60")));
+        let _ = app.system_update(SystemMessage::Bearing(None));
+        let _ = app.system_update(SystemMessage::External(None));
+        let _ = app.system_update(SystemMessage::FireRating("".into()));
+        assert!(of(&app).delivery.is_empty());
+    }
+
 }

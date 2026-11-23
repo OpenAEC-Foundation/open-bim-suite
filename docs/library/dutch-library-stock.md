@@ -29,7 +29,7 @@ layered build-ups, with their own names. The general library is the suite's own 
 
 ## What a delivery still lacks (BIM basis ILS)
 
-Of every build-up and linear type, in both libraries:
+Of every build-up, linear type and system type, in both libraries:
 
 | | Has it |
 |---|---|
@@ -37,12 +37,12 @@ Of every build-up and linear type, in both libraries:
 | A name | all, by rule from the layers or the profile, in Dutch and English |
 | A material | all |
 | An NL-SfB code | all, of two digits by rule; **none has four digits** |
-| Whether it bears | columns, beams and piles by their role; **no build-up says so** (a code of two digits does not say it) |
+| Whether it bears | columns, beams and piles by their role, and most system types by their group; **no build-up says so** (a code of two digits does not say it), nor a timber frame, a steel frame or masonry |
 | Whether it is external | all, from the code (21 and 27 are external) |
 | A fire rating | **none** |
 
-So no type of either library is complete for a delivery yet. The editors of a build-up and of a
-linear type now show what each lacks, and take the three properties.
+So no type of either library is complete for a delivery yet. The editors of a build-up, a linear
+type and a system type now show what each lacks, and take the three properties.
 
 ## What a Dutch house and a small utility building still miss
 
