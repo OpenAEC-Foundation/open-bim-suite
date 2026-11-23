@@ -1813,6 +1813,8 @@
     "below": "unten",
     "left": "links",
     "right": "rechts",
-    "leader": "Hinweislinie"
+    "leader": "Hinweislinie",
+    "on": "an",
+    " (off)": " (aus)"
   }
 }

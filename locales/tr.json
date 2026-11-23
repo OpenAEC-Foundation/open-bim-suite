@@ -1813,6 +1813,8 @@
     "below": "altta",
     "left": "solda",
     "right": "sağda",
-    "leader": "kılavuz çizgi"
+    "leader": "kılavuz çizgi",
+    "on": "açık",
+    " (off)": " (kapalı)"
   }
 }

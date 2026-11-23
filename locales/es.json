@@ -1813,6 +1813,8 @@
     "below": "debajo",
     "left": "izquierda",
     "right": "derecha",
-    "leader": "línea de referencia"
+    "leader": "línea de referencia",
+    "on": "activada",
+    " (off)": " (desactivada)"
   }
 }
