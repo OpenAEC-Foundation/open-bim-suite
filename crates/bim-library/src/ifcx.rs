@@ -130,6 +130,14 @@ pub fn profile_of(value: &Value) -> Option<ProfileShape> {
 /// types.
 pub fn nodes(library: &Library) -> Vec<Value> {
     let mut nodes: Vec<Value> = library.materials.iter().map(material_node).collect();
+    // IFC's own properties of a material's physics, on its node (over those of its class)
+    for (node, material) in nodes.iter_mut().zip(&library.materials) {
+        if let (Some((physics, _)), Some(attributes)) = (library.physics(&material.key), node["attributes"].as_object_mut()) {
+            for (name, value) in physics.ifc_properties() {
+                attributes.insert(format!("bsi::ifc::prop::{name}"), json!(value));
+            }
+        }
+    }
     for b in &library.buildups {
         let name = library.name(&b.id, Lang::En).unwrap_or_default();
         nodes.push(json!({

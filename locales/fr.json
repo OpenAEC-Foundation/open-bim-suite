@@ -1764,6 +1764,12 @@
     "hatched where cut": "hachuré là où il est coupé",
     "Remove the view template": "Supprimer le gabarit de vue",
     "as the library chooses": "comme la bibliothèque le choisit",
-    "Hatches by": "Hachures selon"
+    "Hatches by": "Hachures selon",
+    "Density ρ (kg/m³)": "Masse volumique ρ (kg/m³)",
+    "Conductivity λ (W/mK)": "Conductivité λ (W/mK)",
+    "Specific heat c (J/kgK)": "Chaleur spécifique c (J/kgK)",
+    "Vapour resistance μ": "Résistance à la vapeur μ",
+    "Fire class": "Classe de feu",
+    "the layers alone": "les couches seules"
   }
 }
