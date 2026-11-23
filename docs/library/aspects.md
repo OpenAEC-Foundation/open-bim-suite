@@ -63,7 +63,8 @@ price, the region (it writes one but does not read it) and the index.
 ## Not yet
 
 - No prices and no physical values are in the library. The physics of a material are typed in
-  the material editor; costs and the other kinds have no editor: they come from a file.
+  the material editor, and so is its price; a build-up and the other types have no price
+  editor, and the other kinds none: they come from a file.
 - VAT is not recorded; labour is a price, not hours at a rate.
 - The IFCX tab's aspects (issue 216) do not show these yet.
 - A type that gets another id when a library is merged leaves its aspects behind.

@@ -1770,6 +1770,19 @@
     "Specific heat c (J/kgK)": "Chaleur spécifique c (J/kgK)",
     "Vapour resistance μ": "Résistance à la vapeur μ",
     "Fire class": "Classe de feu",
-    "the layers alone": "les couches seules"
+    "the layers alone": "les couches seules",
+    "Price per": "Prix par",
+    "Currency": "Devise",
+    "Labour": "Main-d'œuvre",
+    "Equipment": "Matériel",
+    "Subcontractor": "Sous-traitant",
+    "Other": "Autre",
+    "Index": "Indice",
+    "Index on that day": "Indice ce jour-là",
+    "Source of the price": "Source du prix",
+    "Price date": "Date du prix",
+    "Region": "Région",
+    "Checked against its source": "Vérifié par rapport à sa source",
+    "Remove the price": "Supprimer le prix"
   }
 }
