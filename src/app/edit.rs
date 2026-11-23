@@ -486,11 +486,16 @@ impl App {
 
     /// Selects modelled element `id` alone.
     pub(crate) fn select_modelled(&mut self, id: ElementId) {
-        let Some(scene) = self.model.clone() else { return };
-        let entry = if self.models.len() == 1 { 0 } else { self.models.iter().position(|e| Some(e.model.id) == self.modeller.shown).unwrap_or(0) as u32 };
-        if let Some(shown) = scene.element_with_key(crate::model::ElementKey { model: entry, source: id.0 }) {
+        if let Some(shown) = self.shown_modelled(id) {
             self.click(Some(Pickable::Element(shown)), false);
         }
+    }
+
+    /// The element of the scene that modelled element `id` shows as.
+    pub(crate) fn shown_modelled(&self, id: ElementId) -> Option<u64> {
+        let scene = self.model.as_ref()?;
+        let entry = if self.models.len() == 1 { 0 } else { self.models.iter().position(|e| Some(e.model.id) == self.modeller.shown).unwrap_or(0) as u32 };
+        scene.element_with_key(crate::model::ElementKey { model: entry, source: id.0 })
     }
 }
 

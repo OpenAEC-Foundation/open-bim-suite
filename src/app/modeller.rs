@@ -556,6 +556,39 @@ impl App {
         points
     }
 
+    /// The modelled element whose line passes nearest viewport point (x, y), within
+    /// [`NEAR_PIXELS`]: the axis of a wall, a curtain wall or a member (at its foot and at its
+    /// top), the edge of a floor. For a click that hits no body: a curtain wall or a beam seen
+    /// from above is a few pixels wide, too thin to click on.
+    pub(crate) fn element_near(&self, x: f32, y: f32, width: f32, height: f32) -> Option<ElementId> {
+        let grid = self.modeller.model.grid;
+        let mut best: Option<(f32, ElementId)> = None;
+        for e in self.modeller.model.iter() {
+            let mut lines: Vec<(DVec3, DVec3)> = Vec::new();
+            match e.shape_in_project(&grid) {
+                Shape::Linear(l) => lines.push((l.start, l.end)),
+                Shape::Planar(PlanarDef { form: PlanarForm::Wall { start, end, base, height }, .. }) => lines.extend([(start.extend(base), end.extend(base)), (start.extend(base + height), end.extend(base + height))]),
+                Shape::System(s) if !s.lies() => lines.extend([(s.start.extend(s.base), s.end.extend(s.base)), (s.start.extend(s.base + s.height), s.end.extend(s.base + s.height))]),
+                Shape::Planar(PlanarDef { form: PlanarForm::Slab { outline, top, .. }, .. }) => {
+                    let n = outline.len();
+                    lines.extend((0..n).map(|k| (outline[k].extend(top), outline[(k + 1) % n].extend(top))));
+                }
+                _ => {}
+            }
+            for (a, b) in lines {
+                let (Some(a), Some(b)) = (self.on_screen(a, width, height), self.on_screen(b, width, height)) else { continue };
+                let (a, b, c) = (glam::Vec2::new(a.0, a.1), glam::Vec2::new(b.0, b.1), glam::Vec2::new(x, y));
+                let along = b - a;
+                let t = if along.length_squared() > 0.0 { ((c - a).dot(along) / along.length_squared()).clamp(0.0, 1.0) } else { 0.0 };
+                let d = (a + along * t).distance(c);
+                if d <= NEAR_PIXELS && best.is_none_or(|(least, _)| d < least) {
+                    best = Some((d, e.id));
+                }
+            }
+        }
+        best.map(|(_, id)| id)
+    }
+
     /// The lines of the outlines of the elements in plan, each with the height it lies at: both
     /// sides and the axis of a wall and of a standing system, the edges of a floor. Not those of
     /// element `except`.
@@ -1172,6 +1205,9 @@ impl App {
     }
 }
 
+/// A click this near the line of an element selects it when it hits no body (logical pixels).
+const NEAR_PIXELS: f32 = 6.0;
+
 /// The colour of what belongs to a service (sRGB): supply warm or fresh, return and waste dull.
 fn service_colour(service: bim_core::Service) -> [f32; 3] {
     use bim_core::Service as S;
@@ -1581,6 +1617,24 @@ mod tests {
         let column = app.modeller.model.iter().last().unwrap().shape_in_project(&app.modeller.model.grid);
         let Shape::Linear(l) = column else { panic!() };
         assert!((l.start.truncate() - DVec2::new(4.0, 0.15)).length() < 1e-9, "{:?}", l.start);
+    }
+
+    #[test]
+    fn a_click_beside_a_thin_element_still_selects_it() {
+        let mut app = modelling();
+        app.modeller.in_modeller = true;
+        app.set_model_tool(Some((ModelTool::System, "Curtain wall")));
+        click(&mut app, 0.0, 0.0);
+        click(&mut app, 6.0, 0.0);
+        app.set_model_tool(None);
+        app.modeller.points.clear();
+        let id = app.modeller.model.iter().next().unwrap().id;
+        // from above a curtain wall is a line 5 cm wide: a click 30 cm beside it (3 pixels here)
+        // takes it, one a metre and a half away does not and clears the selection
+        click(&mut app, 3.0, 0.3);
+        assert_eq!(app.selected_modelled(), [id]);
+        click(&mut app, 3.0, 1.5);
+        assert!(app.selected_modelled().is_empty());
     }
 
     #[test]

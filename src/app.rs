@@ -3395,6 +3395,13 @@ impl App {
             self.click_structural(h.element, add);
             return;
         }
+        // a click that hits no body takes the modelled element whose line it is beside: a curtain
+        // wall or a beam seen from above is too thin to click on
+        if hit.is_none() && self.modeller.in_modeller {
+            if let Some(near) = self.element_near(x, y, width, height).and_then(|id| self.shown_modelled(id)) {
+                return self.click(Some(Pickable::Element(near)), add);
+            }
+        }
         self.click(hit.map(|(l, t, _)| pickable_at(&model, l, t)), add);
     }
 
