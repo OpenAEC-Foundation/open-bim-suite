@@ -68,8 +68,8 @@ pub enum HouseMessage {
     BrandRead(Option<Result<String, String>>),
     /// Save the house style's name, colours and typefaces as a `brand.yaml`.
     SaveBrand,
-    /// Where it was saved, or why not; none: nothing was picked.
-    BrandSaved(Option<Result<std::path::PathBuf, String>>),
+    /// The name of the file it was saved as, or why not; none: nothing was picked.
+    BrandSaved(Option<Result<String, String>>),
 }
 
 /// Which colour is set, which sheet format the sample shows, what is being typed that was not
@@ -147,9 +147,10 @@ impl App {
             HouseMessage::OpenBrand => {
                 let dialog = rfd::AsyncFileDialog::new().set_title("brand.yaml").add_filter("YAML", &["yaml", "yml"]);
                 return Task::perform(
+                    // (read through the handle, so it works in the browser too)
                     async move {
                         let file = dialog.pick_file().await?;
-                        Some(std::fs::read_to_string(file.path()).map_err(|why| why.to_string()))
+                        Some(String::from_utf8(file.read().await).map_err(|why| why.to_string()))
                     },
                     |read| Message::House(HouseMessage::BrandRead(read)),
                 );
@@ -159,8 +160,8 @@ impl App {
                 let dialog = rfd::AsyncFileDialog::new().set_title("brand.yaml").set_file_name("brand.yaml").add_filter("YAML", &["yaml", "yml"]);
                 return Task::perform(
                     async move {
-                        let path = dialog.save_file().await?.path().to_path_buf();
-                        Some(std::fs::write(&path, text).map(|()| path).map_err(|why| why.to_string()))
+                        let file = dialog.save_file().await?;
+                        Some(file.write(text.as_bytes()).await.map(|()| file.file_name()).map_err(|why| why.to_string()))
                     },
                     |saved| Message::House(HouseMessage::BrandSaved(saved)),
                 );
@@ -213,7 +214,7 @@ impl App {
             }
             HouseMessage::BrandSaved(saved) => match saved {
                 None => {}
-                Some(Ok(path)) => (self.house_view.refused, self.house_view.brand) = (None, Some(path.display().to_string())),
+                Some(Ok(name)) => (self.house_view.refused, self.house_view.brand) = (None, Some(name)),
                 Some(Err(why)) => self.house_view.refused = Some(why),
             },
             HouseMessage::HatchStandard(key) => {
@@ -527,7 +528,7 @@ mod tests {
         let _ = app.house_update(HouseMessage::BrandSaved(None));
         assert_eq!(app.house, before);
         // saved: the pane says where
-        let _ = app.house_update(HouseMessage::BrandSaved(Some(Ok(std::path::PathBuf::from("brand.yaml")))));
+        let _ = app.house_update(HouseMessage::BrandSaved(Some(Ok("brand.yaml".to_string()))));
         assert_eq!((app.house_view.brand.as_deref(), app.house_view.refused.clone()), (Some("brand.yaml"), None));
     }
 
