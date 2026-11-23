@@ -1770,6 +1770,19 @@
     "Specific heat c (J/kgK)": "Ciepło właściwe c (J/kgK)",
     "Vapour resistance μ": "Opór dyfuzyjny μ",
     "Fire class": "Klasa ogniowa",
-    "the layers alone": "same warstwy"
+    "the layers alone": "same warstwy",
+    "Price per": "Cena za",
+    "Currency": "Waluta",
+    "Labour": "Robocizna",
+    "Equipment": "Sprzęt",
+    "Subcontractor": "Podwykonawca",
+    "Other": "Inne",
+    "Index": "Indeks",
+    "Index on that day": "Indeks w tym dniu",
+    "Source of the price": "Źródło ceny",
+    "Price date": "Data ceny",
+    "Region": "Region",
+    "Checked against its source": "Sprawdzono ze źródłem",
+    "Remove the price": "Usuń cenę"
   }
 }

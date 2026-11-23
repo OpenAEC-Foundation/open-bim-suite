@@ -1770,6 +1770,19 @@
     "Specific heat c (J/kgK)": "Specifik värme c (J/kgK)",
     "Vapour resistance μ": "Ångmotstånd μ",
     "Fire class": "Brandklass",
-    "the layers alone": "endast skikten"
+    "the layers alone": "endast skikten",
+    "Price per": "Pris per",
+    "Currency": "Valuta",
+    "Labour": "Arbete",
+    "Equipment": "Utrustning",
+    "Subcontractor": "Underentreprenör",
+    "Other": "Övrigt",
+    "Index": "Index",
+    "Index on that day": "Index den dagen",
+    "Source of the price": "Prisets källa",
+    "Price date": "Prisdatum",
+    "Region": "Region",
+    "Checked against its source": "Kontrollerat mot källan",
+    "Remove the price": "Ta bort priset"
   }
 }

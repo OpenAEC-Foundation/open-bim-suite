@@ -69,8 +69,84 @@ pub fn props_read(typed: &[String; 7]) -> Result<(bim_library::physics::Physics,
     Ok((physics, bim_library::aspect::Origin { source: typed[Prop::Source.at()].trim().to_string(), date: typed[Prop::Date.at()].trim().to_string(), region: None }))
 }
 
+/// A field of the price of the picked material that is typed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Price {
+    Currency,
+    Material,
+    Labour,
+    Equipment,
+    Subcontractor,
+    Other,
+    IndexName,
+    IndexValue,
+    Source,
+    Date,
+    Region,
+}
+
+impl Price {
+    pub const ALL: [Price; 11] = [Price::Currency, Price::Material, Price::Labour, Price::Equipment, Price::Subcontractor, Price::Other, Price::IndexName, Price::IndexValue, Price::Source, Price::Date, Price::Region];
+
+    fn at(self) -> usize {
+        Price::ALL.iter().position(|p| *p == self).unwrap_or(0)
+    }
+}
+
+/// The price of a material as its fields show it: each part as text, empty where nothing.
+pub fn price_of(library: &Library, key: &str) -> ([String; 11], bim_library::cost::Unit, bool) {
+    let number = |v: f64| if v == 0.0 { String::new() } else { v.to_string() };
+    match library.cost(&bim_library::ifcx::material_path(key)) {
+        Some((c, origin)) => {
+            let (index_name, index_value) = c.index.as_ref().map_or((String::new(), String::new()), |i| (i.name.clone(), i.value.to_string()));
+            ([c.currency.clone(), number(c.material), number(c.labour), number(c.equipment), number(c.subcontractor), number(c.other), index_name, index_value, origin.source.clone(), origin.date.clone(), origin.region.clone().unwrap_or_default()], c.unit, c.verified)
+        }
+        None => {
+            let mut fields: [String; 11] = Default::default();
+            fields[Price::Currency.at()] = "EUR".into();
+            (fields, bim_library::cost::Unit::CubicMetre, false)
+        }
+    }
+}
+
+/// The price the fields say, with where it is from; why not when a field is no value.
+pub fn price_read(typed: &[String; 11], unit: bim_library::cost::Unit, verified: bool) -> Result<(bim_library::cost::Cost, bim_library::aspect::Origin), &'static str> {
+    let text = |at: Price| typed[at.at()].trim().to_string();
+    let number = |at: Price| -> Result<f64, &'static str> {
+        let text = text(at).replace(',', ".");
+        if text.is_empty() {
+            return Ok(0.0);
+        }
+        text.parse::<f64>().map_err(|_| "a number")
+    };
+    let index = match (text(Price::IndexName), number(Price::IndexValue)?) {
+        (name, value) if name.is_empty() && value == 0.0 => None,
+        (name, value) => Some(bim_library::cost::Index { name, value }),
+    };
+    let cost = bim_library::cost::Cost { unit, currency: text(Price::Currency).to_uppercase(), material: number(Price::Material)?, labour: number(Price::Labour)?, equipment: number(Price::Equipment)?, subcontractor: number(Price::Subcontractor)?, other: number(Price::Other)?, verified, index };
+    Ok((cost, bim_library::aspect::Origin { source: text(Price::Source), date: text(Price::Date), region: Some(text(Price::Region)).filter(|r| !r.is_empty()) }))
+}
+
+/// A unit of a price with its name, to pick.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnitChoice(pub bim_library::cost::Unit, &'static str);
+
+impl std::fmt::Display for UnitChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.1)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum MaterialMessage {
+    /// Typed as a part of its price, or as where the price is from.
+    Priced(Price, String),
+    /// The unit its price is per.
+    PriceUnit(bim_library::cost::Unit),
+    /// Whether its price was checked against its source.
+    PriceVerified(bool),
+    /// Take its price away.
+    PriceRemove,
     /// Typed as a property of its physics, or as their source or their date.
     Property(Prop, String),
     /// Edit this material of the project.
@@ -130,6 +206,10 @@ pub struct MaterialView {
     /// Its physics as they are being typed, and why they are not taken yet.
     pub props: Option<[String; 7]>,
     pub props_refused: Option<String>,
+    /// Its price as it is being typed, with its unit and whether it is verified, and why it is
+    /// not taken yet.
+    pub price: Option<([String; 11], bim_library::cost::Unit, bool)>,
+    pub price_refused: Option<String>,
 }
 
 /// A colour as it is typed: "#b9b9b9".
@@ -392,6 +472,32 @@ impl App {
                     show = false;
                 }
             }
+            message @ (MaterialMessage::Priced(..) | MaterialMessage::PriceUnit(_) | MaterialMessage::PriceVerified(_)) => {
+                if let Some(key) = picked.as_deref() {
+                    let (mut fields, mut unit, mut verified) = self.material_view.price.clone().unwrap_or_else(|| price_of(&self.library, key));
+                    match message {
+                        MaterialMessage::Priced(field, typed) => fields[field.at()] = typed,
+                        MaterialMessage::PriceUnit(to) => unit = to,
+                        MaterialMessage::PriceVerified(on) => verified = on,
+                        _ => {}
+                    }
+                    // taken when the fields make a price with a source and a date; else they stay as typed
+                    let item = bim_library::ifcx::material_path(key);
+                    let taken = price_read(&fields, unit, verified).map_err(str::to_string).and_then(|(cost, origin)| self.library.set_cost(&item, &cost, origin).map_err(|why| why.to_string()));
+                    self.material_view.price_refused = taken.err();
+                    self.material_view.price = Some((fields, unit, verified));
+                    changed = self.material_view.price_refused.is_none();
+                    // (a price changes no drawing)
+                    show = false;
+                }
+            }
+            MaterialMessage::PriceRemove => {
+                if let Some(key) = picked.as_deref() {
+                    changed = self.library.remove_aspect(&bim_library::ifcx::material_path(key), bim_library::aspect::Kind::Cost);
+                    (self.material_view.price, self.material_view.price_refused) = (None, None);
+                    show = false;
+                }
+            }
             MaterialMessage::Standard(key) => {
                 changed = self.library.hatch_standard().is_some_and(|s| s.key != key) && self.library.choose_hatch_standard(&key);
                 (self.material_view.from, self.material_view.standard) = (None, None);
@@ -563,6 +669,39 @@ impl App {
         }
         if let Some(why) = &view.props_refused {
             fields = fields.push(text(format!("{} ({why})", l.text("Niet overgenomen.", "Not taken."))).size(11).color(p.accent).wrapping(Wrapping::Word));
+        }
+        // its price per unit, split into what it is made up of, with where it is from
+        let (price, unit, verified) = view.price.clone().unwrap_or_else(|| price_of(library, &m.key));
+        fields = fields.push(caption(l.text("Kosten", "Costs")));
+        let units: Vec<UnitChoice> = bim_library::cost::Unit::ALL.map(|u| UnitChoice(u, bim_library::cost::unit_name(u, lang))).to_vec();
+        let now = units.iter().find(|c| c.0 == unit).cloned();
+        let per = l.text("Prijs per", "Price per");
+        let pick = pick_list(units, now, |c: UnitChoice| MaterialMessage::PriceUnit(c.0)).text_size(12).padding([2, 6]).width(Fill);
+        fields = fields.push(labelled(p, per, a11y::named(pick, Aria::ComboBox, per)));
+        for (field, label, hint) in [
+            (Price::Currency, l.text("Valuta", "Currency"), "EUR"),
+            (Price::Material, l.text("Materiaal", "Material"), "0"),
+            (Price::Labour, l.text("Arbeid", "Labour"), "0"),
+            (Price::Equipment, l.text("Materieel", "Equipment"), "0"),
+            (Price::Subcontractor, l.text("Onderaannemer", "Subcontractor"), "0"),
+            (Price::Other, l.text("Overig", "Other"), "0"),
+            (Price::IndexName, l.text("Index", "Index"), "BDB"),
+            (Price::IndexValue, l.text("Indexstand op die dag", "Index on that day"), "100"),
+            (Price::Source, l.text("Bron van de prijs", "Source of the price"), ""),
+            (Price::Date, l.text("Prijsdatum", "Price date"), "2026-11-23"),
+            (Price::Region, l.text("Regio", "Region"), "NL"),
+        ] {
+            let input = text_input(hint, &price[field.at()]).on_input(move |typed| MaterialMessage::Priced(field, typed)).size(12).padding([2, 6]);
+            fields = fields.push(labelled(p, label, a11y::named(input, Aria::TextField, label)));
+        }
+        fields = fields.push(iced::widget::checkbox(verified).label(l.text("Gecontroleerd tegen de bron", "Checked against its source")).on_toggle(MaterialMessage::PriceVerified).size(14).text_size(12));
+        match (&view.price_refused, library.cost(&bim_library::ifcx::material_path(&m.key))) {
+            (Some(why), _) => fields = fields.push(text(format!("{} ({why})", l.text("Niet overgenomen.", "Not taken."))).size(11).color(p.accent).wrapping(Wrapping::Word)),
+            (None, Some((cost, _))) => {
+                let remove = l.text("Prijs verwijderen", "Remove the price");
+                fields = fields.push(text(cost.label()).size(12).color(p.text)).push(button(text(remove).size(12).color(p.text_secondary)).padding([3, 8]).style(move |_, s| p.row_button(s)).on_press(MaterialMessage::PriceRemove));
+            }
+            (None, None) => {}
         }
         // its own hatch of the catalogue: the sign of its kind of material, in its colour
         let own_hatch = l.text("Eigen arcering", "Hatch of its own");
@@ -770,6 +909,41 @@ mod tests {
         // another material shows its own fields
         let _ = app.material_update(MaterialMessage::Pick("steel".into()));
         assert_eq!((app.material_view.props.clone(), props_of(&app.library, "steel"), props_of(&app.library, "timber")[1].as_str()), (None, Default::default(), "0.13"));
+    }
+
+    #[test]
+    fn the_price_of_a_material_is_typed_and_taken_with_a_source_and_a_date() {
+        use bim_library::cost::Unit;
+        let mut app = App::default();
+        let _ = app.material_update(MaterialMessage::Pick("timber".into()));
+        let item = bim_library::ifcx::material_path("timber");
+        let cost = |app: &App| app.library.cost(&item).map(|(c, o)| (c.unit, c.unit_price(), c.verified, c.index.map(|i| i.value), o.source.clone(), o.region.clone()));
+        // parts alone are not taken: a price needs a source and a date
+        let _ = app.material_update(MaterialMessage::Priced(Price::Material, "450".into()));
+        let _ = app.material_update(MaterialMessage::Priced(Price::Labour, "12,5".into()));
+        assert_eq!((cost(&app), app.material_view.price_refused.is_some()), (None, true));
+        let _ = app.material_update(MaterialMessage::Priced(Price::Source, "an offer".into()));
+        let _ = app.material_update(MaterialMessage::Priced(Price::Date, "2026-03-12".into()));
+        assert_eq!((cost(&app), app.material_view.price_refused.clone()), (Some((Unit::CubicMetre, 462.5, false, None, "an offer".to_string(), None)), None));
+        // its unit, its region, its index and whether it is verified
+        let _ = app.material_update(MaterialMessage::PriceUnit(Unit::Metre));
+        let _ = app.material_update(MaterialMessage::Priced(Price::Region, "NL".into()));
+        let _ = app.material_update(MaterialMessage::Priced(Price::IndexName, "BDB".into()));
+        assert!(app.material_view.price_refused.is_some(), "an index needs its value");
+        let _ = app.material_update(MaterialMessage::Priced(Price::IndexValue, "120".into()));
+        let _ = app.material_update(MaterialMessage::PriceVerified(true));
+        assert_eq!(cost(&app), Some((Unit::Metre, 462.5, true, Some(120.0), "an offer".to_string(), Some("NL".to_string()))));
+        {
+            let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 2200.0), app.material_pane(app.theme.palette(), Language::English));
+            assert!(pane.find("Costs").is_ok() && pane.find("Price per").is_ok() && pane.find("Source of the price").is_ok() && pane.find("462.50 EUR/m").is_ok() && pane.find("Remove the price").is_ok());
+        }
+        // what is no number stays in its field and what was taken stays
+        let _ = app.material_update(MaterialMessage::Priced(Price::Material, "much".into()));
+        assert_eq!((cost(&app).map(|c| c.1), app.material_view.price_refused.is_some()), (Some(462.5), true));
+        // the fields of a material read back what the library has; taken away, nothing is left
+        assert_eq!(price_of(&app.library, "timber").0[Price::Labour.at()], "12.5");
+        let _ = app.material_update(MaterialMessage::PriceRemove);
+        assert_eq!((cost(&app), app.material_view.price.clone(), price_of(&app.library, "timber").0[Price::Currency.at()].as_str()), (None, None, "EUR"));
     }
 
     #[test]

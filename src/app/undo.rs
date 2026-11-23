@@ -20,6 +20,8 @@ use std::sync::Arc;
 /// a slider at every move: what is typed or dragged there in one go is one step to take back.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum Typing {
+    /// The price typed for a material (its key).
+    MaterialPrice(String),
     /// The physics typed for a material (its key).
     MaterialProperty(String),
     /// A field of a view template (its key).
@@ -62,6 +64,7 @@ impl App {
             Message::Material(MaterialMessage::Hex(_) | MaterialMessage::Channel(..) | MaterialMessage::Shown) => Some(Typing::MaterialColour(self.material_view.picked.clone()?)),
             Message::House(super::house::HouseMessage::Typed(field, _, _)) => Some(Typing::House(*field)),
             Message::Material(MaterialMessage::Property(..)) => Some(Typing::MaterialProperty(self.material_view.picked.clone()?)),
+            Message::Material(MaterialMessage::Priced(..)) => Some(Typing::MaterialPrice(self.material_view.picked.clone()?)),
             Message::Material(MaterialMessage::Graded(_)) => Some(Typing::MaterialGrade(self.material_view.picked.clone()?)),
             Message::Material(MaterialMessage::From(_)) => Some(Typing::MaterialScale(self.material_view.picked.clone()?)),
             Message::Material(MaterialMessage::StandardNamed(_)) => Some(Typing::HatchStandard(self.library.hatch_standard()?.key.clone())),

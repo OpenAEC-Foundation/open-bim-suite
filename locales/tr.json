@@ -1770,6 +1770,19 @@
     "Specific heat c (J/kgK)": "Özgül ısı c (J/kgK)",
     "Vapour resistance μ": "Buhar direnci μ",
     "Fire class": "Yangın sınıfı",
-    "the layers alone": "yalnızca katmanlar"
+    "the layers alone": "yalnızca katmanlar",
+    "Price per": "Birim fiyat",
+    "Currency": "Para birimi",
+    "Labour": "İşçilik",
+    "Equipment": "Ekipman",
+    "Subcontractor": "Taşeron",
+    "Other": "Diğer",
+    "Index": "Endeks",
+    "Index on that day": "O günkü endeks",
+    "Source of the price": "Fiyatın kaynağı",
+    "Price date": "Fiyat tarihi",
+    "Region": "Bölge",
+    "Checked against its source": "Kaynağıyla doğrulandı",
+    "Remove the price": "Fiyatı kaldır"
   }
 }
