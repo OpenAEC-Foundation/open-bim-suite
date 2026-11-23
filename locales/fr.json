@@ -1753,6 +1753,10 @@
     "equipment": "matériel",
     "subcontractor": "sous-traitant",
     "other": "autre",
-    "Not verified: a reference price.": "Non vérifié : un prix indicatif."
+    "Not verified: a reference price.": "Non vérifié : un prix indicatif.",
+    "Scale (empty: every scale)": "Échelle (vide : toutes les échelles)",
+    "Copy to the project": "Copier dans le projet",
+    "+ Rule": "+ Règle",
+    "Remove the drawing set": "Supprimer le jeu de dessin"
   }
 }

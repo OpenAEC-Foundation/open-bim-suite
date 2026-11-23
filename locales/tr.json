@@ -1753,6 +1753,10 @@
     "equipment": "ekipman",
     "subcontractor": "taşeron",
     "other": "diğer",
-    "Not verified: a reference price.": "Doğrulanmadı: bir referans fiyat."
+    "Not verified: a reference price.": "Doğrulanmadı: bir referans fiyat.",
+    "Scale (empty: every scale)": "Ölçek (boş: her ölçek)",
+    "Copy to the project": "Projeye kopyala",
+    "+ Rule": "+ Kural",
+    "Remove the drawing set": "Çizim setini kaldır"
   }
 }

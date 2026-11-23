@@ -20,6 +20,8 @@ use std::sync::Arc;
 /// a slider at every move: what is typed or dragged there in one go is one step to take back.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum Typing {
+    /// A field of a drawing set (its key).
+    DrawingSet(String, super::drawing_sets::Field),
     /// The name of a material (its key) in a language.
     MaterialName(String, Lang),
     /// The colour of a material: typed, or a channel at a time.
@@ -60,6 +62,7 @@ impl App {
             Message::Material(MaterialMessage::StandardNamed(_)) => Some(Typing::HatchStandard(self.library.hatch_standard()?.key.clone())),
             Message::Code(super::codes::CodeMessage::Named(lang, _)) => Some(Typing::CodeName(self.code_view.picked.clone()?, *lang)),
             Message::Connection(super::connections::ConnectionMessage::Typed(field, _)) => Some(Typing::Connection(self.connection_view.picked.clone()?, *field)),
+            Message::DrawingSet(super::drawing_sets::DrawingSetMessage::Typed(field, _)) => Some(Typing::DrawingSet(self.drawing_set_view.picked.clone()?, field.clone())),
             Message::Service(super::services::ServiceMessage::Typed(super::services::Field::Cover, _)) => Some(Typing::Service(self.service_view.cover.clone()?, super::services::Field::Cover)),
             Message::Service(super::services::ServiceMessage::Typed(field, _)) => Some(Typing::Service(self.service_view.picked.clone()?, *field)),
             Message::Object(super::objects::ObjectMessage::Typed(field, _)) => Some(Typing::Object(self.object_view.picked.clone()?, *field)),
