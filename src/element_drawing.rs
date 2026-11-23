@@ -1080,7 +1080,7 @@ mod tests {
         assert_eq!(all.len(), 1);
         let d = &all[0];
         assert_eq!((d.lines.iter().filter(|l| l.pen == Pen::Cut).count(), d.lines.iter().filter(|l| l.pen == Pen::Detail).count()), (4 + 4, 6));
-        assert!(d.texts.iter().any(|t| t.text.starts_with("1 × concrete 100×11") && t.text.ends_with(" L=1400")), "{:?}", d.texts.iter().map(|t| &t.text).collect::<Vec<_>>());
+        assert!(d.texts.iter().any(|t| t.text.starts_with("1 × concrete 100×12") && t.text.ends_with(" L=1400")), "{:?}", d.texts.iter().map(|t| &t.text).collect::<Vec<_>>());
         let texts: Vec<&str> = d.texts.iter().map(|t| t.text.as_str()).collect();
         assert!(texts[0].contains(" · 43 × 62.5 · 1:50"), "{texts:?}");
         let bricks: usize = texts.iter().filter(|t| t.contains(" × 100 × ")).map(|t| t.split(' ').next().unwrap().parse::<usize>().unwrap()).sum();

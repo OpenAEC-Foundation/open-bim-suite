@@ -454,7 +454,7 @@ impl Trimmer {
 }
 
 /// How brickwork is carried over an opening: by a prefab concrete lintel as thick as the bricks,
-/// at least `height` high and as many whole courses as that takes (less the joint under the
+/// at least `height` high and as many whole courses as that takes (up to the joint under the
 /// course above it), bearing `bearing` on the brickwork either side of the opening.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Lintel {

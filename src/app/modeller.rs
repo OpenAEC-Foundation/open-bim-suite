@@ -1375,6 +1375,36 @@ mod tests {
     }
 
     #[test]
+    fn an_opening_sketched_in_brickwork_goes_to_the_courses_and_gets_a_lintel() {
+        use super::sketch::Segment;
+        let mut app = App::default();
+        let generic = bim_core::SystemDef { start: glam::DVec2::new(2.0, 1.0), end: glam::DVec2::new(6.4, 1.0), base: 0.0, height: 2.5, spacing: glam::DVec2::new(1.5, 1.5), member: glam::DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), division: None };
+        let s = generic.typed_from(&app.library, "system.masonry-waal-stretcher").unwrap();
+        let grid = app.modeller.model.grid;
+        let id = app.modeller.model.add(Element::in_project(&grid, "Wall", None, Shape::System(s))).unwrap();
+        app.show_modelled();
+        assert!(app.sketchable(id));
+        app.open_sketch(id);
+        // a window drawn from 0.92 to 2.13 up: its sill goes to course 15, its head to course 34
+        let p = glam::DVec2::new;
+        let (a, b) = (p(1.5, 0.92), p(2.5, 2.13));
+        app.modeller.sketch.as_mut().unwrap().segments.extend([Segment::line(a, p(b.x, a.y)), Segment::line(p(b.x, a.y), b), Segment::line(b, p(a.x, b.y)), Segment::line(p(a.x, b.y), a)]);
+        app.finish_sketch();
+        assert!(app.modeller.sketch.is_none() && app.modeller.refusal.is_none(), "{:?}", app.modeller.refusal);
+        let Shape::System(made) = &app.modeller.model.get(id).unwrap().shape else { panic!() };
+        let o = made.openings[0];
+        assert!((o.sill - 15.0 * 0.0625).abs() < 1e-9 && (o.sill + o.height - 34.0 * 0.0625).abs() < 1e-9, "{o:?}");
+        let parts = app.modeller.model.evaluate(id).unwrap();
+        assert_eq!(parts.iter().filter(|p| p.class == "IfcBeam").count(), 1);
+        // no brick thinner than a whole one less its joints
+        let thin = parts.iter().filter(|p| p.class == "IfcPlate").filter(|p| {
+            let (lo, hi) = p.solid.bounds();
+            hi.z - lo.z < 0.05
+        }).count();
+        assert_eq!(thin, 0);
+    }
+
+    #[test]
     fn a_timber_frame_is_exported_as_an_assembly_for_every_prefab_unit() {
         // 7.2 m of timber frame: three units of 2400
         let mut app = App::default();

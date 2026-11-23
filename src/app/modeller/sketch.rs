@@ -23,6 +23,7 @@
 //!   rectangle drawn inside it is an opening, framed as the wall's type frames openings; a
 //!   corner cut off the outline is cut off the wall. Tab makes the wall as long and as high as
 //!   the outline reaches. An opening that is not a rectangle with level and plumb sides is told.
+//!   In brickwork an opening's sill and head go to the nearest course.
 
 use crate::app::edit::{EditEvent, EditOverlay};
 use crate::app::App;
@@ -627,6 +628,17 @@ impl App {
                 s.base += lo.y;
                 s.height = hi.y - lo.y;
                 s.breaks = s.breaks.iter().map(|b| b - lo.x).filter(|b| *b > 0.0 && *b < hi.x - lo.x).collect();
+                // in brickwork an opening stands on a course and ends under one: its sill and
+                // its head go to the nearest course, so no sliver of brick is left at them
+                if s.system_type.as_ref().is_some_and(|t| t.lintel.is_some()) && s.spacing.y > 0.0 {
+                    let rows = (s.height / s.spacing.y).round().max(1.0);
+                    let course = s.height / rows;
+                    for o in openings.iter_mut() {
+                        let sill = (o.sill / course).round() * course;
+                        let head = (((o.sill + o.height) / course).round() * course).max(sill + course);
+                        (o.sill, o.height) = (sill, head - sill);
+                    }
+                }
                 s.openings = openings;
                 let (length, height) = (hi.x - lo.x, hi.y - lo.y);
                 let corner = |p: &DVec2| ((p.x - lo.x).abs() < MEET || (p.x - lo.x - length).abs() < MEET) && ((p.y - lo.y).abs() < MEET || (p.y - lo.y - height).abs() < MEET);
