@@ -183,6 +183,12 @@ impl Material {
         self.sign.as_deref().and_then(crate::hatch::hatch)
     }
 
+    /// The strength class its grade names, of whatever family ([`crate::class`]): concrete,
+    /// steel, reinforcing steel, a bolt or timber.
+    pub fn class(&self) -> Option<&'static crate::class::StrengthClass> {
+        self.grade.as_deref().and_then(crate::class::class)
+    }
+
     /// The timber strength class its grade names, when it names one ([`crate::grade`]).
     pub fn timber_grade(&self) -> Option<&'static crate::grade::TimberGrade> {
         self.grade.as_deref().and_then(crate::grade::timber_grade)

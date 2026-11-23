@@ -75,7 +75,7 @@ pub fn system_type_path(id: &str) -> String {
 
 /// The node of a material.
 pub fn material_node(material: &Material) -> Value {
-    json!({
+    let mut node = json!({
         "path": material_path(&material.key),
         "attributes": {
             "bsi::ifc::material": {"code": material.key, "uri": format!("urn:openaec:material:{}", material.key)},
@@ -83,7 +83,12 @@ pub fn material_node(material: &Material) -> Value {
             "bsi::ifc::presentation::diffuseColor": material.colour_f64(),
             MATERIAL: material,
         }
-    })
+    });
+    // the strength class its grade names, and IFC's own properties of it ([`crate::class`])
+    if let (Some(class), Some(attributes)) = (material.class(), node["attributes"].as_object_mut()) {
+        attributes.extend(class.attributes());
+    }
+    node
 }
 
 /// A profile as IFC has it: the `class` of its parametric profile definition, `ProfileType`

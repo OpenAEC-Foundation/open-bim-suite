@@ -23,6 +23,7 @@
 
 pub mod annotate;
 pub mod buildup;
+pub mod class;
 pub mod component;
 pub mod connection;
 pub mod drawing;
@@ -46,6 +47,7 @@ pub mod system;
 pub mod template;
 
 pub use buildup::{BuildUp, Layer, Role};
+pub use class::{Family, StrengthClass};
 pub use hatch::{Hatch, HatchSet};
 pub use library::Library;
 pub use material::{DrawingStandard, HatchKind, HatchPattern, Material, Names};
