@@ -1738,6 +1738,8 @@
     "double click": "double-clic",
     "Clear pivot": "Supprimer le point de rotation",
     "An opening in a wall is a rectangle, level and plumb": "Une ouverture dans un mur est un rectangle, de niveau et d'aplomb",
-    "Wall sketch": "Esquisse du mur"
+    "Wall sketch": "Esquisse du mur",
+    "Pick (S)": "Choisir (S)",
+    "An opening in a system floor is a rectangle along its laying direction": "Une ouverture dans un plancher système est un rectangle dans le sens de pose"
   }
 }

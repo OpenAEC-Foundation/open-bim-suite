@@ -1738,6 +1738,8 @@
     "double click": "Doppelklick",
     "Clear pivot": "Drehpunkt aufheben",
     "An opening in a wall is a rectangle, level and plumb": "Eine Öffnung in einer Wand ist ein Rechteck, waagerecht und lotrecht",
-    "Wall sketch": "Wandskizze"
+    "Wall sketch": "Wandskizze",
+    "Pick (S)": "Wählen (S)",
+    "An opening in a system floor is a rectangle along its laying direction": "Eine Öffnung in einer Systemdecke ist ein Rechteck in Verlegerichtung"
   }
 }

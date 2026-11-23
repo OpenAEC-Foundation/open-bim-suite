@@ -1738,6 +1738,8 @@
     "double click": "doble clic",
     "Clear pivot": "Quitar punto de giro",
     "An opening in a wall is a rectangle, level and plumb": "Un hueco en un muro es un rectángulo, a nivel y a plomo",
-    "Wall sketch": "Croquis del muro"
+    "Wall sketch": "Croquis del muro",
+    "Pick (S)": "Elegir (S)",
+    "An opening in a system floor is a rectangle along its laying direction": "Un hueco en un forjado de sistema es un rectángulo en la dirección de colocación"
   }
 }

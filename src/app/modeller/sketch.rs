@@ -187,6 +187,8 @@ pub enum SketchError {
     Branch,
     /// A loop inside a wall's outline is not a rectangle with level and plumb sides.
     OpeningNotSquare,
+    /// A loop inside a system floor's outline is not a rectangle along its laying direction.
+    OpeningNotAlong,
 }
 
 impl SketchError {
@@ -195,6 +197,7 @@ impl SketchError {
             Self::Empty => l.text("De schets heeft geen lijnen", "The sketch has no lines"),
             Self::Gap => l.text("De omtrek is niet gesloten", "The outline is not closed"),
             Self::Branch => l.text("In een punt komen meer dan twee lijnen samen", "More than two lines meet in a point"),
+            Self::OpeningNotAlong => l.text("Een opening in een systeemvloer is een rechthoek langs de legrichting", "An opening in a system floor is a rectangle along its laying direction"),
             Self::OpeningNotSquare => l.text("Een opening in een wand is een rechthoek, waterpas en te lood", "An opening in a wall is a rectangle, level and plumb"),
         }
     }
@@ -399,8 +402,15 @@ impl App {
                 (outline, holes, s.base, Vec::new())
             }
             Shape::Planar(PlanarDef { form: PlanarForm::Slab { outline, holes, top, bulges, .. }, .. }) => (outline, holes, top, bulges),
+            // a floor made as a system: its outline, and its openings (but the drilled ones) as
+            // rectangles along its line
             Shape::System(s) if s.lies() => match super::slab_handles::lying_outline(&s) {
-                Some(outline) => (outline, Vec::new(), s.base, Vec::new()),
+                Some(outline) => {
+                    let dir = (s.end - s.start).try_normalize().unwrap_or(DVec2::X);
+                    let at = |u: f64, v: f64| s.start + dir * u + dir.perp() * v;
+                    let holes = s.openings.iter().filter(|o| !o.framing.is_some_and(|f| f.round)).map(|o| vec![at(o.along, o.sill), at(o.along + o.width, o.sill), at(o.along + o.width, o.sill + o.height), at(o.along, o.sill + o.height)]).collect();
+                    (outline, holes, s.base, Vec::new())
+                }
                 None => return,
             },
             _ => return,
@@ -521,7 +531,8 @@ impl App {
         true
     }
 
-    /// A key in the sketch: L, R, A and T take a tool (the same key again lets it go).
+    /// A key in the sketch: L, R, A and T take a tool (the same key again lets it go), S lets
+    /// the tool go.
     pub(in crate::app) fn sketch_key(&mut self, key: char) {
         let Some(sketch) = self.modeller.sketch.as_mut() else { return };
         let tool = match key.to_ascii_lowercase() {
@@ -529,6 +540,7 @@ impl App {
             'r' => SketchTool::Rectangle,
             'a' => SketchTool::Arc,
             't' => SketchTool::Trim,
+            's' => SketchTool::Pick,
             _ => return,
         };
         sketch.tool = if sketch.tool == tool { SketchTool::Pick } else { tool };
@@ -631,9 +643,28 @@ impl App {
                 return;
             }
         }
-        // a lying system takes the outline, its bows as chords; loops inside it are not its
-        // openings (those are its own, in its properties)
+        // a lying system takes the outline, its bows as chords; every other loop is an opening in
+        // it, a rectangle along its line, cut and trimmed as its type says. Its drilled openings
+        // stay as they are.
         if let Shape::System(s) = &mut shape {
+            let Some(dir) = (s.end - s.start).try_normalize() else { return };
+            let mut openings: Vec<bim_core::Opening> = s.openings.iter().filter(|o| o.framing.is_some_and(|f| f.round)).copied().collect();
+            for hole in &rings {
+                let (hole, bows) = apart(hole);
+                let local: Vec<DVec2> = hole.iter().map(|p| DVec2::new((*p - s.start).dot(dir), (*p - s.start).dot(dir.perp()))).collect();
+                let (a, b) = local.iter().fold((DVec2::splat(f64::INFINITY), DVec2::splat(f64::NEG_INFINITY)), |(a, b), p| (a.min(*p), b.max(*p)));
+                let tol = 10.0 * MEET;
+                let square = bows.iter().all(|b| *b == 0.0) && local.iter().all(|p| ((p.x - a.x).abs() < tol || (p.x - b.x).abs() < tol) && ((p.y - a.y).abs() < tol || (p.y - b.y).abs() < tol)) && (area2(&local).abs() / 2.0 - (b.x - a.x) * (b.y - a.y)).abs() < tol;
+                if !square {
+                    if let Some(sketch) = self.modeller.sketch.as_mut() {
+                        sketch.error = Some(SketchError::OpeningNotAlong);
+                    }
+                    return;
+                }
+                let was = s.openings.iter().find(|o| (o.along - a.x).abs() < tol && (o.sill - a.y).abs() < tol && (o.width - (b.x - a.x)).abs() < tol && (o.height - (b.y - a.y)).abs() < tol);
+                openings.push(bim_core::Opening { along: a.x, sill: a.y, width: b.x - a.x, height: b.y - a.y, framing: was.and_then(|o| o.framing) });
+            }
+            s.openings = openings;
             s.outline = bowed(&corners, &bows);
             match self.modeller.model.replace(old.reshaped(&grid, shape)) {
                 Ok(()) => {
@@ -730,6 +761,7 @@ impl App {
         let is = |t: SketchTool| sketch.tool == t;
         let bar = Row::new()
             .spacing(4)
+            .push(tool(l.text("Kiezen (S)", "Pick (S)"), 's', is(SketchTool::Pick)))
             .push(tool(l.text("Lijn (L)", "Line (L)"), 'l', is(SketchTool::Line)))
             .push(tool(l.text("Rechthoek (R)", "Rectangle (R)"), 'r', is(SketchTool::Rectangle)))
             .push(tool(l.text("Boog (A)", "Arc (A)"), 'a', is(SketchTool::Arc)))

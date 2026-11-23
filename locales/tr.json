@@ -1738,6 +1738,8 @@
     "double click": "çift tıklama",
     "Clear pivot": "Döndürme noktasını kaldır",
     "An opening in a wall is a rectangle, level and plumb": "Duvardaki bir boşluk, terazisinde ve şakülünde bir dikdörtgendir",
-    "Wall sketch": "Duvar eskizi"
+    "Wall sketch": "Duvar eskizi",
+    "Pick (S)": "Seç (S)",
+    "An opening in a system floor is a rectangle along its laying direction": "Sistem döşemesindeki bir boşluk, döşeme yönü boyunca bir dikdörtgendir"
   }
 }
