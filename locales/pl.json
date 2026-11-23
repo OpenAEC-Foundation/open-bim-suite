@@ -1822,6 +1822,16 @@
     "Level of detail of the project": "Poziom szczegółowości projektu",
     "design element: the outline alone": "element projektowy: sam obrys",
     "as it is built: layers, parts and hatches": "tak jak zbudowane: warstwy, części i kreskowania",
-    "everything there is: every part and all the data": "wszystko, co jest: każda część i wszystkie dane"
+    "everything there is: every part and all the data": "wszystko, co jest: każda część i wszystkie dane",
+    "Line patterns": "Wzory linii",
+    "+ Line pattern": "+ Wzór linii",
+    "Line pattern": "Wzór linii",
+    "Line weight": "Grubość linii",
+    "At a scale": "Wg skali",
+    "Another width at a scale: 100=0.35 200=0.25. Empty is the same width at every scale.": "Inna szerokość w skali: 100=0.35 200=0.25. Puste to ta sama szerokość w każdej skali.",
+    "A colour as #rrggbb. Empty is the colour of what is drawn.": "Kolor jako #rrggbb. Puste to kolor tego, co jest rysowane.",
+    "Read AutoCAD linetypes (.lin)": "Wczytaj rodzaje linii AutoCAD (.lin)",
+    "Save as AutoCAD linetypes (.lin)": "Zapisz jako rodzaje linii AutoCAD (.lin)",
+    "AutoCAD linetypes": "Rodzaje linii AutoCAD"
   }
 }

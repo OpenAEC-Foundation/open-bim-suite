@@ -106,7 +106,7 @@ impl Rules {
         Rules {
             cut: standard.pen(&kind.cut).map_or(plain.cut, |pen| pen.width),
             beyond,
-            hidden: standard.line_style(&kind.hidden).map_or(plain.hidden, |style| style.dashes.iter().map(|d| d * beyond).collect()),
+            hidden: standard.line_pattern(&kind.hidden).map_or(plain.hidden, |style| style.dashes.iter().map(|d| d * beyond).collect()),
             text: standard.text_style(&kind.text).map_or(plain.text, |style| style.height / 1000.0),
             hatched: kind.hatched,
         }

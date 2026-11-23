@@ -1822,6 +1822,16 @@
     "Level of detail of the project": "Projenin ayrıntı düzeyi",
     "design element: the outline alone": "tasarım elemanı: yalnızca dış hat",
     "as it is built: layers, parts and hatches": "yapıldığı gibi: katmanlar, parçalar ve taramalar",
-    "everything there is: every part and all the data": "var olan her şey: her parça ve tüm veriler"
+    "everything there is: every part and all the data": "var olan her şey: her parça ve tüm veriler",
+    "Line patterns": "Çizgi desenleri",
+    "+ Line pattern": "+ Çizgi deseni",
+    "Line pattern": "Çizgi deseni",
+    "Line weight": "Çizgi kalınlığı",
+    "At a scale": "Ölçeğe göre",
+    "Another width at a scale: 100=0.35 200=0.25. Empty is the same width at every scale.": "Bir ölçekte başka bir genişlik: 100=0.35 200=0.25. Boş bırakılırsa her ölçekte aynı genişlik.",
+    "A colour as #rrggbb. Empty is the colour of what is drawn.": "#rrggbb biçiminde bir renk. Boş bırakılırsa çizilen şeyin rengi.",
+    "Read AutoCAD linetypes (.lin)": "AutoCAD çizgi tiplerini oku (.lin)",
+    "Save as AutoCAD linetypes (.lin)": "AutoCAD çizgi tipleri olarak kaydet (.lin)",
+    "AutoCAD linetypes": "AutoCAD çizgi tipleri"
   }
 }
