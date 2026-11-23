@@ -14,11 +14,16 @@
 //!
 //! Written from the ILS as it is commonly cited, not checked against its text here.
 //!
-//! Not yet: linear, system and object types; the ILS's other points (storeys, placing, doubles),
+//! A linear type does the same ([`LinearType::delivery`]); its role says whether it bears where
+//! its code does not: a column, a beam and a pile do, a mullion, a skirting board and the runs of
+//! the services do not. Of a run of the services a delivery asks no fire rating here.
+//!
+//! Not yet: system and object types; the ILS's other points (storeys, placing, doubles),
 //! which are of a model and not of a library.
 
 use crate::buildup::{BuildUp, Role};
 use crate::material::Material;
+use crate::profile::{LinearRole, LinearType};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -110,6 +115,53 @@ impl BuildUp {
     }
 }
 
+impl LinearType {
+    /// Whether it is of the services: a pipe, a duct, a cable tray.
+    fn of_services(&self) -> bool {
+        matches!(self.role, LinearRole::Pipe | LinearRole::Duct | LinearRole::CableTray)
+    }
+
+    /// Whether it is external: what it says itself, else what its code says (the groups 21, 27,
+    /// 31 and 41 of NL-SfB are of the outside).
+    pub fn is_external(&self) -> bool {
+        self.delivery.is_external.unwrap_or_else(|| ["21", "27", "31", "41"].iter().any(|group| self.nlsfb().starts_with(group)))
+    }
+
+    /// Whether it bears: what it says itself, else what its code says, else what its role says;
+    /// none for a member whose code does not say.
+    pub fn load_bearing(&self) -> Option<bool> {
+        self.delivery.load_bearing.or_else(|| bears(&self.nlsfb())).or(match self.role {
+            LinearRole::Column | LinearRole::Beam | LinearRole::Pile => Some(true),
+            LinearRole::Member => None,
+            LinearRole::Mullion | LinearRole::Skirting | LinearRole::Pipe | LinearRole::Duct | LinearRole::CableTray => Some(false),
+        })
+    }
+
+    /// IFC's own properties of it for a delivery (`Pset_BeamCommon`, `Pset_ColumnCommon` and
+    /// their likes).
+    pub fn delivery_properties(&self) -> Vec<(&'static str, Value)> {
+        let mut out = vec![("IsExternal", json!(self.is_external()))];
+        out.extend(self.load_bearing().map(|bears| ("LoadBearing", json!(bears))));
+        out.extend(self.delivery.fire_rating.as_deref().filter(|rating| !rating.trim().is_empty()).map(|rating| ("FireRating", json!(rating))));
+        out
+    }
+
+    /// What it still lacks for a delivery.
+    pub fn missing(&self) -> Vec<Missing> {
+        let mut out = Vec::new();
+        if self.nlsfb().chars().filter(char::is_ascii_digit).count() < 4 {
+            out.push(Missing::FourDigits);
+        }
+        if self.load_bearing().is_none() {
+            out.push(Missing::LoadBearing);
+        }
+        if !self.of_services() && self.delivery.fire_rating.as_deref().is_none_or(|rating| rating.trim().is_empty()) {
+            out.push(Missing::FireRating);
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,4 +216,37 @@ mod tests {
         // a build-up written before this reads as saying nothing
         assert_eq!(serde_json::from_value::<BuildUp>(before).unwrap().delivery, Delivery::default());
     }
+    #[test]
+    fn a_linear_type_says_what_a_delivery_asks_or_leaves_it_to_its_role_and_code() {
+        let library = Library::starter();
+        let of = |role: LinearRole| library.linear_types.iter().find(|t| t.role == role).cloned();
+        let beam = of(LinearRole::Beam).expect("a beam");
+        // a beam bears by its role, and is of the inside by its code (28)
+        assert_eq!((beam.load_bearing(), beam.is_external(), beam.missing()), (Some(true), false, vec![Missing::FourDigits, Missing::FireRating]));
+        // its code says more than its role; what it says itself more than both
+        let coded = LinearType { code: Some("28.11".into()), ..beam.clone() };
+        assert_eq!((coded.load_bearing(), coded.missing()), (Some(false), vec![Missing::FireRating]));
+        let own = LinearType { delivery: Delivery { load_bearing: Some(true), is_external: Some(true), fire_rating: Some("R 60".into()) }, ..coded };
+        assert_eq!((own.load_bearing(), own.is_external(), own.missing()), (Some(true), true, vec![]));
+        assert_eq!(own.delivery_properties(), [("IsExternal", json!(true)), ("LoadBearing", json!(true)), ("FireRating", json!("R 60"))]);
+        // a member's code has to say whether it bears; a mullion is of the outside and bears nothing
+        let member = LinearType { role: LinearRole::Member, ..beam.clone() };
+        assert_eq!((member.load_bearing(), member.missing().contains(&Missing::LoadBearing)), (None, true));
+        let mullion = LinearType { role: LinearRole::Mullion, ..beam.clone() };
+        assert_eq!((mullion.load_bearing(), mullion.is_external()), (Some(false), true));
+        // of a run of the services no fire rating is asked
+        let pipe = LinearType { role: LinearRole::Pipe, ..beam.clone() };
+        assert_eq!((pipe.load_bearing(), pipe.missing()), (Some(false), vec![Missing::FourDigits]));
+        // to a file and back; a type that says nothing writes nothing
+        let mut library = library;
+        let id = beam.id.clone();
+        assert!(serde_json::to_value(&beam).unwrap().get("delivery").is_none());
+        library.linear_types.iter_mut().find(|t| t.id == id).unwrap().delivery.fire_rating = Some("R 30".into());
+        let file = crate::ifcx::file(&library, "test", "test", "2026-11-23T00:00:00Z");
+        let path = crate::ifcx::linear_type_path(&id);
+        let node = file["data"].as_array().unwrap().iter().find(|n| n["path"] == path.as_str()).unwrap();
+        assert_eq!((node["attributes"]["bsi::ifc::prop::FireRating"].as_str(), node["attributes"]["bsi::ifc::prop::LoadBearing"].as_bool()), (Some("R 30"), Some(true)));
+        assert_eq!(crate::ifcx::read(&file).unwrap().linear_type(&id).map(|t| t.delivery.fire_rating.clone()), Some(Some("R 30".to_string())));
+    }
+
 }

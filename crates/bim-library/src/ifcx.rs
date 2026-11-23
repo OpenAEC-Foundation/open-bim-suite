@@ -171,6 +171,11 @@ pub fn nodes(library: &Library) -> Vec<Value> {
                 PROFILE: profile_value(&t.profile, t.designation.as_deref()),
             }
         }));
+        if let Some(attributes) = nodes.last_mut().and_then(|node| node["attributes"].as_object_mut()) {
+            for (name, value) in t.delivery_properties() {
+                attributes.insert(format!("bsi::ifc::prop::{name}"), value);
+            }
+        }
     }
     for t in &library.system_types {
         let name = library.system_name(&t.id, Lang::En).unwrap_or_default();

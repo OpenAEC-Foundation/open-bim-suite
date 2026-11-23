@@ -323,41 +323,15 @@ impl App {
             text(format!("{refused} ({why})")).size(11).color(p.accent).wrapping(Wrapping::Word)
         });
         // what a delivery asks of it (BIM basis ILS): said here, or left to its code
-        let yes_no = |by_code: Option<bool>| -> Vec<Said> {
-            let rule = match by_code {
-                Some(true) => l.text("volgens de code: ja", "by its code: yes"),
-                Some(false) => l.text("volgens de code: nee", "by its code: no"),
-                None => l.text("volgens de code: onbekend", "by its code: unknown"),
-            };
-            vec![Said(None, rule), Said(Some(true), l.text("ja", "yes")), Said(Some(false), l.text("nee", "no"))]
-        };
         let coded = BuildUp { delivery: Default::default(), ..b.clone() };
-        let asked = |label: &'static str, choices: Vec<Said>, now: Option<bool>, to: fn(Option<bool>) -> BuildUpMessage| {
-            let picked = choices.iter().find(|c| c.0 == now).cloned();
-            let pick = pick_list(choices, picked, move |c: Said| to(c.0)).text_size(12).padding([2, 6]).width(Length::FillPortion(3));
-            row![text(label).size(12).color(p.text_secondary).width(Length::FillPortion(2)), a11y::named(pick, Aria::ComboBox, label)].spacing(8).align_y(Center)
-        };
-        let bearing = asked(l.text("Dragend", "Loadbearing"), yes_no(coded.load_bearing(&library.materials)), b.delivery.load_bearing, BuildUpMessage::Bearing);
-        let external = asked(l.text("Uitwendig", "External"), yes_no(Some(coded.is_external(&library.materials))), b.delivery.is_external, BuildUpMessage::External);
-        let rating_name = l.text("Brandwerendheid", "Fire rating");
-        let rating = row![
-            text(rating_name).size(12).color(p.text_secondary).width(Length::FillPortion(2)),
-            a11y::named(text_input("REI 60", b.delivery.fire_rating.as_deref().unwrap_or_default()).on_input(BuildUpMessage::FireRating).size(12).padding([2, 6]).width(Length::FillPortion(3)), Aria::TextField, rating_name),
-        ]
-        .spacing(8)
-        .align_y(Center);
-        let lacks: Vec<&str> = b.missing(&library.materials).into_iter().map(|missing| l.text(missing.names().0, missing.names().1)).collect();
-        let delivery = if lacks.is_empty() { l.text("BIM basis ILS: compleet", "BIM basis ILS: complete").to_string() } else { format!("{}: {}", l.text("BIM basis ILS, ontbreekt nog", "BIM basis ILS, still missing"), lacks.join(", ")) };
+        let delivery = delivery_controls(p, l, coded.load_bearing(&library.materials), coded.is_external(&library.materials), &b.delivery, b.missing(&library.materials), BuildUpMessage::Bearing, BuildUpMessage::External, BuildUpMessage::FireRating);
         // what is edited, under the drawing of what it makes
         let editor = column![
             layers,
             text(total).size(11).color(p.text_secondary),
             own,
             super::codes::picker(p, l, library, b.rule_code(&library.materials), b.code.as_deref(), BuildUpMessage::Coded),
-            bearing,
-            external,
-            rating,
-            text(delivery).size(11).color(p.text_secondary).wrapping(Wrapping::Word),
+            delivery,
             row![act(l.text("Dupliceren", "Duplicate"), BuildUpMessage::Duplicate), act(l.text("Verwijderen", "Remove"), BuildUpMessage::Remove), Space::new().width(Fill)].spacing(4),
         ]
         .push(refused)
@@ -372,6 +346,52 @@ impl App {
         .spacing(8);
         container(pane).padding(8).into()
     }
+}
+
+/// The fields of what a delivery asks of a type (BIM basis ILS): whether it bears and whether it
+/// is external, each said or left to its code (`bears` and `external` are what the code says),
+/// its fire rating, and a line of what it still lacks.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn delivery_controls<'a, M: Clone + 'a>(
+    p: Palette,
+    l: Language,
+    bears: Option<bool>,
+    external: bool,
+    delivery: &bim_library::ils::Delivery,
+    lacks: Vec<bim_library::ils::Missing>,
+    to_bearing: fn(Option<bool>) -> M,
+    to_external: fn(Option<bool>) -> M,
+    to_rating: fn(String) -> M,
+) -> Column<'a, M> {
+    let yes_no = |by_code: Option<bool>| -> Vec<Said> {
+        let rule = match by_code {
+            Some(true) => l.text("volgens de code: ja", "by its code: yes"),
+            Some(false) => l.text("volgens de code: nee", "by its code: no"),
+            None => l.text("volgens de code: onbekend", "by its code: unknown"),
+        };
+        vec![Said(None, rule), Said(Some(true), l.text("ja", "yes")), Said(Some(false), l.text("nee", "no"))]
+    };
+    let asked = |label: &'static str, choices: Vec<Said>, now: Option<bool>, to: fn(Option<bool>) -> M| {
+        let picked = choices.iter().find(|c| c.0 == now).cloned();
+        let pick = pick_list(choices, picked, move |c: Said| to(c.0)).text_size(12).padding([2, 6]).width(Length::FillPortion(3));
+        row![text(label).size(12).color(p.text_secondary).width(Length::FillPortion(2)), a11y::named(pick, Aria::ComboBox, label)].spacing(8).align_y(Center)
+    };
+    let rating_name = l.text("Brandwerendheid", "Fire rating");
+    let rating = row![
+        text(rating_name).size(12).color(p.text_secondary).width(Length::FillPortion(2)),
+        a11y::named(text_input("REI 60", delivery.fire_rating.as_deref().unwrap_or_default()).on_input(to_rating).size(12).padding([2, 6]).width(Length::FillPortion(3)), Aria::TextField, rating_name),
+    ]
+    .spacing(8)
+    .align_y(Center);
+    let lacks: Vec<&str> = lacks.into_iter().map(|missing| l.text(missing.names().0, missing.names().1)).collect();
+    let says = if lacks.is_empty() { l.text("BIM basis ILS: compleet", "BIM basis ILS: complete").to_string() } else { format!("{}: {}", l.text("BIM basis ILS, ontbreekt nog", "BIM basis ILS, still missing"), lacks.join(", ")) };
+    column![
+        asked(l.text("Dragend", "Loadbearing"), yes_no(bears), delivery.load_bearing, to_bearing),
+        asked(l.text("Uitwendig", "External"), yes_no(Some(external)), delivery.is_external, to_external),
+        rating,
+        text(says).size(11).color(p.text_secondary).wrapping(Wrapping::Word),
+    ]
+    .spacing(8)
 }
 
 /// What a build-up says of itself for a delivery (none: as its code says), with its name, to pick.
