@@ -1732,6 +1732,8 @@
     "Grid line: click a curtain wall (near its foot or head: upright, near an end: level) · drag a line to move it · Shift + click: take a line away · Esc: stop": "Linea di griglia: fare clic su una facciata continua (vicino al piede o alla testa: verticale, vicino a un'estremità: orizzontale) · trascinare una linea per spostarla · Maiusc + clic: togli una linea · Esc: termina",
     "Panel: click a bay · glass, closed, door, open · Esc: stop": "Pannello: fare clic su una campata · vetro, chiuso, porta, aperto · Esc: termina",
     "from height": "dall'altezza",
-    "Railing": "Ringhiera"
+    "Railing": "Ringhiera",
+    "Square only": "Solo ortogonale",
+    "Draw only level and upright from the last point; off: any angle": "Disegna solo in orizzontale e in verticale dall'ultimo punto; spento: qualsiasi angolo"
   }
 }

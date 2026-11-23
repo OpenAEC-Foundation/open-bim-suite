@@ -1732,6 +1732,8 @@
     "Grid line: click a curtain wall (near its foot or head: upright, near an end: level) · drag a line to move it · Shift + click: take a line away · Esc: stop": "Ligne de trame : cliquez un mur-rideau (près du pied ou de la tête : verticale, près d'une extrémité : horizontale) · faites glisser une ligne pour la déplacer · Maj + clic : enlever une ligne · Échap : arrêter",
     "Panel: click a bay · glass, closed, door, open · Esc: stop": "Panneau : cliquez une travée · verre, plein, porte, ouvert · Échap : arrêter",
     "from height": "selon la hauteur",
-    "Railing": "Garde-corps"
+    "Railing": "Garde-corps",
+    "Square only": "Orthogonal seul",
+    "Draw only level and upright from the last point; off: any angle": "Dessiner seulement à l'horizontale et à la verticale depuis le dernier point ; désactivé : tout angle"
   }
 }

@@ -331,6 +331,7 @@ impl App {
             word: l.text("Doorsnede", "Section"),
             pick: self.mark_pick,
             more: self.lines_picked(),
+            square: self.modeller.snaps.square,
             palette: p,
             on_paper: self.drawing_on_paper,
             // on paper the view draws its grid lines and levels itself; over the model the
@@ -746,6 +747,8 @@ pub(super) struct ViewMarks {
     selected: Vec<u64>,
     /// The lines picked beside `pick`, each shape by its first line.
     more: Vec<usize>,
+    /// Square only: a line or a polyline runs along the drawing's x or y from its last point.
+    square: bool,
     /// The drawing tool that is on.
     drawing: Option<DrawKind>,
     /// How many of `lines` are the view's own (the first ones): those can be picked.
@@ -896,10 +899,19 @@ impl ViewMarks {
     /// Where a drawing tool's click lands: on an object snap of what is drawn there (see
     /// [`Osnap`]), `from` being the point clicked before; else on the point under the pointer.
     fn draw_snap(&self, screen: &Screen, pointer: Point, from: Option<[f64; 2]>) -> Option<([f64; 2], Option<Osnap>)> {
-        if let Some((q, kind)) = self.object_snap(screen, pointer, from) {
-            return Some((q, Some(kind)));
+        let (q, kind) = match self.object_snap(screen, pointer, from) {
+            Some((q, kind)) => (q, Some(kind)),
+            None => (self.at(screen, pointer)?, None),
+        };
+        // square only: a line or a polyline goes on along x or y from its last point
+        let lined = matches!(self.drawing, Some(DrawKind::Line | DrawKind::Polyline));
+        match from.filter(|_| self.square && lined) {
+            Some(from) => {
+                let to = crate::app::modeller::snaps::squared(glam::DVec2::from(from), glam::DVec2::from(q));
+                Some(([to.x, to.y], kind.filter(|_| to.distance(glam::DVec2::from(q)) < 1e-9)))
+            }
+            None => Some((q, kind)),
         }
-        self.at(screen, pointer).map(|q| (q, None))
     }
 
     /// The object snap under the pointer, as a drafting program has them: the nearest of the

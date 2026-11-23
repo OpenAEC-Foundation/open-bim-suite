@@ -256,7 +256,7 @@ pub struct Modeller {
     /// The kind of snap that took the cursor's point where it is, for its mark; and what that
     /// kind is called, in the interface language.
     pub snap_mark: Option<snaps::Snap>,
-    pub snap_words: [&'static str; 6],
+    pub snap_words: [&'static str; 7],
     /// The series of grid lines being typed beside the picked one (see `grids`); `None`: closed.
     pub grid_series: Option<String>,
     /// The tool on the grid of curtain walls that is on (see `curtain`).
@@ -640,6 +640,16 @@ impl App {
     /// The point of [`App::snapped`], and the kind of snap that took it there (none for a click
     /// that is where it is, rounded).
     pub(super) fn snapped_as(&self, p: DVec3, x: f32, y: f32, width: f32, height: f32) -> (DVec3, Option<snaps::Snap>) {
+        let (q, kind) = self.snapped_free(p, x, y, width, height);
+        // square only: along x or y from the last point, whatever it landed on
+        match self.modeller.points.last().filter(|_| self.modeller.snaps.square) {
+            Some(from) => (snaps::squared(from.truncate(), q.truncate()).extend(q.z), kind.or(Some(snaps::Snap::Square))),
+            None => (q, kind),
+        }
+    }
+
+    /// The point of [`App::snapped_as`] before Square only holds it to an axis.
+    fn snapped_free(&self, p: DVec3, x: f32, y: f32, width: f32, height: f32) -> (DVec3, Option<snaps::Snap>) {
         let near = self
             .snap_marks_except(ElementId(0))
             .into_iter()
@@ -1693,6 +1703,32 @@ mod tests {
         assert_eq!(app.selected_modelled(), [id]);
         click(&mut app, 3.0, 1.5);
         assert!(app.selected_modelled().is_empty());
+    }
+
+    #[test]
+    fn square_only_draws_along_x_or_y_whatever_is_clicked_and_off_any_angle() {
+        let mut app = modelling();
+        let walls = |app: &App| -> Vec<(DVec2, DVec2)> {
+            let grid = app.modeller.model.grid;
+            app.modeller.model.iter().filter_map(|e| match e.shape_in_project(&grid) { Shape::Planar(PlanarDef { form: PlanarForm::Wall { start, end, .. }, .. }) => Some((start, end)), _ => None }).collect()
+        };
+        // off (as it starts): a wall at any angle
+        app.set_model_tool(Some((ModelTool::Wall, "Wall")));
+        app.modeller.placement.chain = false;
+        click(&mut app, 0.0, 0.0);
+        click(&mut app, 4.0, 3.0);
+        assert_eq!(walls(&app), [(DVec2::ZERO, DVec2::new(4.0, 3.0))]);
+        // on: the same clicks give a wall along x, the longer way; and one mostly up a wall along y
+        let _ = app.update(Message::SnapToggle(snaps::Snap::Square));
+        click(&mut app, 0.0, 10.0);
+        click(&mut app, 4.0, 13.0);
+        click(&mut app, 10.0, 10.0);
+        click(&mut app, 11.0, 15.0);
+        assert_eq!(walls(&app)[1..], [(DVec2::new(0.0, 10.0), DVec2::new(4.0, 10.0)), (DVec2::new(10.0, 10.0), DVec2::new(10.0, 15.0))]);
+        // even a click on the corner of another wall is held to the axis
+        click(&mut app, 0.0, 20.0);
+        click(&mut app, 4.0, 13.0);
+        assert_eq!(walls(&app)[3], (DVec2::new(0.0, 20.0), DVec2::new(0.0, 13.0)));
     }
 
     #[test]

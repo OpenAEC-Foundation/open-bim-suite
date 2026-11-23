@@ -1732,6 +1732,8 @@
     "Grid line: click a curtain wall (near its foot or head: upright, near an end: level) · drag a line to move it · Shift + click: take a line away · Esc: stop": "Rutnätslinje: klicka en glasfasad (nära foten eller toppen: stående, nära en ände: liggande) · dra en linje för att flytta den · Skift + klick: ta bort en linje · Esc: avsluta",
     "Panel: click a bay · glass, closed, door, open · Esc: stop": "Panel: klicka ett fack · glas, tät, dörr, öppen · Esc: avsluta",
     "from height": "från höjden",
-    "Railing": "Räcke"
+    "Railing": "Räcke",
+    "Square only": "Endast vinkelrätt",
+    "Draw only level and upright from the last point; off: any angle": "Rita bara vågrätt och lodrätt från den senaste punkten; av: valfri vinkel"
   }
 }

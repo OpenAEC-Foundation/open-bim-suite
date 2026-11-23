@@ -566,10 +566,20 @@ impl App {
             .filter_map(|q| self.on_screen(DVec3::new(q.x, q.y, sketch.top), width, height).map(|s| (q, (s.0 - x).hypot(s.1 - y))))
             .filter(|(_, d)| *d <= REACH)
             .min_by(|a, b| a.1.total_cmp(&b.1));
-        match near {
+        let free = match near {
             Some((q, _)) => Some(q.truncate()),
             None => self.plane_point(x, y, width, height, sketch.top).map(|p| DVec2::new((p.x / ROUND).round() * ROUND, (p.y / ROUND).round() * ROUND)),
-        }
+        }?;
+        // square only: a line, and a stair's climb line, run along x or y from their last point
+        let from = match sketch.tool {
+            SketchTool::Line => sketch.first,
+            SketchTool::Path => sketch.path.last().copied(),
+            _ => None,
+        };
+        Some(match from.filter(|_| self.modeller.snaps.square && but.is_none()) {
+            Some(from) => super::snaps::squared(from, free),
+            None => free,
+        })
     }
 
     /// The line of the sketch under viewport point (x, y), and the point of the sketch's plane
