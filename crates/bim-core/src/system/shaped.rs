@@ -4,8 +4,8 @@
 //! its start and up from its base. The system is made as the rectangle its line and its height
 //! make, with its openings framed as its type frames them, and then cut to the outline: a part
 //! the outline crosses is cut on it, one outside it is left out. What stands past the ends of the
-//! rectangle (a layer that runs on around a corner) is kept as it is. No plate is laid along a
-//! sloping cut: the members end on it.
+//! rectangle (a layer that runs on around a corner) is kept as it is. A framed system gets a
+//! plate along every cut that is not an edge of the rectangle, and its frame ends under it.
 
 use crate::boolean::{boolean, BooleanOp};
 use crate::element::{PartSolid, SystemDef};
@@ -41,7 +41,10 @@ pub(super) fn bounded(s: &SystemDef) -> Result<Option<(SystemDef, Vec<DVec2>)>, 
     Ok(Some((rectangle, s.outline.clone())))
 }
 
-/// The `parts` of standing system `s` (made as its rectangle) cut to `outline` in its face.
+/// The `parts` of standing system `s` (made as its rectangle) cut to `outline` in its face. A
+/// framed system gets a plate along every edge of the outline that is not an edge of the
+/// rectangle (a sloping cut, a lowered head), as wide and as deep as its members: the members
+/// of its frame end under it, everything else on the outline.
 pub(super) fn cut(s: &SystemDef, outline: &[DVec2], parts: Vec<PartSolid>) -> Result<Vec<PartSolid>, Refusal> {
     if outline.is_empty() {
         return Ok(parts);
@@ -49,27 +52,77 @@ pub(super) fn cut(s: &SystemDef, outline: &[DVec2], parts: Vec<PartSolid>) -> Re
     let dir = (s.end - s.start).try_normalize().ok_or(Refusal::ZeroLength)?;
     let length = (s.end - s.start).length();
     let left = dir.perp();
+    let tol = LINEAR_TOLERANCE;
     // the outline through the whole of the system: along its line, up, and across it
     let axes = Axes::new((s.start + left * THROUGH).extend(s.base), dir.extend(0.0), (-left).extend(0.0))?;
-    let ring = if area2(outline) < 0.0 { outline.iter().rev().copied().collect() } else { outline.to_vec() };
-    let tool = Solid::extrude(&Profile::new(ring, Vec::new())?, &axes, 2.0 * THROUGH)?;
-    let mut kept = Vec::with_capacity(parts.len());
+    let ring: Vec<DVec2> = if area2(outline) < 0.0 { outline.iter().rev().copied().collect() } else { outline.to_vec() };
+    let n = ring.len();
+    let tool = Solid::extrude(&Profile::new(ring.clone(), Vec::new())?, &axes, 2.0 * THROUGH)?;
+    // the plates: along the edges that are not the rectangle's, a member's width in from them
+    let frame = s.system_type.as_ref().filter(|t| t.framing.is_some()).map(|t| t.member_material.clone());
+    let on_rectangle = |a: DVec2, b: DVec2| {
+        let both = |at: &dyn Fn(DVec2) -> f64, to: f64| (at(a) - to).abs() < tol && (at(b) - to).abs() < tol;
+        both(&|p| p.x, 0.0) || both(&|p| p.x, length) || both(&|p| p.y, 0.0) || both(&|p| p.y, s.height)
+    };
+    let plated: Vec<bool> = (0..n).map(|i| frame.is_some() && !on_rectangle(ring[i], ring[(i + 1) % n])).collect();
+    let within: Option<(Vec<DVec2>, Solid)> = if plated.iter().any(|p| *p) {
+        // every corner where its two edges meet, each as far in as its plate is wide
+        let w = s.member.x;
+        let edge = |i: usize| {
+            let (a, b) = (ring[i], ring[(i + 1) % n]);
+            let along = (b - a).try_normalize().unwrap_or(DVec2::X);
+            (a + along.perp() * if plated[i] { w } else { 0.0 }, along)
+        };
+        let inner: Vec<DVec2> = (0..n)
+            .map(|i| {
+                let ((p, t), (q, u)) = (edge((i + n - 1) % n), edge(i));
+                let cross = t.perp_dot(u);
+                if cross.abs() < 1e-9 {
+                    q
+                } else {
+                    p + t * ((q - p).perp_dot(u) / cross)
+                }
+            })
+            .collect();
+        Some((inner.clone(), Solid::extrude(&Profile::new(inner, Vec::new())?, &axes, 2.0 * THROUGH)?))
+    } else {
+        None
+    };
+    let half = s.member.y / 2.0;
+    let mut kept = Vec::with_capacity(parts.len() + n);
     for part in parts {
-        // where it lies in the face, as far as the rectangle goes
+        // where it lies in the face, as far as the rectangle goes, and across the system
         let (mut lo, mut hi) = (DVec2::splat(f64::INFINITY), DVec2::splat(f64::NEG_INFINITY));
+        let mut across = (f64::INFINITY, f64::NEG_INFINITY);
         for q in &part.solid.positions {
-            let at = DVec2::new((DVec2::new(q.x, q.y) - s.start).dot(dir), q.z - s.base);
+            let flat = DVec2::new(q.x, q.y) - s.start;
+            let at = DVec2::new(flat.dot(dir), q.z - s.base);
             (lo, hi) = (lo.min(at), hi.max(at));
+            across = (across.0.min(flat.dot(left)), across.1.max(flat.dot(left)));
         }
+        // a member of the frame itself ends under the plates
+        let framed = part.class == "IfcMember" && frame.is_some() && part.material == frame && across.0 >= -half - tol && across.1 <= half + tol;
+        let (ring, tool) = match &within {
+            Some((inner, tool)) if framed => (inner.as_slice(), tool),
+            _ => (ring.as_slice(), &tool),
+        };
         let (a, b) = (DVec2::new(lo.x.max(0.0), lo.y.max(0.0)), DVec2::new(hi.x.min(length), hi.y.min(s.height)));
-        match lies(a, b, outline) {
+        match lies(a, b, ring) {
             Lies::Inside => kept.push(part),
             Lies::Outside => {}
-            Lies::Across => match boolean(&part.solid, &tool, BooleanOp::Intersection) {
+            Lies::Across => match boolean(&part.solid, tool, BooleanOp::Intersection) {
                 Ok(solid) => kept.push(PartSolid { solid, ..part }),
                 Err(Refusal::Empty) => {}
                 Err(refusal) => return Err(refusal),
             },
+        }
+    }
+    if let Some((inner, _)) = &within {
+        let across = Axes::new((s.start + left * half).extend(s.base), dir.extend(0.0), (-left).extend(0.0))?;
+        for i in (0..n).filter(|i| plated[*i]) {
+            let k = (i + 1) % n;
+            let plate = Profile::new(vec![ring[i], ring[k], inner[k], inner[i]], Vec::new())?;
+            kept.push(PartSolid { class: "IfcMember", solid: Solid::extrude(&plate, &across, s.member.y)?, material: frame.clone() });
         }
     }
     Ok(kept)
@@ -167,6 +220,12 @@ mod tests {
                 assert!(u > 4.8 + 1e-6 || v <= 1.8 + (4.8 - u) * 0.75 + 1e-6, "{u} {v}");
             }
         }
+        // along the cut a plate 38 wide, from corner to corner of it
+        let plate = made.iter().filter(|p| p.class == "IfcMember").find(|p| {
+            let at = |u: f64, v: f64| p.solid.positions.iter().any(|q| (q.y - 1.0 - u).abs() < 1e-6 && (q.z - 0.5 - v).abs() < 1e-6);
+            at(4.8, 1.8) && at(3.6, 2.7)
+        });
+        assert!(plate.is_some_and(|p| (p.solid.volume() - 1.5 * 0.038 * 0.14).abs() < 0.002), "{:?}", plate.map(|p| p.solid.volume()));
         let share = volume(&cut) / volume(&whole);
         let corner = 1.0 - 0.5 * 1.2 * 0.9 / (4.8 * 2.7);
         assert!((share - corner).abs() < 0.03, "{share} {corner}");
