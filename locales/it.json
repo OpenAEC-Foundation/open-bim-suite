@@ -1783,6 +1783,13 @@
     "Price date": "Data del prezzo",
     "Region": "Regione",
     "Checked against its source": "Verificato con la fonte",
-    "Remove the price": "Rimuovi il prezzo"
+    "Remove the price": "Rimuovi il prezzo",
+    "Class of a standard": "Classe di una norma",
+    "concrete": "calcestruzzo",
+    "structural steel": "acciaio strutturale",
+    "reinforcing steel": "acciaio d'armatura",
+    "bolts": "bulloni",
+    "timber": "legno",
+    "grade": "qualità"
   }
 }

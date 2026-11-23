@@ -1783,6 +1783,13 @@
     "Price date": "Data ceny",
     "Region": "Region",
     "Checked against its source": "Sprawdzono ze źródłem",
-    "Remove the price": "Usuń cenę"
+    "Remove the price": "Usuń cenę",
+    "Class of a standard": "Klasa z normy",
+    "concrete": "beton",
+    "structural steel": "stal konstrukcyjna",
+    "reinforcing steel": "stal zbrojeniowa",
+    "bolts": "śruby",
+    "timber": "drewno",
+    "grade": "klasa"
   }
 }

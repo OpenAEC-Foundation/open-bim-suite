@@ -127,6 +127,31 @@ pub fn price_read(typed: &[String; 11], unit: bim_library::cost::Unit, verified:
     Ok((cost, bim_library::aspect::Origin { source: text(Price::Source), date: text(Price::Date), region: Some(text(Price::Region)).filter(|r| !r.is_empty()) }))
 }
 
+/// A strength class to pick for a material's grade, shown with its family.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClassChoice {
+    pub name: String,
+    label: String,
+}
+
+impl std::fmt::Display for ClassChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
+    }
+}
+
+/// The name of a family of strength classes.
+pub fn family_name(family: bim_library::Family, l: Language) -> &'static str {
+    use bim_library::Family;
+    match family {
+        Family::Concrete => l.text("beton", "concrete"),
+        Family::Steel => l.text("constructiestaal", "structural steel"),
+        Family::Reinforcement => l.text("betonstaal", "reinforcing steel"),
+        Family::Bolt => l.text("bouten", "bolts"),
+        Family::Timber => l.text("hout", "timber"),
+    }
+}
+
 /// A unit of a price with its name, to pick.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnitChoice(pub bim_library::cost::Unit, &'static str);
@@ -633,6 +658,12 @@ impl App {
         let grade_name = l.text("Kwaliteit", "Grade");
         let grade = text_input("C24", m.grade.as_deref().unwrap_or_default()).on_input(MaterialMessage::Graded).size(12).padding([2, 6]);
         fields = fields.push(labelled(p, grade_name, a11y::named(grade, Aria::TextField, grade_name)));
+        // or picked: a class of a standard, by its family
+        let class_name = l.text("Klasse van een norm", "Class of a standard");
+        let classes: Vec<ClassChoice> = bim_library::class::classes().iter().map(|c| ClassChoice { name: c.name.clone(), label: format!("{} · {}", family_name(c.family, l), c.name) }).collect();
+        let now = m.class().and_then(|of| classes.iter().find(|c| c.name == of.name).cloned());
+        let pick = pick_list(classes, now, |c: ClassChoice| MaterialMessage::Graded(c.name)).text_size(12).padding([2, 6]).width(Fill);
+        fields = fields.push(labelled(p, class_name, a11y::named(pick, Aria::ComboBox, class_name)));
         if let Some(class) = m.timber_grade() {
             let strength = format!("fm,k {} · ft,0,k {} · fc,0,k {} · fv,k {} N/mm²", class.fm_k, class.ft_0_k, class.fc_0_k, class.fv_k);
             let stiffness = format!("E0,mean {} · Gmean {} N/mm² · ρk {} kg/m³", class.e_0_mean, class.g_mean, class.density());
@@ -974,6 +1005,12 @@ mod tests {
             let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 1200.0), app.material_pane(app.theme.palette(), Language::English));
             assert!(pane.find("No strength class of a standard: it has no values.").is_ok());
         }
+        // picked from the list: the class's own name is the grade
+        {
+            let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 2400.0), app.material_pane(app.theme.palette(), Language::English));
+            assert!(pane.find("Class of a standard").is_ok());
+        }
+        assert_eq!((family_name(bim_library::Family::Bolt, Language::English), family_name(bim_library::Family::Reinforcement, Language::Dutch)), ("bolts", "betonstaal"));
         // a grade that is no timber class is kept as it is typed; an empty one is none
         let _ = app.material_update(MaterialMessage::Graded("S355".into()));
         assert_eq!((app.library.material("timber").unwrap().grade.as_deref(), app.library.material("timber").unwrap().timber_grade()), (Some("S355"), None));

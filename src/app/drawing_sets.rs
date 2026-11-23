@@ -114,6 +114,7 @@ fn field_name(field: &LabelField, l: Language) -> String {
         LabelField::Length => l.text("lengte", "length").into(),
         LabelField::Area => l.text("oppervlakte", "area").into(),
         LabelField::Level => l.text("peil", "level").into(),
+        LabelField::Grade => l.text("kwaliteit", "grade").into(),
         LabelField::Property(key) => key.clone(),
         LabelField::Text(fixed) => format!("\"{fixed}\""),
     }

@@ -1783,6 +1783,13 @@
     "Price date": "Fiyat tarihi",
     "Region": "Bölge",
     "Checked against its source": "Kaynağıyla doğrulandı",
-    "Remove the price": "Fiyatı kaldır"
+    "Remove the price": "Fiyatı kaldır",
+    "Class of a standard": "Bir standardın sınıfı",
+    "concrete": "beton",
+    "structural steel": "yapı çeliği",
+    "reinforcing steel": "donatı çeliği",
+    "bolts": "cıvatalar",
+    "timber": "ahşap",
+    "grade": "kalite"
   }
 }
