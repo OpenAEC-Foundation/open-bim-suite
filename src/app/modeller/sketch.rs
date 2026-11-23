@@ -1,5 +1,14 @@
-//! The sketch of a floor's outline: Tab on a selected slab opens its outline as loose lines, to
-//! draw on and to trim, as the boundary sketch of the reference modeller.
+//! The sketch of a floor's outline: the Slab tool opens an empty one to draw a new floor in, and
+//! Tab on a selected slab opens its outline as loose lines, to draw on and to trim, as the
+//! boundary sketch of the reference modeller.
+//!
+//! - **A new floor.** The Slab tool draws no rectangle of its own: it opens the sketch with the
+//!   Line tool on, at the height its strip gives. What is drawn is a floor (or a roof, or a
+//!   ceiling: the strip says which) of the strip's type and thickness once it is finished.
+//! - **C** draws a circle with two clicks: its centre and a point on it. **O** takes a line over
+//!   from what is there: a click on a side of a wall, an edge of a floor, a beam or a grid line
+//!   adds that line to the sketch, and where it meets a line taken before the two are made to
+//!   end in their corner.
 //!
 //! - **The lines.** Each edge of the outline is a line of its own, straight or an arc; the edges
 //!   of the floor's openings too. While the sketch is open they need not close: lines are added,
@@ -165,7 +174,10 @@ pub enum SketchTool {
     Pick,
     Line,
     Rectangle,
+    Circle,
     Arc,
+    /// Takes over the line under the click: a wall's side, a floor's edge, a grid line.
+    Trace,
     Trim,
 }
 
@@ -193,7 +205,10 @@ impl SketchError {
 /// The sketch of a floor's outline, open.
 #[derive(Debug, Clone)]
 pub struct Sketch {
-    pub element: ElementId,
+    /// The floor whose outline it is; none for a new floor, made when the sketch is finished.
+    pub element: Option<ElementId>,
+    /// A new floor's name and level, as the Slab tool gives them.
+    pub new: Option<(&'static str, Option<String>)>,
     /// The height the sketch lies at: the floor's top (scene coordinates).
     pub top: f64,
     pub segments: Vec<Segment>,
@@ -290,6 +305,20 @@ pub fn trimmed(segments: &[Segment], index: usize, at: DVec2) -> Vec<Segment> {
     out
 }
 
+/// The circle about `centre` through `on`, as four quarter arcs that run round anticlockwise.
+fn circle(centre: DVec2, on: DVec2) -> [Segment; 4] {
+    let r = on - centre;
+    let at = |k: usize| centre + DVec2::from_angle(k as f64 * PI / 2.0).rotate(r);
+    // a quarter turn: the tangent of a quarter of it; it bows to the right of its way
+    let bulge = (PI / 8.0).tan();
+    [0, 1, 2, 3].map(|k| Segment { a: at(k), b: at(k + 1), bulge })
+}
+
+/// How far the end of a line taken over may lie from the corner it is made to end in (metres):
+/// the sides of two walls that meet end short of their corner or run past it by a wall's
+/// thickness.
+const CORNER: f64 = 1.0;
+
 /// The four sides of the rectangle between corners `a` and `b`.
 fn rectangle(a: DVec2, b: DVec2) -> [Segment; 4] {
     let (c, d) = (DVec2::new(b.x, a.y), DVec2::new(a.x, b.y));
@@ -313,6 +342,7 @@ impl Sketch {
         match (self.tool, self.first, self.second, self.cursor) {
             (SketchTool::Line, Some(a), _, Some(b)) | (SketchTool::Arc, Some(a), None, Some(b)) => vec![Segment::line(a, b)],
             (SketchTool::Rectangle, Some(a), _, Some(b)) => rectangle(a, b).to_vec(),
+            (SketchTool::Circle, Some(a), _, Some(b)) if a.distance(b) > MEET => circle(a, b).to_vec(),
             (SketchTool::Arc, Some(a), Some(b), Some(p)) => vec![Segment::through(a, b, p)],
             _ => Vec::new(),
         }
@@ -330,13 +360,53 @@ impl Sketch {
                 self.segments.extend(rectangle(a, p));
                 self.first = None;
             }
+            (SketchTool::Circle, Some(a), _) if a.distance(p) > MEET => {
+                self.segments.extend(circle(a, p));
+                self.first = None;
+            }
             (SketchTool::Arc, Some(a), None) if a.distance(p) > MEET => self.second = Some(p),
             (SketchTool::Arc, Some(a), Some(b)) => {
                 self.segments.push(Segment::through(a, b, p));
                 (self.first, self.second) = (None, None);
             }
-            (SketchTool::Line | SketchTool::Rectangle | SketchTool::Arc, None, _) => self.first = Some(p),
+            (SketchTool::Line | SketchTool::Rectangle | SketchTool::Circle | SketchTool::Arc, None, _) => self.first = Some(p),
             _ => {}
+        }
+    }
+
+    /// Takes straight line `line` over into the sketch (not twice). Where its carrier crosses
+    /// that of a straight line already there near an end of both, the two end in that corner.
+    fn take_over(&mut self, mut line: Segment) {
+        self.error = None;
+        let same = |s: &Segment| (s.a.distance(line.a) <= MEET && s.b.distance(line.b) <= MEET) || (s.a.distance(line.b) <= MEET && s.b.distance(line.a) <= MEET);
+        if self.segments.iter().any(same) {
+            return;
+        }
+        for mine in 0..2 {
+            let end = if mine == 0 { line.a } else { line.b };
+            // the nearest corner with another straight line
+            let mut best: Option<(f64, usize, usize, DVec2)> = None;
+            for (k, other) in self.segments.iter().enumerate().filter(|(_, s)| s.bulge == 0.0) {
+                let (u, v) = (line.b - line.a, other.b - other.a);
+                let det = u.perp_dot(v);
+                if det.abs() < 1e-9 * u.length() * v.length() {
+                    continue;
+                }
+                let corner = line.a + u * ((other.a - line.a).perp_dot(v) / det);
+                for (theirs, their_end) in [other.a, other.b].into_iter().enumerate() {
+                    let far = corner.distance(end).max(corner.distance(their_end));
+                    if far <= CORNER && best.is_none_or(|(d, ..)| far < d) {
+                        best = Some((far, k, theirs, corner));
+                    }
+                }
+            }
+            if let Some((_, k, theirs, corner)) = best {
+                if mine == 0 { line.a = corner } else { line.b = corner }
+                if theirs == 0 { self.segments[k].a = corner } else { self.segments[k].b = corner }
+            }
+        }
+        if line.a.distance(line.b) > MEET {
+            self.segments.push(line);
         }
     }
 }
@@ -372,7 +442,67 @@ impl App {
         self.modeller.points.clear();
         self.modeller.refusal = None;
         self.measure.tool = None;
-        self.modeller.sketch = Some(Sketch { element, top, segments, tool: SketchTool::Pick, first: None, second: None, cursor: None, picked: None, held: None, error: None });
+        self.modeller.sketch = Some(Sketch { element: Some(element), new: None, top, segments, tool: SketchTool::Pick, first: None, second: None, cursor: None, picked: None, held: None, error: None });
+    }
+
+    /// A tool of the Modeller is chosen (from the ribbon or by its keys): as
+    /// [`App::set_model_tool`], and the Slab tool opens the sketch of a new floor.
+    pub(in crate::app) fn start_model_tool(&mut self, tool: Option<(super::ModelTool, &'static str)>) {
+        self.set_model_tool(tool);
+        if let Some((super::ModelTool::Slab, name)) = self.modeller.tool {
+            self.open_new_sketch(name);
+        }
+    }
+
+    /// Opens an empty sketch for a new floor named `name`, with the Line tool on. The Slab tool
+    /// stays on beside it: its strip gives the floor's type, thickness and height.
+    fn open_new_sketch(&mut self, name: &'static str) {
+        let (z, _, level) = self.work_plane();
+        let top = z + self.modeller.placement.of(super::ModelTool::Slab).offset;
+        self.modeller.sketch = Some(Sketch { element: None, new: Some((name, level)), top, segments: Vec::new(), tool: SketchTool::Line, first: None, second: None, cursor: None, picked: None, held: None, error: None });
+    }
+
+    /// The sketch of a new floor leaves, and the Slab tool with it.
+    fn leave_sketch(&mut self) {
+        if self.modeller.sketch.take().is_some_and(|s| s.new.is_some()) && self.modeller.tool.is_some_and(|(t, _)| t == super::ModelTool::Slab) {
+            self.modeller.tool = None;
+        }
+        self.modeller.refusal = None;
+    }
+
+    /// The straight line of the model under viewport point (x, y), to take over into the sketch:
+    /// a side of a wall, an edge of a floor, the axis of a beam or a grid line; the nearest on the
+    /// screen within reach.
+    fn traceable_under(&self, x: f32, y: f32, width: f32, height: f32) -> Option<Segment> {
+        let sketch = self.modeller.sketch.as_ref()?;
+        let at = self.plane_point(x, y, width, height, sketch.top)?.truncate();
+        let grid = self.modeller.model.grid;
+        let mut lines: Vec<Segment> = Vec::new();
+        for e in self.modeller.model.iter().filter(|e| Some(e.id) != sketch.element) {
+            match e.shape_in_project(&grid) {
+                Shape::Planar(p @ PlanarDef { form: PlanarForm::Wall { start, end, .. }, .. }) => {
+                    let Some(along) = (end - start).try_normalize() else { continue };
+                    let side = along.perp() * (p.total_thickness() / 2.0);
+                    lines.extend([Segment::line(start + side, end + side), Segment::line(start - side, end - side)]);
+                }
+                Shape::Planar(PlanarDef { form: PlanarForm::Slab { outline, holes, bulges, .. }, .. }) => {
+                    let n = outline.len();
+                    lines.extend((0..n).filter(|&i| bulges.get(i).copied().unwrap_or(0.0) == 0.0).map(|i| Segment::line(outline[i], outline[(i + 1) % n])));
+                    for hole in &holes {
+                        lines.extend((0..hole.len()).map(|i| Segment::line(hole[i], hole[(i + 1) % hole.len()])));
+                    }
+                }
+                Shape::Linear(l) if (l.end - l.start).truncate().length() > MEET => lines.push(Segment::line(l.start.truncate(), l.end.truncate())),
+                Shape::System(s) if !s.lies() => lines.push(Segment::line(s.start, s.end)),
+                _ => {}
+            }
+        }
+        lines.extend(self.modeller.model.grids().iter().map(|g| Segment::line(g.start, g.end)));
+        let reach = |s: &Segment| {
+            let (sx, sy) = self.on_screen(s.at(s.along(at)).extend(sketch.top), width, height)?;
+            Some((sx - x).hypot(sy - y)).filter(|d| *d <= REACH)
+        };
+        lines.into_iter().filter(|s| s.length() > MEET).filter_map(|s| reach(&s).map(|d| (s, d))).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(s, _)| s)
     }
 
     /// Where a click at viewport point (x, y) lands in the sketch: on a point of the sketch or of
@@ -381,7 +511,7 @@ impl App {
         let sketch = self.modeller.sketch.as_ref()?;
         let own = sketch.points().into_iter().filter(|p| but.is_none_or(|b| b.distance(*p) > MEET)).map(|p| p.extend(sketch.top));
         let near = own
-            .chain(self.snap_points_except(sketch.element))
+            .chain(self.snap_points_except(sketch.element.unwrap_or(ElementId(0))))
             .filter_map(|q| self.on_screen(DVec3::new(q.x, q.y, sketch.top), width, height).map(|s| (q, (s.0 - x).hypot(s.1 - y))))
             .filter(|(_, d)| *d <= REACH)
             .min_by(|a, b| a.1.total_cmp(&b.1));
@@ -407,10 +537,16 @@ impl App {
         let Some(tool) = self.modeller.sketch.as_ref().map(|s| s.tool) else { return false };
         self.modeller.refusal = None;
         match tool {
-            SketchTool::Line | SketchTool::Rectangle | SketchTool::Arc => {
+            SketchTool::Line | SketchTool::Rectangle | SketchTool::Circle | SketchTool::Arc => {
                 let p = self.sketch_point(x, y, width, height, None);
                 if let (Some(p), Some(sketch)) = (p, self.modeller.sketch.as_mut()) {
                     sketch.place(p);
+                }
+            }
+            SketchTool::Trace => {
+                let line = self.traceable_under(x, y, width, height);
+                if let (Some(line), Some(sketch)) = (line, self.modeller.sketch.as_mut()) {
+                    sketch.take_over(line);
                 }
             }
             SketchTool::Trim => {
@@ -437,6 +573,11 @@ impl App {
         if self.modeller.sketch.is_none() {
             return false;
         }
+        // a new floor lies where the strip of the Slab tool says now
+        let top = self.work_plane().0 + self.modeller.placement.of(super::ModelTool::Slab).offset;
+        if let Some(sketch) = self.modeller.sketch.as_mut().filter(|s| s.new.is_some()) {
+            sketch.top = top;
+        }
         let p = self.sketch_point(x, y, width, height, None);
         if let Some(sketch) = self.modeller.sketch.as_mut() {
             sketch.cursor = p;
@@ -450,7 +591,9 @@ impl App {
         let tool = match key.to_ascii_lowercase() {
             'l' => SketchTool::Line,
             'r' => SketchTool::Rectangle,
+            'c' => SketchTool::Circle,
             'a' => SketchTool::Arc,
+            'o' => SketchTool::Trace,
             't' => SketchTool::Trim,
             _ => return,
         };
@@ -478,8 +621,7 @@ impl App {
         } else if sketch.tool != SketchTool::Pick {
             sketch.tool = SketchTool::Pick;
         } else {
-            self.modeller.sketch = None;
-            self.modeller.refusal = None;
+            self.leave_sketch();
         }
         true
     }
@@ -496,12 +638,8 @@ impl App {
                 return;
             }
         };
-        let id = sketch.element;
+        let (element, new, top) = (sketch.element, sketch.new.clone(), sketch.top);
         let grid = self.modeller.model.grid;
-        let Some(old) = self.modeller.model.get(id).cloned() else {
-            self.modeller.sketch = None;
-            return;
-        };
         // the largest loop is the outline, the others are openings in it
         let size = |ring: &Loop| {
             let (corners, bulges) = apart(ring);
@@ -509,6 +647,42 @@ impl App {
         };
         let Some(largest) = (0..rings.len()).max_by(|a, b| size(&rings[*a]).total_cmp(&size(&rings[*b]))) else { return };
         let (corners, bows) = apart(&rings.remove(largest));
+        // a new floor: what the Slab tool makes over the outline's box, given the outline drawn
+        let Some(id) = element else {
+            let Some((name, level)) = new else { return };
+            let (lo, hi) = corners.iter().fold((DVec2::MAX, DVec2::MIN), |(lo, hi), c| (lo.min(*c), hi.max(*c)));
+            let _ = top;
+            let (z, ..) = self.work_plane();
+            let mut shape = self.shape_for(super::ModelTool::Slab, lo.extend(z), hi.extend(z));
+            match &mut shape {
+                Shape::System(s) => s.outline = bowed(&corners, &bows),
+                Shape::Planar(PlanarDef { form: PlanarForm::Slab { outline, holes, bulges, .. }, .. }) => {
+                    *outline = corners;
+                    *bulges = if bows.iter().any(|b| *b != 0.0) { bows } else { Vec::new() };
+                    *holes = rings
+                        .iter()
+                        .map(|ring| {
+                            let (corners, bows) = apart(ring);
+                            bowed(&corners, &bows)
+                        })
+                        .collect();
+                }
+                _ => return,
+            }
+            let name = self.placed_name(super::ModelTool::Slab, name);
+            match self.add_element(name, level, shape) {
+                Ok(made) => {
+                    self.leave_sketch();
+                    self.select_modelled(made);
+                }
+                Err(refusal) => self.modeller.refusal = Some(refusal),
+            }
+            return;
+        };
+        let Some(old) = self.modeller.model.get(id).cloned() else {
+            self.modeller.sketch = None;
+            return;
+        };
         let mut shape = old.shape_in_project(&grid);
         // a lying system takes the outline, its bows as chords; loops inside it are not its
         // openings (those are its own, in its properties)
@@ -556,8 +730,8 @@ impl App {
                 let Some(&p) = sketch.points().get(index) else { return true };
                 match sketch.tool {
                     SketchTool::Pick => sketch.held = Some(p),
-                    SketchTool::Line | SketchTool::Rectangle | SketchTool::Arc => sketch.place(p),
-                    SketchTool::Trim => {}
+                    SketchTool::Line | SketchTool::Rectangle | SketchTool::Circle | SketchTool::Arc => sketch.place(p),
+                    SketchTool::Trim | SketchTool::Trace => {}
                 }
             }
             EditEvent::Drag { x, y, width, height } => {
@@ -611,7 +785,9 @@ impl App {
             .spacing(4)
             .push(tool(l.text("Lijn (L)", "Line (L)"), 'l', is(SketchTool::Line)))
             .push(tool(l.text("Rechthoek (R)", "Rectangle (R)"), 'r', is(SketchTool::Rectangle)))
+            .push(tool(l.text("Cirkel (C)", "Circle (C)"), 'c', is(SketchTool::Circle)))
             .push(tool(l.text("Boog (A)", "Arc (A)"), 'a', is(SketchTool::Arc)))
+            .push(tool(l.text("Overnemen (O)", "Pick lines (O)"), 'o', is(SketchTool::Trace)))
             .push(tool(l.text("Trimmen (T)", "Trim (T)"), 't', is(SketchTool::Trim)))
             .push(button(text(l.text("Klaar (Tab)", "Finish (Tab)")).size(12)).padding([3, 10]).style(move |_, s| p.ribbon_button(false, s)).on_press(Message::EditMode))
             .push(button(text(l.text("Annuleren", "Cancel")).size(12)).padding([3, 10]).style(move |_, s| p.ribbon_button(false, s)).on_press(Message::SketchCancel));
@@ -620,8 +796,7 @@ impl App {
 
     /// Cancel: the sketch leaves with the floor unchanged, whatever tool is on.
     pub(in crate::app) fn cancel_sketch(&mut self) {
-        self.modeller.sketch = None;
-        self.modeller.refusal = None;
+        self.leave_sketch();
     }
 
     /// The banner while the sketch is open: why it could not finish, and what the keys do.
@@ -629,11 +804,16 @@ impl App {
         let sketch = self.modeller.sketch.as_ref()?;
         let hint = match sketch.tool {
             SketchTool::Pick => l.text(
-                "Sleep een punt · klik een lijn: kiezen, Del: weg · L: lijn · R: rechthoek · A: boog · T: trimmen · Tab: klaar · Esc: annuleren",
-                "Drag a point · click a line: pick, Del: remove · L: line · R: rectangle · A: arc · T: trim · Tab: done · Esc: cancel",
+                "Sleep een punt · klik een lijn: kiezen, Del: weg · L: lijn · R: rechthoek · C: cirkel · A: boog · O: overnemen · T: trimmen · Tab: klaar · Esc: annuleren",
+                "Drag a point · click a line: pick, Del: remove · L: line · R: rectangle · C: circle · A: arc · O: pick lines · T: trim · Tab: done · Esc: cancel",
             ),
             SketchTool::Line => l.text("Lijn: klik de punten · Esc: stoppen · Tab: klaar", "Line: click the points · Esc: stop · Tab: done"),
             SketchTool::Rectangle => l.text("Rechthoek: klik twee hoeken · Esc: stoppen · Tab: klaar", "Rectangle: click two corners · Esc: stop · Tab: done"),
+            SketchTool::Circle => l.text("Cirkel: klik het middelpunt en een punt op de cirkel · Esc: stoppen · Tab: klaar", "Circle: click its centre and a point on it · Esc: stop · Tab: done"),
+            SketchTool::Trace => l.text(
+                "Overnemen: klik een wandzijde, vloerrand, balk of stramien · Esc: stoppen · Tab: klaar",
+                "Pick lines: click a side of a wall, an edge of a floor, a beam or a grid line · Esc: stop · Tab: done",
+            ),
             SketchTool::Arc => l.text(
                 "Boog: klik het begin, het eind en een punt op de boog · Esc: stoppen · Tab: klaar",
                 "Arc: click its start, its end and a point on it · Esc: stop · Tab: done",
@@ -910,5 +1090,88 @@ mod tests {
         let (outline, ..) = slab_of(&app, id);
         assert!(outline.iter().any(|p| p.distance(DVec2::new(5.0, 4.0)) < 1e-9), "{outline:?}");
         assert!((area2(&outline) - 2.0 * (12.0 + 3.5)).abs() < 1e-9, "{outline:?}");
+    }
+
+    /// A new project with the Slab tool chosen as from the ribbon: the sketch of a new floor.
+    fn new_floor() -> App {
+        let mut app = modelling();
+        let _ = app.update(Message::ModelTool(Some((crate::app::modeller::ModelTool::Slab, "Slab"))));
+        app
+    }
+
+    fn slabs(app: &App) -> Vec<ElementId> {
+        app.modeller.model.iter().filter(|e| e.class() == "IfcSlab").map(|e| e.id).collect()
+    }
+
+    #[test]
+    fn the_slab_tool_opens_a_sketch_and_an_l_drawn_with_lines_becomes_a_floor() {
+        let mut app = new_floor();
+        assert!(app.modeller.sketch.as_ref().is_some_and(|s| s.new.is_some() && s.tool == SketchTool::Line));
+        for (x, y) in [(0.0, 0.0), (6.0, 0.0), (6.0, 2.0), (2.0, 2.0), (2.0, 5.0), (0.0, 5.0), (0.0, 0.0)] {
+            click(&mut app, x, y);
+        }
+        assert!(slabs(&app).is_empty(), "not before it is finished");
+        let _ = app.update(Message::EditMode);
+        let made = slabs(&app);
+        assert_eq!(made.len(), 1);
+        let (outline, holes, _) = slab_of(&app, made[0]);
+        assert_eq!((outline.len(), holes.len()), (6, 0));
+        assert!((area2(&outline).abs() / 2.0 - 18.0).abs() < 1e-9);
+        // the sketch and the tool are gone, the floor is selected; one step takes it back
+        assert!(app.modeller.sketch.is_none() && app.modeller.tool.is_none());
+        assert_eq!(app.selected_modelled(), made);
+        let _ = app.update(Message::Undo);
+        assert!(slabs(&app).is_empty());
+    }
+
+    #[test]
+    fn a_circle_drawn_in_the_sketch_is_a_round_floor() {
+        let mut app = new_floor();
+        app.sketch_key('c');
+        click(&mut app, 3.0, 3.0);
+        click(&mut app, 5.0, 3.0);
+        let sketch = app.modeller.sketch.as_ref().unwrap();
+        // four quarter arcs, each bowing out to the circle
+        assert_eq!(sketch.segments.len(), 4);
+        assert!(sketch.segments.iter().all(|s| (s.at(0.5).distance(DVec2::new(3.0, 3.0)) - 2.0).abs() < 1e-9), "{:?}", sketch.segments);
+        let _ = app.update(Message::EditMode);
+        let made = slabs(&app);
+        assert_eq!(made.len(), 1);
+        let volume: f64 = app.modeller.model.evaluate(made[0]).unwrap().iter().map(|p| p.solid.volume()).sum();
+        let thickness = app.modeller.placement.of(crate::app::modeller::ModelTool::Slab).width;
+        // (the kernel makes the round of chords: a little less than the circle)
+        assert!((volume / thickness - PI * 4.0).abs() < 0.15, "{volume}");
+    }
+
+    #[test]
+    fn the_sides_of_walls_taken_over_end_in_their_corners_and_cancel_makes_nothing() {
+        use bim_core::element::PlanarForm;
+        let mut app = modelling();
+        // four walls round a room of 4 by 3 (their axes), 0.2 thick
+        let corners = [(0.0, 0.0), (4.0, 0.0), (4.0, 3.0), (0.0, 3.0)];
+        for k in 0..4 {
+            let (a, b) = (corners[k], corners[(k + 1) % 4]);
+            let form = PlanarForm::Wall { start: DVec2::new(a.0, a.1), end: DVec2::new(b.0, b.1), base: 0.0, height: 3.0 };
+            app.add_element("Wall", None, Shape::Planar(PlanarDef { form, thickness: 0.2, openings: Vec::new(), build_up: None })).unwrap();
+        }
+        let _ = app.update(Message::ModelTool(Some((crate::app::modeller::ModelTool::Slab, "Slab"))));
+        app.sketch_key('o');
+        // a click on the inner side of each wall
+        for (x, y) in [(2.0, 0.1), (3.9, 1.5), (2.0, 2.9), (0.1, 1.5)] {
+            click(&mut app, x, y);
+        }
+        let _ = app.update(Message::EditMode);
+        let made = slabs(&app);
+        assert_eq!(made.len(), 1, "{:?} {:?}", app.modeller.sketch.as_ref().map(|s| (s.error, s.segments.clone())), app.modeller.refusal);
+        let (outline, ..) = slab_of(&app, made[0]);
+        // the room between the inner sides: 3.8 by 2.8
+        assert!((area2(&outline).abs() / 2.0 - 3.8 * 2.8).abs() < 1e-9, "{outline:?}");
+        // Cancel in a new sketch makes nothing and lets the tool go
+        let _ = app.update(Message::ModelTool(Some((crate::app::modeller::ModelTool::Slab, "Slab"))));
+        click(&mut app, 10.0, 10.0);
+        click(&mut app, 12.0, 10.0);
+        let _ = app.update(Message::SketchCancel);
+        assert!(app.modeller.sketch.is_none() && app.modeller.tool.is_none());
+        assert_eq!(slabs(&app).len(), 1);
     }
 }

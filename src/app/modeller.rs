@@ -389,6 +389,10 @@ impl App {
 
     /// Switches a tool on (its elements named `name`), or off.
     pub(super) fn set_model_tool(&mut self, tool: Option<(ModelTool, &'static str)>) {
+        // the sketch of a new floor belongs to the Slab tool: it goes with it
+        if self.modeller.sketch.as_ref().is_some_and(|s| s.new.is_some()) {
+            self.modeller.sketch = None;
+        }
         let same = tool.map(|t| t.0) == self.modeller.tool.map(|t| t.0);
         self.modeller.tool = if same { None } else { tool };
         self.modeller.grid_tool = false;
@@ -532,8 +536,51 @@ impl App {
         }
         if snaps.grid {
             points.extend(self.grid_snap_points().into_iter().map(|p| (p, Snap::Grid)));
+            // where a grid line crosses the side or the axis of a wall or the edge of a floor: a
+            // column goes against the inside of a wall on its grid line
+            let grids = self.modeller.model.grids();
+            for (a, b, z) in self.outline_lines(except) {
+                for g in grids {
+                    let (u, v) = (b - a, g.end - g.start);
+                    let det = u.perp_dot(v);
+                    if det.abs() < 1e-9 * u.length() * v.length() {
+                        continue;
+                    }
+                    let (t, w) = ((g.start - a).perp_dot(v) / det, (g.start - a).perp_dot(u) / det);
+                    if (-1e-6..=1.0 + 1e-6).contains(&t) && (-1e-6..=1.0 + 1e-6).contains(&w) {
+                        points.push(((a + u * t).extend(z), Snap::Grid));
+                    }
+                }
+            }
         }
         points
+    }
+
+    /// The lines of the outlines of the elements in plan, each with the height it lies at: both
+    /// sides and the axis of a wall and of a standing system, the edges of a floor. Not those of
+    /// element `except`.
+    fn outline_lines(&self, except: ElementId) -> Vec<(DVec2, DVec2, f64)> {
+        let grid = self.modeller.model.grid;
+        let mut lines = Vec::new();
+        let mut band = |start: DVec2, end: DVec2, half: f64, z: f64| {
+            let Some(along) = (end - start).try_normalize() else { return };
+            let side = along.perp() * half;
+            lines.extend([(start, end, z), (start + side, end + side, z), (start - side, end - side, z)]);
+        };
+        let mut edges = Vec::new();
+        for e in self.modeller.model.iter().filter(|e| e.id != except) {
+            match e.shape_in_project(&grid) {
+                Shape::Planar(p @ PlanarDef { form: PlanarForm::Wall { start, end, base, .. }, .. }) => band(start, end, p.total_thickness() / 2.0, base),
+                Shape::System(s) if !s.lies() => band(s.start, s.end, s.member.max_element() / 2.0, s.base),
+                Shape::Planar(PlanarDef { form: PlanarForm::Slab { outline, top, .. }, .. }) => {
+                    let n = outline.len();
+                    edges.extend((0..n).map(|k| (outline[k], outline[(k + 1) % n], top)));
+                }
+                _ => {}
+            }
+        }
+        lines.extend(edges);
+        lines
     }
 
     /// A click on the work plane at `p`: onto a point of an element near the cursor, else in line
@@ -1519,6 +1566,21 @@ mod tests {
         app.select_modelled(boiler);
         app.create_similar(Language::English);
         assert_eq!(app.tool_settings().map(|(tool, s)| (tool, s.appliance, s.service, s.width)), Some((ModelTool::Appliance, PointRole::Boiler, Some(Service::HeatingSupply), 0.45)));
+    }
+
+    #[test]
+    fn a_column_snaps_to_where_a_grid_line_crosses_the_inside_of_a_wall() {
+        let mut app = modelling();
+        // a wall along x, 0.3 thick: its sides at y = -0.15 and 0.15; a grid line across it at x = 4
+        let form = PlanarForm::Wall { start: DVec2::new(0.0, 0.0), end: DVec2::new(8.0, 0.0), base: 0.0, height: 3.0 };
+        app.add_element("Wall", None, Shape::Planar(PlanarDef { form, thickness: 0.3, openings: Vec::new(), build_up: None })).unwrap();
+        app.add_grid_line(DVec2::new(4.0, -3.0), DVec2::new(4.0, 5.0)).unwrap();
+        app.set_model_tool(Some((ModelTool::Column, "Column")));
+        // a click a few centimetres off lands on the crossing with the inner side
+        click(&mut app, 4.04, 0.19);
+        let column = app.modeller.model.iter().last().unwrap().shape_in_project(&app.modeller.model.grid);
+        let Shape::Linear(l) = column else { panic!() };
+        assert!((l.start.truncate() - DVec2::new(4.0, 0.15)).length() < 1e-9, "{:?}", l.start);
     }
 
     #[test]

@@ -2092,7 +2092,7 @@ impl Studio {
                 let sketching = self.app.modeller.sketch.is_some();
                 if self.dialog.is_none() && sketching && !press.modifiers.control() && !press.modifiers.alt() {
                     if let Key::Character(c) = &press.key {
-                        if let Some(c) = c.chars().next().filter(|c| "lratLRAT".contains(*c)) {
+                        if let Some(c) = c.chars().next().filter(|c| "lrcaotLRCAOT".contains(*c)) {
                             return self.update(Msg::App(Message::EditKey(c)));
                         }
                     }

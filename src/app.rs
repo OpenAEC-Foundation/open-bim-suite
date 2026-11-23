@@ -2222,7 +2222,7 @@ impl App {
             Message::RemoteShot(shot) => self.remote_shot(shot),
             Message::ClearMeasurements => self.measurements.clear(),
             Message::NewModel(level) => self.new_model(level),
-            Message::ModelTool(tool) => self.set_model_tool(tool),
+            Message::ModelTool(tool) => self.start_model_tool(tool),
             Message::GridTool => self.toggle_grid_tool(),
             Message::SelectTool => self.select_tool(),
             Message::ModelKey(key, l) => self.model_key(key, l),
