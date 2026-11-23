@@ -18,12 +18,17 @@
 //! its code does not: a column, a beam and a pile do, a mullion, a skirting board and the runs of
 //! the services do not. Of a run of the services a delivery asks no fire rating here.
 //!
-//! Not yet: system and object types; the ILS's other points (storeys, placing, doubles),
+//! A system type does the same ([`SystemType::delivery`]); its group says whether it bears where
+//! its code does not: a floor of slabs does, a curtain wall, a frame, a stud wall, a cladding and
+//! a ceiling do not, and of a timber frame, a steel frame and masonry it has to be said.
+//!
+//! Not yet: object types; the ILS's other points (storeys, placing, doubles),
 //! which are of a model and not of a library.
 
 use crate::buildup::{BuildUp, Role};
 use crate::material::Material;
 use crate::profile::{LinearRole, LinearType};
+use crate::system::{SystemGroup, SystemType};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -115,6 +120,45 @@ impl BuildUp {
     }
 }
 
+impl SystemType {
+    /// Whether it is external: what it says itself, else what its code says.
+    pub fn is_external(&self) -> bool {
+        self.delivery.is_external.unwrap_or_else(|| ["21", "27", "31", "41"].iter().any(|group| self.nlsfb().starts_with(group)))
+    }
+
+    /// Whether it bears: what it says itself, else what its code says, else what its group says.
+    pub fn load_bearing(&self) -> Option<bool> {
+        self.delivery.load_bearing.or_else(|| bears(&self.nlsfb())).or(match self.group {
+            SystemGroup::Floor => Some(true),
+            SystemGroup::CurtainWall | SystemGroup::Frame | SystemGroup::MetalStud | SystemGroup::Cladding | SystemGroup::Ceiling => Some(false),
+            SystemGroup::TimberFrame | SystemGroup::SteelFrame | SystemGroup::Masonry => None,
+        })
+    }
+
+    /// IFC's own properties of it for a delivery.
+    pub fn delivery_properties(&self) -> Vec<(&'static str, Value)> {
+        let mut out = vec![("IsExternal", json!(self.is_external()))];
+        out.extend(self.load_bearing().map(|bears| ("LoadBearing", json!(bears))));
+        out.extend(self.delivery.fire_rating.as_deref().filter(|rating| !rating.trim().is_empty()).map(|rating| ("FireRating", json!(rating))));
+        out
+    }
+
+    /// What it still lacks for a delivery.
+    pub fn missing(&self) -> Vec<Missing> {
+        let mut out = Vec::new();
+        if self.nlsfb().chars().filter(char::is_ascii_digit).count() < 4 {
+            out.push(Missing::FourDigits);
+        }
+        if self.load_bearing().is_none() {
+            out.push(Missing::LoadBearing);
+        }
+        if self.delivery.fire_rating.as_deref().is_none_or(|rating| rating.trim().is_empty()) {
+            out.push(Missing::FireRating);
+        }
+        out
+    }
+}
+
 /// What a library holds of one kind of type, and how much of it a delivery still lacks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stock {
@@ -150,6 +194,9 @@ pub fn stock(library: &crate::Library) -> Vec<Stock> {
         (LinearRole::CableTray, "cable trays"),
     ] {
         out.push(count(name, library.linear_types.iter().filter(|t| t.role == role).map(LinearType::missing).collect()));
+    }
+    for group in SystemGroup::ALL {
+        out.push(count(&format!("{} systems", format!("{group:?}").to_lowercase()), library.system_types.iter().filter(|t| t.group == group).map(SystemType::missing).collect()));
     }
     out
 }
@@ -292,9 +339,10 @@ mod tests {
     fn the_stock_of_a_library_says_what_it_holds_and_what_a_delivery_lacks() {
         let library = Library::starter();
         let all = stock(&library);
-        assert_eq!(all.len(), 13);
+        assert_eq!(all.len(), 13 + SystemGroup::ALL.len());
         assert_eq!(all.iter().filter(|s| s.of.ends_with("build-ups")).map(|s| s.count).sum::<usize>(), library.buildups.len());
-        assert_eq!(all.iter().filter(|s| !s.of.ends_with("build-ups")).map(|s| s.count).sum::<usize>(), library.linear_types.len());
+        assert_eq!(all.iter().filter(|s| !s.of.ends_with("build-ups") && !s.of.ends_with("systems")).map(|s| s.count).sum::<usize>(), library.linear_types.len());
+        assert_eq!(all.iter().filter(|s| s.of.ends_with("systems")).map(|s| s.count).sum::<usize>(), library.system_types.len());
         for s in &all {
             assert!(s.complete <= s.count && s.lacking.iter().all(|n| *n <= s.count), "{}", s.of);
         }
@@ -319,6 +367,32 @@ mod tests {
                 println!("{} | {} | {} | {} | {} | {}", s.of, s.count, s.complete, s.lacking[0], s.lacking[1], s.lacking[2]);
             }
         }
+    }
+
+    #[test]
+    fn a_system_type_says_what_a_delivery_asks_or_leaves_it_to_its_group_and_code() {
+        let mut library = Library::starter();
+        let of = |library: &Library, group: SystemGroup| library.system_types.iter().find(|t| t.group == group).cloned().unwrap_or_else(|| panic!("{group:?}"));
+        // a curtain wall is of the outside and bears nothing; a stud wall is of the inside
+        let curtain = of(&library, SystemGroup::CurtainWall);
+        assert_eq!((curtain.is_external(), curtain.load_bearing()), (true, Some(false)));
+        let stud = of(&library, SystemGroup::MetalStud);
+        assert_eq!((stud.is_external(), stud.load_bearing(), stud.missing()), (false, Some(false), vec![Missing::FourDigits, Missing::FireRating]));
+        // of a timber frame it has to be said, by its code or by itself
+        let frame = of(&library, SystemGroup::TimberFrame);
+        assert_eq!((frame.load_bearing(), frame.missing().contains(&Missing::LoadBearing)), (None, true));
+        assert_eq!(SystemType { code: Some("21.22".into()), ..frame.clone() }.load_bearing(), Some(true));
+        let own = SystemType { code: Some("21.22".into()), delivery: Delivery { load_bearing: Some(false), is_external: Some(false), fire_rating: Some("REI 60".into()) }, ..frame.clone() };
+        assert_eq!((own.load_bearing(), own.is_external(), own.missing()), (Some(false), false, vec![]));
+        // to a file and back; a type that says nothing writes nothing
+        assert!(serde_json::to_value(&frame).unwrap().get("delivery").is_none());
+        let id = frame.id.clone();
+        library.system_types.iter_mut().find(|t| t.id == id).unwrap().delivery = own.delivery.clone();
+        let file = crate::ifcx::file(&library, "test", "test", "2026-11-23T00:00:00Z");
+        let path = crate::ifcx::system_type_path(&id);
+        let node = file["data"].as_array().unwrap().iter().find(|n| n["path"] == path.as_str()).unwrap();
+        assert_eq!((node["attributes"]["bsi::ifc::prop::FireRating"].as_str(), node["attributes"]["bsi::ifc::prop::LoadBearing"].as_bool(), node["attributes"]["bsi::ifc::prop::IsExternal"].as_bool()), (Some("REI 60"), Some(false), Some(false)));
+        assert_eq!(crate::ifcx::read(&file).unwrap().system_type(&id).map(|t| t.delivery.clone()), Some(own.delivery));
     }
 
 }
