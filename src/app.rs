@@ -270,6 +270,9 @@ pub struct App {
     pub show_grids: bool,
     /// The grid line picked with a click (index into the model's grids), shown in the properties.
     pub picked_grid: Option<usize>,
+    /// The grid lines picked beside `picked_grid` (a box drawn over several, Shift and a click):
+    /// they count only while that one is picked (see `App::grids_picked`).
+    pub more_grids: Vec<usize>,
     /// Explorer groups opened: views, rooms, layers, schedules, sheets.
     pub explorer_open: [bool; 7],
     /// The explorer's tab shown.
@@ -501,7 +504,7 @@ pub struct App {
 /// Width of the right-click menu (logical pixels), and about its height, to keep it inside the
 /// viewport.
 const MENU_WIDTH: f32 = 230.0;
-const MENU_HEIGHT: f32 = 200.0;
+const MENU_HEIGHT: f32 = 232.0;
 
 type HoverScene = (Option<SectionBox>, Option<SectionPlane>, Vec<bool>, Arc<UnitKeySet>);
 
@@ -514,6 +517,8 @@ pub enum MenuItem {
     SelectLayer,
     ClearSelection,
     Undo,
+    /// The selected modelled elements and the picked grid lines go, as Delete.
+    Delete,
 }
 
 #[derive(Debug, Clone)]
@@ -917,6 +922,9 @@ pub enum Message {
     ToolDigit(char),
     /// The series field of the picked grid line.
     GridSeries(modeller::grids::SeriesMessage),
+    /// The angle typed for the turn under way (degrees), and Enter: the turn is made by it.
+    TurnTyped(String),
+    TurnApply,
     /// A snap switched on or off at the right of the status bar.
     SnapToggle(modeller::snaps::Snap),
     /// The name typed for the space selected, and Enter in its field.
@@ -1085,6 +1093,7 @@ impl Default for App {
             active_view: None,
             show_grids: true,
             picked_grid: None,
+            more_grids: Vec::new(),
             explorer_open: [false, false, true, false, false, false, false],
             explorer_tab: ExplorerTab::Model,
             library: bim_library::Library::starter(),
@@ -2235,6 +2244,8 @@ impl App {
                 self.tool_digit(c);
             }
             Message::GridSeries(message) => self.series_message(message),
+            Message::TurnTyped(typed) => self.modeller.turn_typed = typed,
+            Message::TurnApply => self.turn_by_typed(),
             Message::SnapToggle(snap) => self.modeller.snaps.toggle(snap),
             Message::SpaceName(typed) => self.type_space_name(typed),
             Message::SpaceNameDone => self.modeller.space_typing = None,
@@ -2509,6 +2520,8 @@ impl App {
                 Navigate::Pick { x, y, width, height, add } => self.pick(x, y, width, height, add),
                 Navigate::Context { x, y, width, height } => self.context_click(x, y, width, height),
                 Navigate::Cursor3d { x, y, width, height } => self.place_cursor3d(x, y, width, height),
+                // a drag that starts on a picked grid line moves the picked grid lines
+                Navigate::Box { x0, y0, x1, y1, width, height, done, .. } if self.drag_grids((x0, y0), (x1, y1), width, height, done) => {}
                 Navigate::Box { x0, y0, x1, y1, width, height, done, add } => {
                     let rect = (Vec2::new(x0, y0), Vec2::new(x1, y1));
                     self.box_select = (!done).then_some(rect);
@@ -2551,6 +2564,7 @@ impl App {
                     MenuItem::ShowAll => Message::ShowAllElements,
                     MenuItem::SelectLayer => Message::SelectLayerOfSelection,
                     MenuItem::Undo => Message::Undo,
+                    MenuItem::Delete => Message::DeletePicked,
                     MenuItem::ClearSelection => {
                         self.sel.clear();
                         self.selection_changed();
@@ -2813,10 +2827,9 @@ impl App {
                     // in the sketch of a floor: the picked line goes
                 } else if self.modeller.edit.is_some() {
                     // in edit mode Delete takes nothing: the element stays
-                } else if self.delete_modelled() {
-                    // modelled elements selected: they go
-                } else if self.delete_picked_grid() {
-                    // the picked grid line of the modelled project goes
+                } else if self.delete_modelled() | self.delete_picked_grid() {
+                    // modelled elements selected and the picked grid lines of the modelled
+                    // project: they go
                 } else if self.active_doc_sheet.is_some() {
                     if self.sheet_pick.is_some() {
                         self.remove_picked();
@@ -3247,6 +3260,11 @@ impl App {
             if !self.structural.selected.contains(&h.element) {
                 self.click_structural(h.element, false);
             }
+        } else if let Some(g) = self.grid_under(x, y, width, height, triangle) {
+            // a grid line not picked yet is picked, so the menu's Delete takes it
+            if !self.grids_picked().contains(&g) {
+                self.pick_grid(Some(g));
+            }
         } else if let Some(item) = hit.map(|(l, t, _)| pickable_at(&model, l, t)) {
             if !self.sel.contains(item) {
                 self.click(Some(item), false);
@@ -3362,6 +3380,15 @@ impl App {
         let mm = self.model_matrix();
         let triangle = hit.and_then(|(l, t, s)| face_at(&model.layers[l], t, origin - s, dir).map(|(p, _)| mm.transform_point3(p + s)));
         if let Some(g) = self.grid_under(x, y, width, height, triangle) {
+            // with Shift or Ctrl it joins the grid lines picked, or leaves them
+            if add {
+                let mut grids = self.grids_picked();
+                match grids.iter().position(|&p| p == g) {
+                    Some(k) => drop(grids.remove(k)),
+                    None => grids.push(g),
+                }
+                return self.set_picked_grids(grids);
+            }
             return self.pick_grid(Some(g));
         }
         if let Some(h) = self.pick_structural(x, y, width, height, triangle) {
@@ -3586,12 +3613,20 @@ impl App {
                 UnitOwner::LayerRest(l) => Some(Pickable::Layer(l)),
             })
             .collect();
+        // the grid lines the box takes go with them (a selection of elements alone lets them go)
+        let mut grids = if add { self.grids_picked() } else { Vec::new() };
+        for g in self.grids_in_box(rect, width, height) {
+            if !grids.contains(&g) {
+                grids.push(g);
+            }
+        }
         if !add {
             self.sel.clear();
             self.set_structural_selection(Vec::new());
         }
         self.sel.extend(items);
         self.selection_changed();
+        self.set_picked_grids(grids);
     }
 
     /// What is shown now, for undo.
@@ -4746,7 +4781,7 @@ impl App {
                     view_proj: self.camera.view_proj(self.aspect()),
                     fill: p.surface,
                     ink: p.text_secondary,
-                    picked: self.picked_grid,
+                    picked: self.grids_picked(),
                     accent: p.accent,
                     seen: if self.shown_view().is_none() { self.heads_seen.1.clone() } else { Vec::new() },
                     dims: self.grid_dimensions(),
@@ -4812,6 +4847,7 @@ impl App {
             .push(editing)
             .push(temp_fields)
             .push(self.grid_series_overlay(p, l).filter(|_| overlay.is_none()))
+            .push(self.turn_overlay(p, l).filter(|_| overlay.is_none()))
             .push(boxed)
             .push(picking)
             .push(cube)
@@ -4845,6 +4881,8 @@ impl App {
             rule::horizontal(1),
             item(l.text("Laag selecteren", "Select layer"), "", MenuItem::SelectLayer, !self.sel.is_empty()),
             item(l.text("Selectie opheffen", "Clear selection"), "Esc", MenuItem::ClearSelection, selected),
+            rule::horizontal(1),
+            item(l.text("Verwijderen", "Delete"), "Del", MenuItem::Delete, self.modeller.in_modeller && (!self.selected_modelled().is_empty() || !self.picked_modelled_grids().is_empty())),
             rule::horizontal(1),
             item(l.text("Ongedaan maken", "Undo"), Shortcut::ctrl('z').label(), MenuItem::Undo, self.can_undo()),
         ]

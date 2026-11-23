@@ -1456,7 +1456,7 @@ impl Studio {
                 .enabled(app.wants_tab()),
             Command::new("model.delete", l.text("Verwijderen", "Delete"), go(Message::DeletePicked))
                 .icon(small("edit.delete"), large("edit.delete"))
-                .enabled(!app.selected_modelled().is_empty()),
+                .enabled(!app.selected_modelled().is_empty() || !app.picked_modelled_grids().is_empty()),
         ];
         // in an environment with Blender (the web app): a render of the file opened from Docs
         #[cfg(target_arch = "wasm32")]
@@ -1488,7 +1488,7 @@ impl Studio {
             Command::new(kind.id(), kind.label(l), go(Message::Transform(kind)))
                 .icon(small(kind.icon()), large(kind.icon()))
                 .toggle(app.modeller.transform.as_ref().is_some_and(|t| t.kind == kind))
-                .enabled(!app.selected_modelled().is_empty() || app.modeller.transform.is_some() || app.drawn_picked().is_some())
+                .enabled(!app.selected_modelled().is_empty() || app.modeller.transform.is_some() || app.drawn_picked().is_some() || (kind != crate::app::transform::TransformKind::Align && !app.picked_modelled_grids().is_empty()))
         }));
         // the Edit tools of the Draw tab, on the line or shape picked on a floor plan
         list.push(

@@ -88,8 +88,8 @@ impl TransformKind {
 pub struct Transform {
     pub kind: TransformKind,
     pub elements: Vec<ElementId>,
-    /// The picked grid line it takes instead (a move or a copy with no element selected).
-    pub grid: Option<usize>,
+    /// The picked grid lines it takes too (of the modelled project).
+    pub grids: Vec<usize>,
     /// The line to align to: a point on it and the way it runs.
     pub line: Option<(DVec2, DVec2)>,
     pub points: Vec<DVec3>,
@@ -124,7 +124,7 @@ impl Map {
         }
     }
 
-    fn plan(&self, p: DVec2) -> DVec2 {
+    pub(in crate::app) fn plan(&self, p: DVec2) -> DVec2 {
         match *self {
             Map::Shift(d) => p + d.truncate(),
             Map::Turn { about, angle } => about + DVec2::from_angle(angle).rotate(p - about),
@@ -264,10 +264,10 @@ impl App {
             .collect();
         // nothing of the model selected: the line or shape picked on the floor plan shown
         let drawn = if elements.is_empty() { self.drawn_picked() } else { None };
-        // no element selected: a move or a copy takes the picked grid line
-        let grid = if elements.is_empty() && drawn.is_none() && matches!(kind, TransformKind::Move | TransformKind::Copy) { self.picked_modelled_grid() } else { None };
+        // the picked grid lines go along: moved, copied, turned or mirrored
+        let grids = if drawn.is_none() && kind != TransformKind::Align { self.picked_modelled_grids() } else { Vec::new() };
         // nothing selected: Align takes the element its second click is on
-        if elements.is_empty() && drawn.is_none() && grid.is_none() && kind != TransformKind::Align {
+        if elements.is_empty() && drawn.is_none() && grids.is_empty() && kind != TransformKind::Align {
             return;
         }
         if self.modeller.tool.is_some() {
@@ -275,7 +275,8 @@ impl App {
         }
         self.modeller.edit = None;
         self.modeller.refusal = None;
-        self.modeller.transform = Some(Transform { kind, elements, grid, line: None, points: Vec::new(), drawn });
+        self.modeller.turn_typed.clear();
+        self.modeller.transform = Some(Transform { kind, elements, grids, line: None, points: Vec::new(), drawn });
         // a fresh 3D cursor is the base point of a move or a copy
         self.transform_from_cursor3d();
     }
@@ -324,13 +325,19 @@ impl App {
                 let moved = self.document.map_view_lines(&view, run, done.kind.copies(), &|q| map.plan(DVec2::new(q[0], q[1])).to_array());
                 self.mark_pick = moved.map(|run| super::marks::MarkPick::Line(run.start));
             }
-            Some(Map::Shift(by)) if done.grid.is_some() => self.shift_grid(done.grid, by.truncate(), done.kind.copies()),
-            Some(map) => {
-                self.transform_elements(&done.elements, &map, done.kind.copies());
-            }
+            Some(map) => self.transform_picked(&done, &map),
             // points that say nothing: clicked again
             None => self.modeller.transform = Some(Transform { points: Vec::new(), ..done }),
         }
+    }
+
+    /// What transform `done` took goes through `map`: its elements, then its grid lines, which
+    /// stay picked (the copies, when it copies).
+    pub(super) fn transform_picked(&mut self, done: &Transform, map: &Map) {
+        if !done.elements.is_empty() {
+            self.transform_elements(&done.elements, map, done.kind.copies());
+        }
+        self.map_grids(&done.grids, map, done.kind.copies());
     }
 
     /// A click of Align: first the line to align to (the grid line, wall line or edge under the

@@ -43,8 +43,8 @@ pub struct GridOverlay {
     /// Bubble fill and line colour (from the theme).
     pub fill: Color,
     pub ink: Color,
-    /// The picked grid (of the model), drawn over in `accent`.
-    pub picked: Option<usize>,
+    /// The picked grids (of the model), drawn over in light blue.
+    pub picked: Vec<usize>,
     pub accent: Color,
     /// Per grid of the model, whether the head at its first and at its second end is seen (not
     /// behind the model); a grid it does not hold shows both.
@@ -71,6 +71,9 @@ fn project_w(view_proj: &Mat4, size: (f32, f32), world: Vec3) -> Option<(Point, 
     let ndc = clip.truncate() / clip.w;
     Some((Point::new((ndc.x + 1.0) * 0.5 * size.0, (1.0 - ndc.y) * 0.5 * size.1), clip.w))
 }
+
+/// The colour of a picked grid line: light blue, apart from the accent of what is being placed.
+pub const PICKED: iced::Color = iced::Color { r: 0.25, g: 0.66, b: 1.0, a: 1.0 };
 
 /// The grid (of the model) under screen point `cursor` among the datum lines drawn: inside one of
 /// its bubbles (always seen: they are drawn on top), or within `PICK` pixels of its line where
@@ -243,14 +246,14 @@ impl<Message> canvas::Program<Message> for GridOverlay {
             });
         }
         // the grids, the picked one last, over the others
-        let is_picked = |d: &Datum| matches!(d.kind, DatumKind::Grid(g) if Some(g) == self.picked);
+        let is_picked = |d: &Datum| matches!(d.kind, DatumKind::Grid(g) if self.picked.contains(&g));
         let grids = self.datums.iter().filter(|d| matches!(d.kind, DatumKind::Grid(_)));
         let order = grids.clone().filter(|d| !is_picked(d)).chain(grids.filter(|d| is_picked(d)));
         for datum in order {
             let grid = &datum.line;
             let picked = is_picked(datum);
             let Some(ends) = bubble_centres(&self.view_proj, size, grid) else { continue };
-            let (ink, width) = if picked { (self.accent, 2.0) } else { (self.ink, 1.2) };
+            let (ink, width) = if picked { (PICKED, 2.5) } else { (self.ink, 1.2) };
             if picked {
                 // its whole line, over what hides it
                 let a = project(&self.view_proj, size, Vec3::from_array(grid.a));

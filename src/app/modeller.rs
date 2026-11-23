@@ -250,6 +250,10 @@ pub struct Modeller {
     pub snap_words: [&'static str; 6],
     /// The series of grid lines being typed beside the picked one (see `grids`); `None`: closed.
     pub grid_series: Option<String>,
+    /// The picked grid lines being dragged (see `grids::GridDrag`).
+    pub grid_drag: Option<grids::GridDrag>,
+    /// The angle typed for the turn under way (degrees).
+    pub turn_typed: String,
     /// Which snaps are on (see `snaps`).
     pub snaps: snaps::Snaps,
     /// The names given to spaces, each at a point of its space (see `spaces`).

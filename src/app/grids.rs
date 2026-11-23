@@ -256,6 +256,26 @@ impl App {
         self.selection_changed();
         self.set_structural_selection(Vec::new());
         self.picked_grid = g;
+        self.more_grids.clear();
+    }
+
+    /// The grid lines picked, the first picked first.
+    pub(crate) fn grids_picked(&self) -> Vec<usize> {
+        let Some(first) = self.picked_grid else { return Vec::new() };
+        let mut all = vec![first];
+        for &g in &self.more_grids {
+            if !all.contains(&g) {
+                all.push(g);
+            }
+        }
+        all
+    }
+
+    /// Picks grid lines `grids` beside what is selected; the first is the one whose properties
+    /// show.
+    pub(crate) fn set_picked_grids(&mut self, grids: Vec<usize>) {
+        self.picked_grid = grids.first().copied();
+        self.more_grids = grids.into_iter().skip(1).collect();
     }
 
     /// The picked grid's properties: its name, length, direction (degrees from x, 0 to 180),
