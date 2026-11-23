@@ -1731,6 +1731,7 @@
     "Click the second line, on the side that stays · Esc: start again": "Haga clic en la segunda línea, en el lado que se queda · Esc: empezar de nuevo",
     "Grid line: click a curtain wall (near its foot or head: upright, near an end: level) · drag a line to move it · Shift + click: take a line away · Esc: stop": "Línea de retícula: haga clic en un muro cortina (cerca del pie o la cabeza: vertical, cerca de un extremo: horizontal) · arrastre una línea para moverla · Mayús + clic: quitar una línea · Esc: terminar",
     "Panel: click a bay · glass, closed, door, open · Esc: stop": "Panel: haga clic en un vano · vidrio, cerrado, puerta, abierto · Esc: terminar",
-    "from height": "según la altura"
+    "from height": "según la altura",
+    "Railing": "Barandilla"
   }
 }

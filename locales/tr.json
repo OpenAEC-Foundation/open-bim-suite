@@ -1731,6 +1731,7 @@
     "Click the second line, on the side that stays · Esc: start again": "İkinci çizgiye, kalacak tarafından tıklayın · Esc: yeniden başla",
     "Grid line: click a curtain wall (near its foot or head: upright, near an end: level) · drag a line to move it · Shift + click: take a line away · Esc: stop": "Izgara çizgisi: bir giydirme cepheye tıklayın (tabana veya üste yakın: dikey, bir uca yakın: yatay) · taşımak için bir çizgiyi sürükleyin · Shift + tık: bir çizgiyi kaldır · Esc: bitir",
     "Panel: click a bay · glass, closed, door, open · Esc: stop": "Panel: bir bölmeye tıklayın · cam, kapalı, kapı, açık · Esc: bitir",
-    "from height": "yükseklikten"
+    "from height": "yükseklikten",
+    "Railing": "Korkuluk"
   }
 }

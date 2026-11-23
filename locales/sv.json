@@ -1731,6 +1731,7 @@
     "Click the second line, on the side that stays · Esc: start again": "Klicka på den andra linjen, på den sida som blir kvar · Esc: börja om",
     "Grid line: click a curtain wall (near its foot or head: upright, near an end: level) · drag a line to move it · Shift + click: take a line away · Esc: stop": "Rutnätslinje: klicka en glasfasad (nära foten eller toppen: stående, nära en ände: liggande) · dra en linje för att flytta den · Skift + klick: ta bort en linje · Esc: avsluta",
     "Panel: click a bay · glass, closed, door, open · Esc: stop": "Panel: klicka ett fack · glas, tät, dörr, öppen · Esc: avsluta",
-    "from height": "från höjden"
+    "from height": "från höjden",
+    "Railing": "Räcke"
   }
 }

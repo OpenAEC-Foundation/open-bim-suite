@@ -97,6 +97,8 @@ pub struct Settings {
     pub service: Option<bim_core::Service>,
     /// What the Appliance tool places.
     pub appliance: bim_core::PointRole,
+    /// The Stair tool gives its stairs a railing.
+    pub railing: bool,
 }
 
 impl Settings {
@@ -108,7 +110,7 @@ impl Settings {
 
     /// What a tool places when nothing was typed.
     pub fn default_for(tool: ModelTool) -> Self {
-        let plain = |width: f64, depth: f64, height: Option<f64>| Settings { kind: None, width, depth, height, offset: 0.0, sill: 0.0, location: LocationLine::Centre, grade: None, role: bim_core::SlabRole::Floor, service: None, appliance: bim_core::PointRole::Radiator };
+        let plain = |width: f64, depth: f64, height: Option<f64>| Settings { kind: None, width, depth, height, offset: 0.0, sill: 0.0, location: LocationLine::Centre, grade: None, role: bim_core::SlabRole::Floor, service: None, appliance: bim_core::PointRole::Radiator, railing: true };
         use super::element_props::{DOOR, WINDOW};
         use super::modeller::{BEAM, CABLE_TRAY, COLUMN, DUCT, OBJECT, PIPE, ROUND_DUCT, SERVICE_HEIGHT, SLAB_THICKNESS, WALL_THICKNESS};
         match tool {
@@ -162,6 +164,8 @@ pub enum PlaceMessage {
     Service(Option<bim_core::Service>),
     /// What the Appliance tool places; its fields take that one's usual size.
     Appliance(bim_core::PointRole),
+    /// The Stair tool gives its stairs a railing, or none.
+    Railing(bool),
     Chain(bool),
     /// The Wall tool draws a rectangle, or single walls.
     Rectangle(bool),
@@ -229,9 +233,9 @@ impl App {
                     // a wall up to its level stays so; one with a height of its own keeps it
                     PlanarForm::Wall { height, .. } => (ModelTool::Wall, Settings { kind, width: p.total_thickness(), height: e.top.is_none().then_some(height), ..of(ModelTool::Wall) }),
                     PlanarForm::Slab { role, .. } => (ModelTool::Slab, Settings { kind, width: p.total_thickness(), role, ..of(ModelTool::Slab) }),
-                    PlanarForm::Stair { height, risers, ref shape, .. } => {
+                    PlanarForm::Stair { height, risers, ref shape, railing, .. } => {
                         let width = if let bim_core::StairShape::Run { width, .. } = shape { *width } else { of(ModelTool::Stair).width };
-                        (ModelTool::Stair, Settings { width, height: Some(height), sill: risers as f64, ..of(ModelTool::Stair) })
+                        (ModelTool::Stair, Settings { width, height: Some(height), sill: risers as f64, railing, ..of(ModelTool::Stair) })
                     }
                 }
             }
@@ -456,6 +460,7 @@ impl App {
             PlaceMessage::Grade(grade) => s.grade = grade,
             PlaceMessage::Service(service) => s.service = service,
             PlaceMessage::Appliance(role) => s = s.of_appliance(role),
+            PlaceMessage::Railing(on) => s.railing = on,
             PlaceMessage::Role(role) => {
                 if s.role != role {
                     s.role = role;
@@ -678,7 +683,9 @@ impl App {
             // its sketch: an outline and the line it climbs along, or that line alone with landings
             let on = self.modeller.sketch.as_ref().is_some_and(|s| s.stair);
             let sketch = button(text(l.text("Schets", "Sketch")).size(12)).padding([3, 10]).style(move |_, st| p.ribbon_button(on, st)).on_press(Message::StairSketch);
-            bar = bar.push(sketch);
+            let railed = s.railing;
+            let railing = button(text(l.text("Leuning", "Railing")).size(12)).padding([3, 10]).style(move |_, st| p.ribbon_button(railed, st)).on_press(Message::Place(PlaceMessage::Railing(!railed)));
+            bar = bar.push(sketch).push(railing);
         }
         if tool == ModelTool::Wall {
             let on = self.modeller.placement.rectangle;

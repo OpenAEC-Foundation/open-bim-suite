@@ -573,6 +573,10 @@ pub enum PlanarForm {
         height: f64,
         risers: usize,
         shape: StairShape,
+        /// A railing on both sides of its flights: a baluster on every tread and a handrail over
+        /// them (a stair along a line; one in an outline has none).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        railing: bool,
     },
 }
 
@@ -598,12 +602,59 @@ impl StairShape {
     }
 }
 
+/// How high a stair's handrail is above the treads, and how thick its balusters and its handrail
+/// are (metres).
+pub const RAILING_HEIGHT: f64 = 0.9;
+pub const RAILING_SIZE: f64 = 0.04;
+
+/// The railing of a stair along a line: on both sides of every flight a baluster on the middle of
+/// every tread, and a handrail from each to the next. A landing and a stair in an outline have
+/// none.
+pub fn stair_railing(base: f64, height: f64, risers: usize, shape: &StairShape) -> Result<Vec<Solid>, Refusal> {
+    let StairShape::Run { .. } = shape else { return Ok(Vec::new()) };
+    let rise = height / risers.max(1) as f64;
+    let inset = RAILING_SIZE;
+    let bar = Profile::rectangle(RAILING_SIZE, RAILING_SIZE)?;
+    let mut solids = Vec::new();
+    // the tops of the balusters of the tread before, on its right and its left side
+    let mut before: Option<([DVec3; 2], DVec2)> = None;
+    for (ring, step, landing) in stair_steps(risers, shape)? {
+        // a flight's tread is a rectangle from its near edge to its far one: its right side from
+        // corner 0 to 1, its left from 3 to 2 (see `stair_steps`); a landing has none
+        if landing || ring.len() != 4 {
+            before = None;
+            continue;
+        }
+        let way = (ring[1] - ring[0]).normalize_or_zero();
+        let across = (ring[3] - ring[0]).normalize_or_zero();
+        let top = base + step as f64 * rise;
+        let feet = [(ring[0] + ring[1]) / 2.0 + across * inset, (ring[3] + ring[2]) / 2.0 - across * inset];
+        let tops = feet.map(|f| f.extend(top + RAILING_HEIGHT));
+        for foot in feet {
+            solids.push(Solid::extrude(&bar, &Axes::new(foot.extend(top), DVec3::X, DVec3::Z)?, RAILING_HEIGHT)?);
+        }
+        // the handrail from the tread before, when it is of the same flight
+        if let Some((from, _)) = before.filter(|(_, w)| w.distance(way) <= 1e-9) {
+            for (a, b) in from.into_iter().zip(tops) {
+                solids.push(Solid::extrude(&bar, &Axes::new(a, DVec3::Z, b - a)?, a.distance(b))?);
+            }
+        }
+        before = Some((tops, way));
+    }
+    Ok(solids)
+}
+
 /// The fewest steps a stair has.
 pub const FEWEST_RISERS: usize = 2;
 
 /// The treads of a stair in plan, from its foot up, each a polygon (anticlockwise) with how many
 /// steps above the base its top is. A landing is a tread among them.
 pub fn stair_treads(risers: usize, shape: &StairShape) -> Result<Vec<(Vec<DVec2>, usize)>, Refusal> {
+    Ok(stair_steps(risers, shape)?.into_iter().map(|(ring, step, _)| (ring, step)).collect())
+}
+
+/// The treads of [`stair_treads`], each with whether it is a landing.
+fn stair_steps(risers: usize, shape: &StairShape) -> Result<Vec<(Vec<DVec2>, usize, bool)>, Refusal> {
     if risers < FEWEST_RISERS || risers > 10_000 {
         return Err(Refusal::NotPositive);
     }
@@ -659,7 +710,7 @@ pub fn stair_treads(risers: usize, shape: &StairShape) -> Result<Vec<(Vec<DVec2>
                 for j in 0..*count {
                     let (a, b) = (*from + *dir * (j as f64 * going), *from + *dir * ((j + 1) as f64 * going));
                     step += 1;
-                    out.push((vec![a - left, b - left, b + left, a + left], step));
+                    out.push((vec![a - left, b - left, b + left, a + left], step, false));
                 }
                 if i + 1 < flights {
                     // the landing: between the end of this flight and the start of the next, out
@@ -669,7 +720,7 @@ pub fn stair_treads(risers: usize, shape: &StairShape) -> Result<Vec<(Vec<DVec2>
                     let across = way.perp() * half;
                     let points = [end - left, end + left, next - across, next + across, corner + (*dir - way) * half, corner - (*dir - way) * half];
                     step += 1;
-                    out.push((hull(&points), step));
+                    out.push((hull(&points), step, true));
                 }
             }
             Ok(out)
@@ -691,7 +742,7 @@ pub fn stair_treads(risers: usize, shape: &StairShape) -> Result<Vec<(Vec<DVec2>
                 let strip = clip(&clip(&ring, *foot, dir, lo, true), *foot, dir, hi, false);
                 let area: f64 = (0..strip.len()).map(|i| strip[i].perp_dot(strip[(i + 1) % strip.len()])).sum::<f64>() / 2.0;
                 if strip.len() >= 3 && area > LINEAR_TOLERANCE * going {
-                    out.push((strip, j + 1));
+                    out.push((strip, j + 1, false));
                 }
             }
             if out.is_empty() {
@@ -1327,8 +1378,12 @@ pub fn planar_solids(p: &PlanarDef) -> Result<Vec<Solid>, Refusal> {
     if !positive(thickness) {
         return Err(Refusal::NotPositive);
     }
-    if let PlanarForm::Stair { base, height, risers, shape } = &p.form {
-        return stair_solids(thickness, *base, *height, *risers, shape);
+    if let PlanarForm::Stair { base, height, risers, shape, railing } = &p.form {
+        let mut solids = stair_solids(thickness, *base, *height, *risers, shape)?;
+        if *railing {
+            solids.extend(stair_railing(*base, *height, *risers, shape)?);
+        }
+        return Ok(solids);
     }
     if let Some(b) = &p.build_up {
         b.check()?;
@@ -1900,7 +1955,7 @@ mod tests {
 
     #[test]
     fn a_stair_drawn_as_a_line_has_a_tread_on_every_step_but_the_last() {
-        let stair = |path: Vec<DVec2>, risers: usize| PlanarDef { form: PlanarForm::Stair { base: 0.0, height: 3.0, risers, shape: StairShape::Run { path, width: 1.0 } }, thickness: 0.15, openings: Vec::new(), build_up: None };
+        let stair = |path: Vec<DVec2>, risers: usize| PlanarDef { form: PlanarForm::Stair { base: 0.0, height: 3.0, risers, shape: StairShape::Run { path, width: 1.0 }, railing: false }, thickness: 0.15, openings: Vec::new(), build_up: None };
         // 16 steps of 187.5 mm over 3.75 m: 15 treads of 250 mm
         let straight = stair(vec![DVec2::ZERO, DVec2::new(3.75, 0.0)], 16);
         let solids = planar_solids(&straight).unwrap();
@@ -1924,6 +1979,21 @@ mod tests {
         // too few steps for its flights and landing, or none at all, is refused
         assert_eq!(planar_solids(&stair(vec![DVec2::ZERO, DVec2::new(3.0, 0.0), DVec2::new(3.0, 3.0)], 3)).err(), Some(Refusal::NotPositive));
         assert_eq!(planar_solids(&stair(vec![DVec2::ZERO, DVec2::new(3.0, 0.0)], 1)).err(), Some(Refusal::NotPositive));
+        // with a railing: on each side a baluster on every tread and a handrail between them, but
+        // none over the landing
+        let railed = |p: &PlanarDef| {
+            let mut p = p.clone();
+            if let PlanarForm::Stair { railing, .. } = &mut p.form {
+                *railing = true;
+            }
+            planar_solids(&p).unwrap()
+        };
+        let with = railed(&straight);
+        assert_eq!(with.len(), 15 + 2 * 15 + 2 * 14);
+        assert!(with.iter().all(|s| s.check().is_ok()));
+        let (_, hi) = with.iter().map(|s| s.bounds()).fold((DVec3::MAX, DVec3::MIN), |(lo, hi), b| (lo.min(b.0), hi.max(b.1)));
+        assert!((hi.z - (3.0 - 0.1875 + RAILING_HEIGHT)).abs() < 0.05, "{hi}");
+        assert_eq!(railed(&turned).len(), 15 + 2 * 14 + 2 * 12);
         // it is an IfcStair, moves with its points and is kept in the file
         let e = Element::in_project(&TileGrid::default(), "Stair", None, Shape::Planar(turned.clone()));
         assert_eq!(e.class(), "IfcStair");
@@ -1941,7 +2011,7 @@ mod tests {
         // together they are the footprint (4.5 m2), each narrower than the one before
         assert!((treads.iter().map(|t| area(&t.0)).sum::<f64>() - 4.5).abs() < 1e-9);
         assert!(treads.windows(2).all(|t| area(&t[1].0) < area(&t[0].0)));
-        let p = PlanarDef { form: PlanarForm::Stair { base: 1.0, height: 2.2, risers: 11, shape }, thickness: 0.1, openings: Vec::new(), build_up: None };
+        let p = PlanarDef { form: PlanarForm::Stair { base: 1.0, height: 2.2, risers: 11, shape, railing: true }, thickness: 0.1, openings: Vec::new(), build_up: None };
         let solids = planar_solids(&p).unwrap();
         assert!(solids.iter().all(|s| s.check().is_ok()));
         let (lo, hi) = solids[9].bounds();

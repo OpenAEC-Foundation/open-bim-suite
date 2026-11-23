@@ -1403,7 +1403,7 @@ mod tests {
     }
 
     fn stair_of(app: &App, id: ElementId) -> (f64, f64, usize, bim_core::StairShape) {
-        let Shape::Planar(PlanarDef { form: PlanarForm::Stair { base, height, risers, shape }, .. }) = app.modeller.model.get(id).unwrap().shape_in_project(&app.modeller.model.grid) else { panic!() };
+        let Shape::Planar(PlanarDef { form: PlanarForm::Stair { base, height, risers, shape, .. }, .. }) = app.modeller.model.get(id).unwrap().shape_in_project(&app.modeller.model.grid) else { panic!() };
         (base, height, risers, shape)
     }
 
@@ -1414,6 +1414,8 @@ mod tests {
         let _ = app.update(Message::ModelTool(Some((crate::app::modeller::ModelTool::Stair, "Stair"))));
         assert!(app.modeller.sketch.is_none(), "the tool draws at once; its sketch is asked for");
         app.place_message(PlaceMessage::Field(PlaceField::Height, "3".into()));
+        // (without its railing: the treads are counted)
+        app.place_message(PlaceMessage::Railing(false));
         // the second click says the way: 3 m in 17 steps of 176 mm, 16 treads of 250 mm, 4 m long
         click(&mut app, 1.0, 1.0);
         click(&mut app, 2.0, 1.0);
@@ -1423,6 +1425,14 @@ mod tests {
         assert_eq!((base, height, risers), (0.0, 3.0, 17));
         assert_eq!(shape, bim_core::StairShape::Run { path: vec![DVec2::new(1.0, 1.0), DVec2::new(5.0, 1.0)], width: 1.0 });
         assert_eq!(app.modeller.model.evaluate(made[0]).unwrap().len(), 16);
+        // with the strip's Railing on (as it starts) the next has balusters and handrails too
+        app.place_message(PlaceMessage::Railing(true));
+        click(&mut app, 1.0, 12.0);
+        click(&mut app, 2.0, 12.0);
+        let railed = *stairs(&app).last().unwrap();
+        assert_eq!(app.modeller.model.evaluate(railed).unwrap().len(), 16 + 2 * 16 + 2 * 15);
+        app.modeller.model.remove(railed);
+        app.place_message(PlaceMessage::Railing(false));
         // steps typed, and no going: from click to click
         app.place_message(PlaceMessage::Field(PlaceField::Sill, "13".into()));
         app.place_message(PlaceMessage::Field(PlaceField::Depth, "0".into()));
@@ -1447,6 +1457,7 @@ mod tests {
         let stair_tool = |app: &mut App| {
             let _ = app.update(Message::ModelTool(Some((crate::app::modeller::ModelTool::Stair, "Stair"))));
             app.place_message(PlaceMessage::Field(PlaceField::Height, "3".into()));
+            app.place_message(PlaceMessage::Railing(false));
             let _ = app.update(Message::StairSketch);
         };
         let mut app = modelling();

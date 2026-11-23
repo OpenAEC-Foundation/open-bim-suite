@@ -1167,7 +1167,7 @@ pub(super) fn tool_shape(tool: ModelTool, a: DVec3, b: DVec3, z: f64, storey: f6
                 _ => to,
             };
             let shape = bim_core::StairShape::Run { path: vec![from, end], width: s.width };
-            Shape::Planar(PlanarDef { form: PlanarForm::Stair { base, height, risers, shape }, thickness: STAIR_WAIST, openings: Vec::new(), build_up: None })
+            Shape::Planar(PlanarDef { form: PlanarForm::Stair { base, height, risers, shape, railing: s.railing }, thickness: STAIR_WAIST, openings: Vec::new(), build_up: None })
         }
         ModelTool::Slab => {
             let (lo, hi) = (a.truncate().min(b.truncate()), a.truncate().max(b.truncate()));
