@@ -299,7 +299,8 @@ impl PlanarDef {
 /// face, depth across it) run on the division lines; panels `panel` thick fill the bays. A type
 /// (`system_type`, copied from a library) adds a running bond, the materials and layers across the
 /// face ([`crate::system`]). A framed type (a timber frame) frames `openings` in the face, measured
-/// as a wall's from the system's start and base; a system that is not framed has none.
+/// as a wall's from the system's start and base; a system on a grid (brickwork, a curtain wall) is
+/// cut where they lie, its panels and its members ending at them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SystemDef {
     pub start: DVec2,

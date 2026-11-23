@@ -355,7 +355,9 @@ fn part_fields<'a>(p: Palette, l: Language, t: &SystemType, part: Part, view: &S
         .spacing(4),
     ));
 
-    let patterns: Vec<Named<Pattern>> = [Pattern::Stack, Pattern::RunningBond].map(|pattern| Named { value: pattern, label: pattern_label(pattern, t.group, l) }).to_vec();
+    // brickwork has its bonds; another system lies stacked or staggered
+    let offered: &[Pattern] = if t.group == SystemGroup::Masonry { &Pattern::ALL } else { &Pattern::ALL[..2] };
+    let patterns: Vec<Named<Pattern>> = offered.iter().map(|&pattern| Named { value: pattern, label: pattern_label(pattern, t.group, l) }).collect();
     let pattern_now = patterns.iter().find(|c| c.value == grid.pattern).cloned();
     let pattern_name = l.text("Verband", "Pattern");
     let pattern = a11y::named(pick_list(patterns, pattern_now, move |c: Named<Pattern>| SystemMessage::Pattern(part, c.value)).text_size(12).padding([2, 6]).width(Fill), Aria::ComboBox, pattern_name);

@@ -296,7 +296,8 @@ impl Face<'_> {
             Pattern::Stack => (bays + 1).saturating_add(cells.saturating_add(bays)).saturating_add(cells),
             // the edges and the rows' lines, then per row one division and one panel more than
             // its bays at most
-            Pattern::RunningBond => (rows + 3).saturating_add(rows.saturating_mul(bays + 1).saturating_mul(2)),
+            // (a row of headers has two to a bay)
+            _ => (rows + 3).saturating_add(rows.saturating_mul(bays + 1).saturating_mul(4)),
         }
     }
 
@@ -560,9 +561,6 @@ fn plan<'a>(s: &'a SystemDef, ends: &Ends) -> Result<Plan<'a>, Refusal> {
     let faces = faces(s);
     // openings are framed: by the system's own face and by every face with members; a lying
     // system is cut where they are
-    if !s.lies() && !s.openings.is_empty() && faces.iter().any(|f| f.member.is_some() && f.framing.is_none()) {
-        return Err(Refusal::OpeningNotFramed);
-    }
     let at = |ends: &[FaceEnd], i: usize| ends.get(i).copied().unwrap_or_default();
     let rough = if s.lies() { lying::cut(s, &faces[0], length)? } else { rough_openings(s, &faces) };
     let mut spans: Vec<Span> = Vec::with_capacity(faces.len());
@@ -994,6 +992,17 @@ impl Frame<'_> {
 }
 
 impl Line {
+    /// Opening `o` of this face as the rectangle it takes (`[u0, v0, u1, v1]`) and the solid that
+    /// cuts it through the whole of the face.
+    fn hole(&self, o: &Opening) -> Result<([f64; 4], Solid), Refusal> {
+        let r = [o.along, o.sill.max(0.0), o.along + o.width, o.sill + o.height];
+        // a door's hole runs on under the face's foot, so nothing of a member is left there
+        let foot = if o.sill <= LINEAR_TOLERANCE { r[1] - 1.0 } else { r[1] };
+        let axes = Axes::new(self.origin - self.right, self.dir, self.right)?;
+        let ring = vec![DVec2::new(r[0], foot), DVec2::new(r[2], foot), DVec2::new(r[2], r[3]), DVec2::new(r[0], r[3])];
+        Ok((r, Solid::extrude(&Profile::new(ring, Vec::new())?, &axes, 2.0)?))
+    }
+
     /// Face `f` on a grid: its members on the grid's lines, joined, and its panels (or boards) in
     /// its bays, cut around `openings` and at the prefab units' `joints`.
     fn grid(&self, f: &Face, openings: &[Opening], joints: &[f64], parts: &mut Vec<PartSolid>) -> Result<(), Refusal> {
@@ -1077,7 +1086,7 @@ impl Line {
                     }
                 }
             }
-            Pattern::RunningBond => {
+            bond => {
                 // the edges and the rows' lines; the rows' lines stop against the edges, a mitre
                 // at the corners
                 let mut lines_up: Vec<usize> = Vec::new();
@@ -1098,15 +1107,18 @@ impl Line {
                 }
                 for j in 0..rows {
                     let v = j as f64 * row;
-                    // the divisions of this row: every bay, shifted half a bay in every second
-                    // row; one too close to the one before it (or to the end) is left out
-                    let shift = if j % 2 == 1 { bay / 2.0 } else { 0.0 };
+                    // the divisions of this row as its bond lays it (every bay, shifted half a
+                    // bay in every second row, for a stretcher bond); one too close to the one
+                    // before it (or to the end) is left out
+                    let (shift, units) = bond.course(j, bay);
                     let mut lines = vec![0.0];
-                    for k in 0..=bays {
-                        let u = k as f64 * bay + shift;
+                    let (mut u, mut k) = (shift, 0usize);
+                    while u < self.length && k <= 4 * (bays + 2) {
                         if u - lines[lines.len() - 1] > w + LINEAR_TOLERANCE && self.length - u > w + LINEAR_TOLERANCE {
                             lines.push(u);
                         }
+                        u += units[k % units.len()] * bay;
+                        k += 1;
                     }
                     lines.push(self.length);
                     if let Some((size, _)) = f.member {
@@ -1145,8 +1157,38 @@ impl Line {
             parts.extend(done.parts);
         }
         let material = f.member.and_then(|(_, m)| m).map(str::to_string);
+        // a face on a grid has its members cut where an opening lies: what is in it is left out,
+        // what runs through it ends at it. (A framed face frames its openings instead.)
+        let tools: Vec<([f64; 4], Solid)> = if f.framing.is_none() { openings.iter().map(|o| self.hole(o)).collect::<Result<_, _>>()? } else { Vec::new() };
         for p in pieces {
-            let solid = join::finish(&p.member, p.start, p.end, &p.additions, &p.removals)?;
+            let mut solid = join::finish(&p.member, p.start, p.end, &p.additions, &p.removals)?;
+            let mut gone = false;
+            for (r, tool) in &tools {
+                let tol = LINEAR_TOLERANCE;
+                let (mut lo, mut hi) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
+                for q in &solid.positions {
+                    let at = [(*q - self.origin).dot(self.dir), (*q - self.origin).dot(self.up)];
+                    (lo, hi) = ([lo[0].min(at[0]), lo[1].min(at[1])], [hi[0].max(at[0]), hi[1].max(at[1])]);
+                }
+                if hi[0] <= r[0] + tol || lo[0] >= r[2] - tol || hi[1] <= r[1] + tol || lo[1] >= r[3] - tol {
+                    continue;
+                }
+                if lo[0] >= r[0] - tol && hi[0] <= r[2] + tol && lo[1] >= r[1] - tol && hi[1] <= r[3] + tol {
+                    gone = true;
+                    break;
+                }
+                match crate::boolean::boolean(&solid, tool, crate::boolean::BooleanOp::Difference) {
+                    Ok(left) => solid = left,
+                    Err(Refusal::Empty) => {
+                        gone = true;
+                        break;
+                    }
+                    Err(refusal) => return Err(refusal),
+                }
+            }
+            if gone {
+                continue;
+            }
             parts.push(PartSolid { class: "IfcMember", solid, material: material.clone() });
         }
         Ok(())
@@ -1612,9 +1654,44 @@ mod tests {
         // two openings with their king studs side by side are framed; the service zone frames them
         // too, with its battens 45 wide, so they are as far apart as its framing needs
         assert!(frame(vec![window(0.5, 0.9, 1.0, 1.2), window(1.5 + 4.0 * 0.045, 0.9, 1.0, 1.2)]).is_ok());
-        // a curtain wall (not framed) takes none
+        // a curtain wall (not framed) is cut where an opening lies
         let curtain = SystemDef { openings: vec![window(1.0, 0.9, 1.0, 1.2)], ..system(3.6, 2.7) };
-        assert_eq!(parts(&curtain).map(|p| p.len()), Err(Refusal::OpeningNotFramed));
+        assert!(parts(&curtain).is_ok());
+    }
+
+    #[test]
+    fn brickwork_is_laid_in_its_bond_and_cut_where_an_opening_lies() {
+        let wall = |id: &str, openings: Vec<Opening>| SystemDef { openings, ..system(4.4, 2.5) }.typed_from(&Library::starter(), id).unwrap();
+        let bricks = |s: &SystemDef| parts(s).unwrap().into_iter().filter(|p| p.class == "IfcPlate").collect::<Vec<_>>();
+        let long = |p: &PartSolid| {
+            let (lo, hi) = p.solid.positions.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), q| (lo.min(q.x), hi.max(q.x)));
+            ((hi - lo) * 1000.0).round() as i64
+        };
+        // stretchers 210 long in a stretcher bond; headers 100 long in every second row of an
+        // English bond, and beside every stretcher of a Flemish one
+        let count = |id: &str, length: i64| bricks(&wall(id, Vec::new())).iter().filter(|p| long(p) == length).count();
+        let (stretchers, headers) = (count("system.masonry-waal-stretcher", 210), count("system.masonry-waal-stretcher", 100));
+        assert!(stretchers > 700 && headers < 60, "{stretchers} {headers}");
+        assert!(count("system.masonry-waal-english", 100) > 700 && count("system.masonry-waal-english", 210) > 350);
+        assert!(count("system.masonry-waal-cross", 100) > 700);
+        let (s, h) = (count("system.masonry-waal-flemish", 210), count("system.masonry-waal-flemish", 100));
+        assert!(s > 450 && h > 450 && (s as i64 - h as i64).abs() < 60, "{s} {h}");
+        assert!(count("system.masonry-waal-quarter", 210) > 700);
+        // a window of 1.0 by 1.2 in it: no brick and no joint reaches into it, and the wall is
+        // less by the window
+        for id in ["system.masonry-waal-stretcher", "system.masonry-waal-english", "system.masonry-waal-flemish", "system.sand-lime-elements-100"] {
+            let (whole, open) = (wall(id, Vec::new()), wall(id, vec![Opening { along: 1.5, sill: 0.9, width: 1.0, height: 1.2, framing: None }]));
+            let made = parts(&open).unwrap();
+            for p in &made {
+                let c = p.solid.positions.iter().fold(DVec3::ZERO, |sum, q| sum + *q) / p.solid.positions.len() as f64;
+                let inside = p.solid.positions.iter().all(|q| q.x > 1.5 + 1e-6 && q.x < 2.5 - 1e-6 && q.z > 0.9 + 1e-6 && q.z < 2.1 - 1e-6);
+                assert!(!inside, "{id}: a part in the window at {c}");
+            }
+            let volume = |s: &SystemDef| parts(s).unwrap().iter().map(|p| p.solid.volume()).sum::<f64>();
+            let thick = open.panel.max(open.member.y);
+            let less = volume(&whole) - volume(&open);
+            assert!(less > 0.8 * 1.0 * 1.2 * thick.min(open.panel) && less < 1.1 * 1.0 * 1.2 * thick, "{id}: {less}");
+        }
     }
 
     /// `s` with the framing of its own face changed by `change`.

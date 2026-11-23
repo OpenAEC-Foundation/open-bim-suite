@@ -381,7 +381,7 @@ impl App {
             Shape::Planar(PlanarDef { form: PlanarForm::Slab { .. }, .. }) => true,
             // a floor or a ceiling made as a system is laid in its outline
             // a framed wall is sketched in its own face
-            Shape::System(s) => s.lies() || s.system_type.as_ref().is_some_and(|t| t.framing.is_some()),
+            Shape::System(s) => s.system_type.is_some(),
             _ => false,
         })
     }

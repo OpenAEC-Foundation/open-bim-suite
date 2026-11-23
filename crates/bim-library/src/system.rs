@@ -86,13 +86,49 @@ impl SystemGroup {
 }
 
 /// How a grid's rows lie: on one another, or every second row shifted half a bay (a stretcher
-/// bond, staggered boards).
+/// bond, staggered boards), or as one of the bonds of brickwork, where a header is half a bay
+/// long: a stretcher as long as it is thick twice over with the joint between.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Pattern {
     #[default]
     Stack,
     RunningBond,
+    /// Stretchers, every row a quarter of a bay past the one under it, four rows to a turn.
+    Quarter,
+    /// A row of stretchers and a row of headers in turn, the stretchers over one another.
+    English,
+    /// As [`Pattern::English`], every second row of stretchers half a bay past the first.
+    EnglishCross,
+    /// A stretcher and a header in turn in every row, each header in the middle of the
+    /// stretcher under it.
+    Flemish,
+}
+
+impl Pattern {
+    /// Every pattern, in the order a list shows them.
+    pub const ALL: [Pattern; 6] = [Pattern::Stack, Pattern::RunningBond, Pattern::Quarter, Pattern::English, Pattern::EnglishCross, Pattern::Flemish];
+
+    /// How row `row` (from 0) is divided along it, for bays `bay` long: how far its first
+    /// division is from its start, and the lengths that follow one another from there, in turn.
+    pub fn course(self, row: usize, bay: f64) -> (f64, &'static [f64]) {
+        const WHOLE: &[f64] = &[1.0];
+        const HALVES: &[f64] = &[0.5];
+        const BOTH: &[f64] = &[1.0, 0.5];
+        let (shift, units) = match self {
+            Pattern::Stack => (0.0, WHOLE),
+            Pattern::RunningBond => (if row % 2 == 1 { 0.5 } else { 0.0 }, WHOLE),
+            Pattern::Quarter => ((row % 4) as f64 * 0.25, WHOLE),
+            Pattern::English => if row % 2 == 1 { (0.25, HALVES) } else { (0.0, WHOLE) },
+            Pattern::EnglishCross => match row % 4 {
+                0 => (0.0, WHOLE),
+                2 => (0.5, WHOLE),
+                _ => (0.25, HALVES),
+            },
+            Pattern::Flemish => (if row % 2 == 1 { 0.75 } else { 0.0 }, BOTH),
+        };
+        (shift * bay, units)
+    }
 }
 
 impl Pattern {
@@ -102,8 +138,12 @@ impl Pattern {
         let [nl, en, de, fr] = match (self, group) {
             (Pattern::Stack, SystemGroup::Masonry) => ["stapelverband", "stack bond", "Stapelverband", "joints alignés"],
             (Pattern::RunningBond, SystemGroup::Masonry) => ["halfsteensverband", "stretcher bond", "Läuferverband", "appareil en panneresse"],
-            (Pattern::RunningBond, _) => ["verspringend", "staggered", "versetzt", "décalé"],
+            (Pattern::Quarter, SystemGroup::Masonry) => ["klezorenverband", "quarter bond", "Viertelverband", "appareil au quart"],
+            (Pattern::English, SystemGroup::Masonry) => ["staand verband", "English bond", "Blockverband", "appareil anglais"],
+            (Pattern::EnglishCross, SystemGroup::Masonry) => ["kruisverband", "English cross bond", "Kreuzverband", "appareil croisé"],
+            (Pattern::Flemish, SystemGroup::Masonry) => ["Vlaams verband", "Flemish bond", "Flämischer Verband", "appareil flamand"],
             (Pattern::Stack, _) => return None,
+            (_, _) => ["verspringend", "staggered", "versetzt", "décalé"],
         };
         Some(match lang {
             Lang::Nl => nl,
@@ -850,6 +890,10 @@ pub fn starter() -> Vec<SystemType> {
         upright("system.masonry-waal-stretcher", Masonry, Grid::new(0.22, 0.0625, RunningBond), Members::new(0.01, 0.09, "mortar"), Panels::new("brick", 0.1)),
         upright("system.masonry-dik-stretcher", Masonry, Grid::new(0.22, 0.075, RunningBond), Members::new(0.01, 0.09, "mortar"), Panels::new("brick", 0.1)),
         upright("system.masonry-waal-stack", Masonry, Grid::new(0.22, 0.0625, Stack), Members::new(0.01, 0.09, "mortar"), Panels::new("brick", 0.1)),
+        upright("system.masonry-waal-quarter", Masonry, Grid::new(0.22, 0.0625, Quarter), Members::new(0.01, 0.09, "mortar"), Panels::new("brick", 0.1)),
+        upright("system.masonry-waal-english", Masonry, Grid::new(0.22, 0.0625, English), Members::new(0.01, 0.2, "mortar"), Panels::new("brick", 0.21)),
+        upright("system.masonry-waal-cross", Masonry, Grid::new(0.22, 0.0625, EnglishCross), Members::new(0.01, 0.2, "mortar"), Panels::new("brick", 0.21)),
+        upright("system.masonry-waal-flemish", Masonry, Grid::new(0.22, 0.0625, Flemish), Members::new(0.01, 0.2, "mortar"), Panels::new("brick", 0.21)),
         upright("system.sand-lime-elements-100", Masonry, Grid::new(0.9, 0.6465, RunningBond), Members::new(0.003, 0.1, "glue"), Panels::new("sand-lime", 0.1)),
         upright("system.cladding-zinc-standing-seam-430", Cladding, Grid::new(0.43, 6.0, Stack), Members::new(0.006, 0.04, "zinc"), Panels::new("zinc", 0.0008)),
         upright("system.cladding-timber-boards-140", Cladding, Grid::new(4.0, 0.14, RunningBond), Members::new(0.004, 0.012, "timber"), Panels::new("timber-cladding", 0.018)),
@@ -899,7 +943,7 @@ mod tests {
     #[test]
     fn the_starter_types_check_and_have_names_of_their_own() {
         let types = starter();
-        assert_eq!(types.len(), 44);
+        assert_eq!(types.len(), 48);
         for t in &types {
             t.check(&materials()).unwrap_or_else(|e| panic!("{}: {e}", t.id));
             // a floor or a ceiling lies, the others stand
