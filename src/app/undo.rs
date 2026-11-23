@@ -20,6 +20,8 @@ use std::sync::Arc;
 /// a slider at every move: what is typed or dragged there in one go is one step to take back.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum Typing {
+    /// The fire rating typed for an object type (its id).
+    ObjectRating(String),
     /// The fire rating typed for a system type (its id).
     SystemRating(String),
     /// The fire rating typed for a linear type (its id).
@@ -80,6 +82,7 @@ impl App {
             Message::DrawingSet(super::drawing_sets::DrawingSetMessage::Typed(field, _)) => Some(Typing::DrawingSet(self.drawing_set_view.picked.clone()?, field.clone())),
             Message::Service(super::services::ServiceMessage::Typed(super::services::Field::Cover, _)) => Some(Typing::Service(self.service_view.cover.clone()?, super::services::Field::Cover)),
             Message::Service(super::services::ServiceMessage::Typed(field, _)) => Some(Typing::Service(self.service_view.picked.clone()?, *field)),
+            Message::Object(super::objects::ObjectMessage::FireRating(_)) => Some(Typing::ObjectRating(self.object_view.picked.clone()?)),
             Message::Object(super::objects::ObjectMessage::Typed(field, _)) => Some(Typing::Object(self.object_view.picked.clone()?, *field)),
             Message::BuildUp(BuildUpMessage::FireRating(_)) => Some(Typing::BuildUpRating(self.buildup_view.picked.clone()?)),
             Message::BuildUp(BuildUpMessage::Named(_)) => Some(Typing::BuildUpName(self.buildup_view.picked.clone()?)),

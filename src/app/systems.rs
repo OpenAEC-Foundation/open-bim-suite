@@ -696,7 +696,7 @@ impl App {
             .push({
                 // what a delivery asks of it (BIM basis ILS): said here, or left to its group and its code
                 let coded = SystemType { delivery: Default::default(), ..t.clone() };
-                super::buildups::delivery_controls(p, l, coded.load_bearing(), coded.is_external(), &t.delivery, t.missing(), SystemMessage::Bearing, SystemMessage::External, SystemMessage::FireRating)
+                super::buildups::delivery_controls(p, l, coded.load_bearing(), coded.is_external(), &t.delivery, t.missing(), true, SystemMessage::Bearing, SystemMessage::External, SystemMessage::FireRating)
             })
             .push(row![act(l.text("Dupliceren", "Duplicate"), SystemMessage::Duplicate), act(l.text("Verwijderen", "Remove"), SystemMessage::Remove), Space::new().width(Fill)].spacing(4))
             .push(refused)
