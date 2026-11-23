@@ -1790,6 +1790,17 @@
     "reinforcing steel": "Betonstahl",
     "bolts": "Schrauben",
     "timber": "Holz",
-    "grade": "Güte"
+    "grade": "Güte",
+    "by its code: yes": "nach dem Code: ja",
+    "by its code: no": "nach dem Code: nein",
+    "by its code: unknown": "nach dem Code: unbekannt",
+    "Loadbearing": "Tragend",
+    "External": "Außen",
+    "Fire rating": "Feuerwiderstand",
+    "BIM basis ILS: complete": "BIM basis ILS: vollständig",
+    "BIM basis ILS, still missing": "BIM basis ILS, es fehlt noch",
+    "NL-SfB code of four digits": "NL-SfB-Code mit vier Ziffern",
+    "loadbearing or not": "tragend oder nicht",
+    "fire rating": "Feuerwiderstand"
   }
 }

@@ -1790,6 +1790,17 @@
     "reinforcing steel": "stal zbrojeniowa",
     "bolts": "śruby",
     "timber": "drewno",
-    "grade": "klasa"
+    "grade": "klasa",
+    "by its code: yes": "według kodu: tak",
+    "by its code: no": "według kodu: nie",
+    "by its code: unknown": "według kodu: nieznane",
+    "Loadbearing": "Nośna",
+    "External": "Zewnętrzna",
+    "Fire rating": "Odporność ogniowa",
+    "BIM basis ILS: complete": "BIM basis ILS: kompletne",
+    "BIM basis ILS, still missing": "BIM basis ILS, jeszcze brakuje",
+    "NL-SfB code of four digits": "kod NL-SfB z czterech cyfr",
+    "loadbearing or not": "nośna czy nie",
+    "fire rating": "odporność ogniowa"
   }
 }

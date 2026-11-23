@@ -1790,6 +1790,17 @@
     "reinforcing steel": "aço de armadura",
     "bolts": "parafusos",
     "timber": "madeira",
-    "grade": "qualidade"
+    "grade": "qualidade",
+    "by its code: yes": "segundo o código: sim",
+    "by its code: no": "segundo o código: não",
+    "by its code: unknown": "segundo o código: desconhecido",
+    "Loadbearing": "Resistente",
+    "External": "Exterior",
+    "Fire rating": "Resistência ao fogo",
+    "BIM basis ILS: complete": "BIM basis ILS: completo",
+    "BIM basis ILS, still missing": "BIM basis ILS, ainda falta",
+    "NL-SfB code of four digits": "código NL-SfB de quatro algarismos",
+    "loadbearing or not": "resistente ou não",
+    "fire rating": "resistência ao fogo"
   }
 }

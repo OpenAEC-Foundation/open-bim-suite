@@ -35,6 +35,7 @@ pub mod grade;
 pub mod hatch;
 pub mod house;
 pub mod ifcx;
+pub mod ils;
 pub mod inb;
 pub mod library;
 pub mod lod;

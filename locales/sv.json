@@ -1790,6 +1790,17 @@
     "reinforcing steel": "armeringsstål",
     "bolts": "skruvar",
     "timber": "trä",
-    "grade": "kvalitet"
+    "grade": "kvalitet",
+    "by its code: yes": "enligt koden: ja",
+    "by its code: no": "enligt koden: nej",
+    "by its code: unknown": "enligt koden: okänt",
+    "Loadbearing": "Bärande",
+    "External": "Utvändig",
+    "Fire rating": "Brandmotstånd",
+    "BIM basis ILS: complete": "BIM basis ILS: komplett",
+    "BIM basis ILS, still missing": "BIM basis ILS, saknas ännu",
+    "NL-SfB code of four digits": "NL-SfB-kod med fyra siffror",
+    "loadbearing or not": "bärande eller inte",
+    "fire rating": "brandmotstånd"
   }
 }

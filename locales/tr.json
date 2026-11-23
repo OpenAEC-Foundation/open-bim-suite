@@ -1790,6 +1790,17 @@
     "reinforcing steel": "donatı çeliği",
     "bolts": "cıvatalar",
     "timber": "ahşap",
-    "grade": "kalite"
+    "grade": "kalite",
+    "by its code: yes": "koduna göre: evet",
+    "by its code: no": "koduna göre: hayır",
+    "by its code: unknown": "koduna göre: bilinmiyor",
+    "Loadbearing": "Taşıyıcı",
+    "External": "Dış",
+    "Fire rating": "Yangın dayanımı",
+    "BIM basis ILS: complete": "BIM basis ILS: tamam",
+    "BIM basis ILS, still missing": "BIM basis ILS, hâlâ eksik",
+    "NL-SfB code of four digits": "dört haneli NL-SfB kodu",
+    "loadbearing or not": "taşıyıcı olup olmadığı",
+    "fire rating": "yangın dayanımı"
   }
 }
