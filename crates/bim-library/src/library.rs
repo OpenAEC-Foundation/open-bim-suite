@@ -57,6 +57,10 @@ pub struct Library {
     /// ([`crate::standard`]).
     #[serde(default)]
     pub hatch_standards: Vec<HatchStandard>,
+    /// What else is known of its items: costs, the maker's data and the like, each with a
+    /// source and a date ([`crate::aspect`]). In a file they are attributes on the items' nodes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aspects: Vec<crate::aspect::Aspect>,
 }
 
 /// Names made unique: " (2)", " (3)" after a name given before, in order.
@@ -104,7 +108,7 @@ impl Library {
     /// linear types and system types. The steel profiles are a catalogue
     /// ([`profile::steel_profiles`]) a project takes types from, not starter types.
     pub fn starter() -> Self {
-        Self { materials: material::starter(), buildups: buildup::starter(), linear_types: profile::starter(), system_types: system::starter(), codes: nlsfb::starter(), object_types: object::starter(), connection_types: connection::starter(), service_types: service::starter(), cover_types: service::covers(), hatch_standards: standard::starter(), drawing_sets: annotate::starter(), view_templates: template::starter() }
+        Self { materials: material::starter(), buildups: buildup::starter(), linear_types: profile::starter(), system_types: system::starter(), codes: nlsfb::starter(), object_types: object::starter(), connection_types: connection::starter(), service_types: service::starter(), cover_types: service::covers(), hatch_standards: standard::starter(), drawing_sets: annotate::starter(), view_templates: template::starter(), aspects: Vec::new() }
     }
 
     pub fn material(&self, key: &str) -> Option<&Material> {
@@ -580,7 +584,58 @@ impl Library {
                 added += 1;
             }
         }
+        // an aspect comes with the item it is of, where this library has none of its kind (not
+        // counted; one of a type that got another id in the merge stays behind)
+        for a in &other.aspects {
+            if self.aspect(&a.item, a.kind).is_none() {
+                let _ = self.set_aspect(a.clone());
+            }
+        }
         added
+    }
+
+    /// The paths of the nodes of its items: what an aspect can be of.
+    pub fn item_paths(&self) -> std::collections::BTreeSet<String> {
+        let mut paths: std::collections::BTreeSet<String> = self.materials.iter().map(|m| crate::ifcx::material_path(&m.key)).collect();
+        paths.extend(self.buildups.iter().map(|b| crate::ifcx::buildup_path(&b.id)));
+        paths.extend(self.linear_types.iter().map(|t| crate::ifcx::linear_type_path(&t.id)));
+        paths.extend(self.system_types.iter().map(|t| crate::ifcx::system_type_path(&t.id)));
+        paths.extend(self.object_types.iter().map(|t| crate::object::path(&t.id)));
+        paths.extend(self.connection_types.iter().map(|t| crate::connection::path(&t.id)));
+        paths.extend(self.service_types.iter().map(|t| crate::service::path(&t.id)));
+        paths.extend(self.cover_types.iter().map(|t| crate::service::cover_path(&t.id)));
+        paths
+    }
+
+    /// The aspect of `kind` of the item at `item`.
+    pub fn aspect(&self, item: &str, kind: crate::aspect::Kind) -> Option<&crate::aspect::Aspect> {
+        self.aspects.iter().find(|a| a.item == item && a.kind == kind)
+    }
+
+    /// The aspects of the item at `item`.
+    pub fn aspects_of<'a>(&'a self, item: &'a str) -> impl Iterator<Item = &'a crate::aspect::Aspect> {
+        self.aspects.iter().filter(move |a| a.item == item)
+    }
+
+    /// Gives an item an aspect, in the place of the one of its kind it had. Refused when the
+    /// aspect does not check or the library has no such item.
+    pub fn set_aspect(&mut self, aspect: crate::aspect::Aspect) -> Result<(), LibraryError> {
+        aspect.check()?;
+        if !self.item_paths().contains(&aspect.item) {
+            return Err(LibraryError::BadAspect("an item of the library".into()));
+        }
+        match self.aspects.iter_mut().find(|a| a.item == aspect.item && a.kind == aspect.kind) {
+            Some(had) => *had = aspect,
+            None => self.aspects.push(aspect),
+        }
+        Ok(())
+    }
+
+    /// Takes the aspect of `kind` from the item at `item`; whether it had one.
+    pub fn remove_aspect(&mut self, item: &str, kind: crate::aspect::Kind) -> bool {
+        let before = self.aspects.len();
+        self.aspects.retain(|a| !(a.item == item && a.kind == kind));
+        self.aspects.len() != before
     }
 }
 

@@ -1743,6 +1743,16 @@
     "Levels of detail": "Ayrıntı düzeyleri",
     "Data per level of detail": "Ayrıntı düzeyine göre veriler",
     "data": "veri",
-    "Strength class": "Dayanım sınıfı"
+    "Strength class": "Dayanım sınıfı",
+    "Costs": "Maliyetler",
+    "Environment": "Çevre",
+    "Physics": "Yapı fiziği",
+    "Planning": "Planlama",
+    "Maintenance": "Bakım",
+    "labour": "işçilik",
+    "equipment": "ekipman",
+    "subcontractor": "taşeron",
+    "other": "diğer",
+    "Not verified: a reference price.": "Doğrulanmadı: bir referans fiyat."
   }
 }
