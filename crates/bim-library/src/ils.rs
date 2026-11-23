@@ -22,11 +22,16 @@
 //! its code does not: a floor of slabs does, a curtain wall, a frame, a stud wall, a cladding and
 //! a ceiling do not, and of a timber frame, a steel frame and masonry it has to be said.
 //!
-//! Not yet: object types; the ILS's other points (storeys, placing, doubles),
+//! An object type says whether it is external and its fire rating ([`ObjectType::delivery`]): a
+//! code of the group 31 (openings in external walls) is external. Whether it bears is not asked
+//! of an object, and a fire rating only of what closes an opening: a door and a window.
+//!
+//! Not yet: the ILS's other points (storeys, placing, doubles),
 //! which are of a model and not of a library.
 
 use crate::buildup::{BuildUp, Role};
 use crate::material::Material;
+use crate::object::{ObjectGroup, ObjectType};
 use crate::profile::{LinearRole, LinearType};
 use crate::system::{SystemGroup, SystemType};
 use serde::{Deserialize, Serialize};
@@ -153,6 +158,42 @@ impl SystemType {
             out.push(Missing::LoadBearing);
         }
         if self.delivery.fire_rating.as_deref().is_none_or(|rating| rating.trim().is_empty()) {
+            out.push(Missing::FireRating);
+        }
+        out
+    }
+}
+
+impl ObjectType {
+    /// Whether a delivery asks a fire rating of it: of what closes an opening.
+    pub fn asks_fire_rating(&self) -> bool {
+        matches!(self.group, ObjectGroup::Door | ObjectGroup::Window)
+    }
+
+    /// Whether it is external: what it says itself, else what its code says (the groups 21, 27,
+    /// 31 and 41 of NL-SfB are of the outside).
+    pub fn is_external(&self) -> bool {
+        self.delivery.is_external.unwrap_or_else(|| ["21", "27", "31", "41"].iter().any(|group| self.nlsfb().starts_with(group)))
+    }
+
+    /// IFC's own properties of it for a delivery: `IsExternal` and `FireRating` of a door, a
+    /// window, a stair and a railing; nothing of a fitting or an appliance.
+    pub fn delivery_properties(&self) -> Vec<(&'static str, Value)> {
+        if !matches!(self.group, ObjectGroup::Door | ObjectGroup::Window | ObjectGroup::Stair | ObjectGroup::Railing) {
+            return Vec::new();
+        }
+        let mut out = vec![("IsExternal", json!(self.is_external()))];
+        out.extend(self.delivery.fire_rating.as_deref().filter(|rating| !rating.trim().is_empty()).map(|rating| ("FireRating", json!(rating))));
+        out
+    }
+
+    /// What it still lacks for a delivery.
+    pub fn missing(&self) -> Vec<Missing> {
+        let mut out = Vec::new();
+        if self.nlsfb().chars().filter(char::is_ascii_digit).count() < 4 {
+            out.push(Missing::FourDigits);
+        }
+        if self.asks_fire_rating() && self.delivery.fire_rating.as_deref().is_none_or(|rating| rating.trim().is_empty()) {
             out.push(Missing::FireRating);
         }
         out
@@ -393,6 +434,30 @@ mod tests {
         let node = file["data"].as_array().unwrap().iter().find(|n| n["path"] == path.as_str()).unwrap();
         assert_eq!((node["attributes"]["bsi::ifc::prop::FireRating"].as_str(), node["attributes"]["bsi::ifc::prop::LoadBearing"].as_bool(), node["attributes"]["bsi::ifc::prop::IsExternal"].as_bool()), (Some("REI 60"), Some(false), Some(false)));
         assert_eq!(crate::ifcx::read(&file).unwrap().system_type(&id).map(|t| t.delivery.clone()), Some(own.delivery));
+    }
+
+    #[test]
+    fn an_object_type_says_whether_it_is_external_and_its_fire_rating() {
+        let mut library = Library::starter();
+        let of = |library: &Library, group: ObjectGroup| library.object_types.iter().find(|t| t.group == group).cloned().unwrap_or_else(|| panic!("{group:?}"));
+        let door = of(&library, ObjectGroup::Door);
+        // a door's code says whether it is of the outside; a fire rating is asked of it
+        assert_eq!((ObjectType { code: Some("31.3".into()), ..door.clone() }.is_external(), ObjectType { code: Some("32.3".into()), ..door.clone() }.is_external()), (true, false));
+        assert!(door.asks_fire_rating() && door.missing().contains(&Missing::FireRating) && door.missing().contains(&Missing::FourDigits));
+        let own = ObjectType { code: Some("32.31".into()), delivery: Delivery { is_external: Some(true), fire_rating: Some("EW 30".into()), ..Delivery::default() }, ..door.clone() };
+        assert_eq!((own.is_external(), own.missing(), own.delivery_properties()), (true, vec![], vec![("IsExternal", json!(true)), ("FireRating", json!("EW 30"))]));
+        // of a fitting nothing but its code is asked, and nothing of it is written
+        let basin = of(&library, ObjectGroup::Sanitary);
+        assert!(!basin.asks_fire_rating() && !basin.missing().contains(&Missing::FireRating) && basin.delivery_properties().is_empty());
+        // to a file and back; an object that says nothing writes nothing
+        assert!(serde_json::to_value(&door).unwrap().get("delivery").is_none());
+        let id = door.id.clone();
+        library.object_types.iter_mut().find(|t| t.id == id).unwrap().delivery = own.delivery.clone();
+        let file = crate::ifcx::file(&library, "test", "test", "2026-11-23T00:00:00Z");
+        let path = crate::object::path(&id);
+        let node = file["data"].as_array().unwrap().iter().find(|n| n["path"] == path.as_str()).unwrap();
+        assert_eq!((node["attributes"]["bsi::ifc::prop::FireRating"].as_str(), node["attributes"]["bsi::ifc::prop::IsExternal"].as_bool(), node["attributes"].get("bsi::ifc::prop::LoadBearing").is_none()), (Some("EW 30"), Some(true), true));
+        assert_eq!(crate::ifcx::read(&file).unwrap().object_type(&id).map(|t| t.delivery.clone()), Some(own.delivery));
     }
 
 }

@@ -42,7 +42,8 @@ Of every build-up, linear type and system type, in both libraries:
 | A fire rating | **none** |
 
 So no type of either library is complete for a delivery yet. The editors of a build-up, a linear
-type and a system type now show what each lacks, and take the three properties.
+type and a system type now show what each lacks, and take the three properties; the editor of a
+door, a window, a stair and a railing takes whether it is external and its fire rating.
 
 ## What a Dutch house and a small utility building still miss
 
