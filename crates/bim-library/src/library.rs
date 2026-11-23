@@ -446,6 +446,26 @@ impl Library {
         Ok(())
     }
 
+    /// The drawing set `key` of the library, to change.
+    pub fn drawing_set_mut(&mut self, key: &str) -> Option<&mut DrawingSet> {
+        self.drawing_sets.iter_mut().find(|s| s.key == key)
+    }
+
+    /// Takes a drawing set as a copy under a key of its own ("-2", "-3" after one it has); its
+    /// key.
+    pub fn copy_drawing_set(&mut self, from: &DrawingSet) -> String {
+        let key = std::iter::once(from.key.clone()).chain((2..).map(|n| format!("{}-{n}", from.key))).find(|key| self.drawing_set(key).is_none()).unwrap_or_default();
+        self.drawing_sets.push(DrawingSet { key: key.clone(), ..from.clone() });
+        key
+    }
+
+    /// Takes drawing set `key` away; whether the library had it.
+    pub fn remove_drawing_set(&mut self, key: &str) -> bool {
+        let before = self.drawing_sets.len();
+        self.drawing_sets.retain(|s| s.key != key);
+        self.drawing_sets.len() != before
+    }
+
     /// The view template `key` of the library.
     pub fn view_template(&self, key: &str) -> Option<&ViewTemplate> {
         self.view_templates.iter().find(|t| t.key == key)

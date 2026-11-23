@@ -1753,6 +1753,10 @@
     "equipment": "utrustning",
     "subcontractor": "underentreprenör",
     "other": "övrigt",
-    "Not verified: a reference price.": "Inte kontrollerat: ett riktpris."
+    "Not verified: a reference price.": "Inte kontrollerat: ett riktpris.",
+    "Scale (empty: every scale)": "Skala (tomt: alla skalor)",
+    "Copy to the project": "Kopiera till projektet",
+    "+ Rule": "+ Regel",
+    "Remove the drawing set": "Ta bort ritningsuppsättningen"
   }
 }

@@ -1753,6 +1753,10 @@
     "equipment": "sprzęt",
     "subcontractor": "podwykonawca",
     "other": "inne",
-    "Not verified: a reference price.": "Niezweryfikowane: cena orientacyjna."
+    "Not verified: a reference price.": "Niezweryfikowane: cena orientacyjna.",
+    "Scale (empty: every scale)": "Skala (puste: każda skala)",
+    "Copy to the project": "Kopiuj do projektu",
+    "+ Rule": "+ Reguła",
+    "Remove the drawing set": "Usuń zestaw rysunkowy"
   }
 }

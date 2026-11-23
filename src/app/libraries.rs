@@ -405,7 +405,7 @@ pub struct Found {
 }
 
 /// The library every project starts with.
-fn general() -> &'static Library {
+pub(super) fn general() -> &'static Library {
     static GENERAL: OnceLock<Library> = OnceLock::new();
     GENERAL.get_or_init(Library::starter)
 }
@@ -575,6 +575,9 @@ impl App {
         let profile = &mut self.profile_view;
         (profile.draft, profile.refused) = (None, None);
         profile.picked = profile.picked.take().filter(|id| library.linear_type(id).is_some());
+        // (a drawing set's typed fields are its values again; one taken back is not picked)
+        self.drawing_set_view.typing = None;
+        self.drawing_set_view.picked = self.drawing_set_view.picked.take().filter(|key| self.libraries.source != Source::Project || library.drawing_set(key).is_some());
         let system = &mut self.system_view;
         (system.draft, system.refused) = (None, None);
         system.picked = system.picked.take().filter(|id| library.system_type(id).is_some());
@@ -606,7 +609,7 @@ impl App {
 
     /// The shelf of types the source shown has, if it has one: the general library, the Dutch
     /// template's, or the project's.
-    fn shown_shelf(&self) -> Option<Shelf> {
+    pub(super) fn shown_shelf(&self) -> Option<Shelf> {
         match (self.libraries.source, self.libraries.country) {
             (Source::General, _) => Some(Shelf::General),
             (Source::Country, Country::Netherlands) => Some(Shelf::Netherlands),

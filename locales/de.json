@@ -1753,6 +1753,10 @@
     "equipment": "Gerät",
     "subcontractor": "Nachunternehmer",
     "other": "Sonstiges",
-    "Not verified: a reference price.": "Nicht geprüft: ein Richtpreis."
+    "Not verified: a reference price.": "Nicht geprüft: ein Richtpreis.",
+    "Scale (empty: every scale)": "Maßstab (leer: jeder Maßstab)",
+    "Copy to the project": "In das Projekt kopieren",
+    "+ Rule": "+ Regel",
+    "Remove the drawing set": "Zeichnungssatz entfernen"
   }
 }

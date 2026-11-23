@@ -1753,6 +1753,10 @@
     "equipment": "equipos",
     "subcontractor": "subcontratista",
     "other": "otros",
-    "Not verified: a reference price.": "Sin verificar: un precio de referencia."
+    "Not verified: a reference price.": "Sin verificar: un precio de referencia.",
+    "Scale (empty: every scale)": "Escala (vacío: todas las escalas)",
+    "Copy to the project": "Copiar al proyecto",
+    "+ Rule": "+ Regla",
+    "Remove the drawing set": "Quitar el conjunto de dibujo"
   }
 }
