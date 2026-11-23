@@ -23,6 +23,7 @@
 
 pub mod annotate;
 pub mod buildup;
+pub mod component;
 pub mod connection;
 pub mod drawing;
 pub mod dutch;

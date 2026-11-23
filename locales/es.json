@@ -1731,6 +1731,13 @@
     "Orbiting turns about the point under the cursor. A double click or the right-click menu sets a fixed pivot; it stays until a double click in empty space or the menu clears it. Looking around holds the cursor in place, as in a game. Shift + left pans, Shift + wheel orbits.": "La órbita gira alrededor del punto bajo el cursor. Un doble clic o el menú contextual fija un punto de giro; se mantiene hasta que un doble clic en el vacío o el menú lo quita. Al mirar alrededor, el cursor se queda en su sitio, como en un juego. Mayús + izquierdo desplaza, Mayús + rueda orbita.",
     "Set pivot here": "Fijar punto de giro aquí",
     "double click": "doble clic",
-    "Clear pivot": "Quitar punto de giro"
+    "Clear pivot": "Quitar punto de giro",
+    "2D components": "Componentes 2D",
+    "detail": "detalle",
+    "component": "componente",
+    "Maker": "Fabricante",
+    "Licence": "Licencia",
+    "Source": "Fuente",
+    "The drawing itself is not in the library yet: a view cannot place it yet.": "El dibujo en sí aún no está en la biblioteca: una vista todavía no puede colocarlo."
   }
 }
