@@ -1503,6 +1503,11 @@ mod tests {
                 ("Boiler 1", "IfcBoiler", Some(Service::HeatingSupply), DVec3::new(0.45, 0.35, 0.7), 1.2),
             ]
         );
+        // the remote control picks in the strip's lists by name, in English or as shown
+        assert!(app.pick_tool_option("kind", "pomp", Language::Dutch) && app.pick_tool_option("service", "Cold water", Language::Dutch));
+        assert_eq!(app.tool_settings().map(|(_, s)| (s.appliance, s.service, s.width)), Some((PointRole::Pump, Some(Service::ColdWater), 0.18)));
+        assert!(!app.pick_tool_option("kind", "sofa", Language::Dutch));
+        assert!(app.pick_tool_option("service", "verwarming aanvoer", Language::Dutch));
         // picked up again, the tool takes its kind, size and service
         let boiler = app.modeller.model.iter().last().unwrap().id;
         app.place_message(PlaceMessage::Appliance(PointRole::Pump));

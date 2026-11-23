@@ -508,6 +508,20 @@ impl App {
                 self.pick_tool_type(found.0.clone());
                 Ok(json!({ "picked": found.0, "name": found.1 }))
             }
+            "tool_option" => {
+                let language = a.get("language").and_then(|v| v.as_str()).and_then(openaec_ui::Language::from_code).unwrap_or(openaec_ui::Language::English);
+                let lists = self.tool_options(language);
+                if lists.is_empty() {
+                    return Err("the tool that is on has no such list: press a tool of the MEP tab first (Duct, Pipe, Cable tray, Appliance)".into());
+                }
+                if let (Some(list), Some(value)) = (a.get("list").and_then(|v| v.as_str()), a.get("value").and_then(|v| v.as_str())) {
+                    if !self.pick_tool_option(list, value, language) {
+                        return Err(format!("no '{value}' in list '{list}'; call tool_option without a value to see the lists"));
+                    }
+                }
+                let lists: Vec<_> = self.tool_options(language).into_iter().map(|(name, options, picked)| json!({ "list": name, "picked": picked, "options": options.iter().map(|(en, own)| json!({ "name": en, "shown": own })).collect::<Vec<_>>() })).collect();
+                Ok(json!({ "lists": lists }))
+            }
             #[cfg(not(target_arch = "wasm32"))]
             "element_drawings" => {
                 let folder = a.get("folder").and_then(|v| v.as_str()).ok_or("folder is required")?;

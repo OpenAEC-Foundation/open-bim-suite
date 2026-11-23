@@ -539,6 +539,41 @@ impl App {
         Some((choices.into_iter().map(|c| (c.id, c.name)).collect(), s.kind))
     }
 
+    /// The other lists of the active tool's strip, for the remote control, which cannot open a
+    /// list: each with its name (`service`, `kind`), what it offers (the names in English and in
+    /// language `l`) and the one picked (in English). Empty while the tool has none.
+    pub(crate) fn tool_options(&self, l: Language) -> Vec<(&'static str, Vec<(&'static str, &'static str)>, &'static str)> {
+        let Some((tool, s)) = self.tool_settings() else { return Vec::new() };
+        let mut lists = Vec::new();
+        if tool == ModelTool::Appliance {
+            let kinds = bim_core::PointRole::APPLIANCES.into_iter().map(|r| (appliance_label(r, Language::English), appliance_label(r, l))).collect();
+            lists.push(("kind", kinds, appliance_label(s.appliance, Language::English)));
+        }
+        if tool.service().is_some() || tool == ModelTool::Appliance {
+            let fits = |v: &bim_core::Service| tool.service().is_none_or(|role| v.role() == role);
+            let services = std::iter::once(("-", "-")).chain(bim_core::Service::ALL.into_iter().filter(fits).map(|v| (v.name(), service_label(v, l)))).collect();
+            lists.push(("service", services, s.service.map_or("-", |v| v.name())));
+        }
+        lists
+    }
+
+    /// Picks `wanted` (a name of [`App::tool_options`], in English or the interface language, any
+    /// case) in list `list` of the active tool's strip, as choosing it there does. False when the
+    /// tool has no such list or the list no such name.
+    pub(crate) fn pick_tool_option(&mut self, list: &str, wanted: &str, l: Language) -> bool {
+        let is = |en: &str, own: &str| en.eq_ignore_ascii_case(wanted) || own.to_lowercase() == wanted.to_lowercase();
+        if !self.tool_options(l).iter().any(|(name, options, _)| *name == list && options.iter().any(|(en, own)| is(en, own))) {
+            return false;
+        }
+        let message = match list {
+            "kind" => bim_core::PointRole::APPLIANCES.into_iter().find(|r| is(appliance_label(*r, Language::English), appliance_label(*r, l))).map(PlaceMessage::Appliance),
+            _ => Some(PlaceMessage::Service(bim_core::Service::ALL.into_iter().find(|v| is(v.name(), service_label(*v, l))))),
+        };
+        let Some(message) = message else { return false };
+        let _ = self.update(Message::Place(message));
+        true
+    }
+
     /// Picks type `id` for the active tool, as its Type list does.
     pub(crate) fn pick_tool_type(&mut self, id: Option<String>) {
         let _ = self.update(Message::Place(PlaceMessage::Kind(id)));
