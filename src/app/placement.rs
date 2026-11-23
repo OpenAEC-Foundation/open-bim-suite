@@ -93,14 +93,22 @@ pub struct Settings {
     pub grade: Option<String>,
     /// What the Slab tool makes: a floor, a roof or a ceiling.
     pub role: bim_core::SlabRole,
-    /// The service a duct, pipe or cable tray is drawn in; `None`: not given.
+    /// The service a duct, pipe or cable tray is drawn in, or an appliance is of; `None`: not given.
     pub service: Option<bim_core::Service>,
+    /// What the Appliance tool places.
+    pub appliance: bim_core::PointRole,
 }
 
 impl Settings {
+    /// These settings for appliance `role`: its usual size and height above the level.
+    pub fn of_appliance(self, role: bim_core::PointRole) -> Self {
+        let (size, above) = role.usual();
+        Settings { width: size.x, depth: size.y, height: Some(size.z), offset: above, appliance: role, ..self }
+    }
+
     /// What a tool places when nothing was typed.
     pub fn default_for(tool: ModelTool) -> Self {
-        let plain = |width: f64, depth: f64, height: Option<f64>| Settings { kind: None, width, depth, height, offset: 0.0, sill: 0.0, location: LocationLine::Centre, grade: None, role: bim_core::SlabRole::Floor, service: None };
+        let plain = |width: f64, depth: f64, height: Option<f64>| Settings { kind: None, width, depth, height, offset: 0.0, sill: 0.0, location: LocationLine::Centre, grade: None, role: bim_core::SlabRole::Floor, service: None, appliance: bim_core::PointRole::Radiator };
         use super::element_props::{DOOR, WINDOW};
         use super::modeller::{BEAM, CABLE_TRAY, COLUMN, DUCT, OBJECT, PIPE, ROUND_DUCT, SERVICE_HEIGHT, SLAB_THICKNESS, WALL_THICKNESS};
         match tool {
@@ -114,6 +122,7 @@ impl Settings {
             ModelTool::RoundDuct => plain(ROUND_DUCT, ROUND_DUCT, Some(SERVICE_HEIGHT)),
             ModelTool::Pipe => plain(PIPE, PIPE, Some(SERVICE_HEIGHT)),
             ModelTool::CableTray => plain(CABLE_TRAY.0, CABLE_TRAY.1, Some(SERVICE_HEIGHT)),
+            ModelTool::Appliance => Settings::default_for(ModelTool::Point).of_appliance(bim_core::PointRole::Radiator),
             ModelTool::Door => plain(DOOR.0, 0.0, Some(DOOR.1)),
             ModelTool::Window => Settings { sill: WINDOW.2, ..plain(WINDOW.0, 0.0, Some(WINDOW.1)) },
         }
@@ -149,6 +158,8 @@ pub enum PlaceMessage {
     Role(bim_core::SlabRole),
     /// The service a run is drawn in (`None`: not given).
     Service(Option<bim_core::Service>),
+    /// What the Appliance tool places; its fields take that one's usual size.
+    Appliance(bim_core::PointRole),
     Chain(bool),
     /// The Wall tool draws a rectangle, or single walls.
     Rectangle(bool),
@@ -249,11 +260,15 @@ impl App {
                 let tool = match d.opening {
                     Some(bim_core::OpeningKind::Door) => ModelTool::Door,
                     Some(bim_core::OpeningKind::Window) => ModelTool::Window,
-                    None => ModelTool::Point,
+                    None if d.role.is_object() => ModelTool::Point,
+                    None => ModelTool::Appliance,
                 };
                 let mut s = Settings { width: d.size.x, height: Some(d.size.z), ..of(tool) };
-                if tool == ModelTool::Point {
+                if matches!(tool, ModelTool::Point | ModelTool::Appliance) {
                     s.depth = d.size.y;
+                }
+                if tool == ModelTool::Appliance {
+                    (s.appliance, s.service) = (d.role, e.service);
                 }
                 (tool, s)
             }
@@ -286,6 +301,35 @@ struct Served(Option<bim_core::Service>, &'static str);
 impl std::fmt::Display for Served {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.1)
+    }
+}
+
+/// A kind of appliance in the strip, named in the interface language.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Appliance(bim_core::PointRole, &'static str);
+
+impl std::fmt::Display for Appliance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.1)
+    }
+}
+
+/// The name of a kind of point element in the interface language.
+pub fn appliance_label(role: bim_core::PointRole, l: Language) -> &'static str {
+    use bim_core::PointRole as R;
+    match role {
+        R::Object => l.text("Object", "Object"),
+        R::Radiator => l.text("Radiator", "Radiator"),
+        R::Boiler => l.text("Ketel", "Boiler"),
+        R::Pump => l.text("Pomp", "Pump"),
+        R::Fan => l.text("Ventilator", "Fan"),
+        R::AirHandlingUnit => l.text("Luchtbehandelingskast", "Air handling unit"),
+        R::AirTerminal => l.text("Rooster", "Air terminal"),
+        R::Sanitary => l.text("Sanitair", "Sanitary fixture"),
+        R::Valve => l.text("Afsluiter", "Valve"),
+        R::Tank => l.text("Vat", "Tank"),
+        R::Outlet => l.text("Wandcontactdoos", "Socket outlet"),
+        R::Light => l.text("Armatuur", "Light fixture"),
     }
 }
 
@@ -331,7 +375,7 @@ fn fields(tool: ModelTool, l: Language) -> Vec<(PlaceField, &'static str)> {
         ModelTool::Column => vec![width, depth, height, base],
         ModelTool::Beam => vec![width, (F::Depth, l.text("Profielhoogte", "Profile height")), (F::Height, l.text("Bovenkant", "Top height"))],
         ModelTool::System => vec![height, base],
-        ModelTool::Point => vec![width, depth, height, base],
+        ModelTool::Point | ModelTool::Appliance => vec![width, depth, height, base],
         ModelTool::Duct | ModelTool::CableTray => vec![width, (F::Depth, l.text("Hoogte", "Height")), (F::Height, l.text("Hart boven niveau", "Centre above level")), (F::Offset, l.text("Stijging", "Rise"))],
         ModelTool::RoundDuct | ModelTool::Pipe => vec![(F::Width, l.text("Diameter", "Diameter")), (F::Height, l.text("Hart boven niveau", "Centre above level")), (F::Offset, l.text("Stijging", "Rise"))],
         ModelTool::Door => vec![width, height],
@@ -391,6 +435,7 @@ impl App {
             PlaceMessage::Location(location) => s.location = location,
             PlaceMessage::Grade(grade) => s.grade = grade,
             PlaceMessage::Service(service) => s.service = service,
+            PlaceMessage::Appliance(role) => s = s.of_appliance(role),
             PlaceMessage::Role(role) => {
                 if s.role != role {
                     s.role = role;
@@ -433,6 +478,8 @@ impl App {
         let group = kind.as_deref().and_then(|id| self.library.system_type(id)).map(|t| t.group);
         let language = Language::ALL.into_iter().find(|&l| tool.label(l) == name);
         match (tool, group, language) {
+            // an appliance is named for what it is: Radiator 1, Boiler 1
+            (ModelTool::Appliance, _, Some(l)) => appliance_label(self.modeller.placement.of(tool).appliance, l),
             (ModelTool::System, Some(group), Some(l)) => group.name(super::library::lang(l)),
             _ => name,
         }
@@ -544,9 +591,16 @@ impl App {
             let pick = pick_list(choices, picked, |c: Choice| Message::Place(PlaceMessage::Grade(c.id))).text_size(12).padding([2, 6]).width(150);
             bar = bar.push(pair(label(l.text("Sterkteklasse", "Grade")), pick));
         }
-        if let Some(role) = tool.service() {
+        if tool == ModelTool::Appliance {
+            let options: Vec<Appliance> = bim_core::PointRole::APPLIANCES.into_iter().map(|r| Appliance(r, appliance_label(r, l))).collect();
+            let picked = options.iter().find(|o| o.0 == s.appliance).copied();
+            let pick = pick_list(options, picked, |o: Appliance| Message::Place(PlaceMessage::Appliance(o.0))).text_size(12).padding([2, 6]).width(170);
+            bar = bar.push(pair(label(l.text("Soort", "Kind")), pick));
+        }
+        if tool.service().is_some() || tool == ModelTool::Appliance {
             // the service the run is of: it is coloured by it and joins only runs of its own
-            let options: Vec<Served> = std::iter::once(Served(None, "-")).chain(bim_core::Service::ALL.into_iter().filter(|v| v.role() == role).map(|v| Served(Some(v), service_label(v, l)))).collect();
+            let role = tool.service();
+            let options: Vec<Served> = std::iter::once(Served(None, "-")).chain(bim_core::Service::ALL.into_iter().filter(|v| role.is_none_or(|role| v.role() == role)).map(|v| Served(Some(v), service_label(v, l)))).collect();
             let picked = options.iter().find(|o| o.0 == s.service).copied();
             let pick = pick_list(options, picked, |o: Served| Message::Place(PlaceMessage::Service(o.0))).text_size(12).padding([2, 6]).width(170);
             bar = bar.push(pair(label(l.text("Systeem", "System")), pick));
@@ -600,7 +654,7 @@ impl App {
                     }
                 }
             }
-            ModelTool::Point | ModelTool::Door | ModelTool::Window | ModelTool::Duct | ModelTool::RoundDuct | ModelTool::Pipe | ModelTool::CableTray => return None,
+            ModelTool::Point | ModelTool::Appliance | ModelTool::Door | ModelTool::Window | ModelTool::Duct | ModelTool::RoundDuct | ModelTool::Pipe | ModelTool::CableTray => return None,
         }
         Some(choices)
     }

@@ -109,14 +109,14 @@ impl App {
             Some(aim) => {
                 let o = aim.opening;
                 let foot = (aim.start + aim.along * (o.along + o.width / 2.0)).extend(aim.base + o.sill);
-                PointDef { at: foot, rotation: aim.along.y.atan2(aim.along.x), size: DVec3::new(o.width, LEAF, o.height), opening: Some(kind) }
+                PointDef { at: foot, rotation: aim.along.y.atan2(aim.along.x), size: DVec3::new(o.width, LEAF, o.height), opening: Some(kind), role: Default::default() }
             }
             None => {
                 let s = self.modeller.placement.of(tool);
                 let (h, sill) = (s.height.unwrap_or(if tool == ModelTool::Door { DOOR.1 } else { WINDOW.1 }), if tool == ModelTool::Door { 0.0 } else { s.sill });
                 let Some(p) = self.plane_point(x, y, width, height, z) else { return };
                 let p = self.snapped(p, x, y, width, height);
-                PointDef { at: DVec3::new(p.x, p.y, z + sill), rotation: 0.0, size: DVec3::new(s.width, LEAF, h), opening: Some(kind) }
+                PointDef { at: DVec3::new(p.x, p.y, z + sill), rotation: 0.0, size: DVec3::new(s.width, LEAF, h), opening: Some(kind), role: Default::default() }
             }
         };
         let name = self.modeller.tool.map_or("Door", |(_, name)| name);

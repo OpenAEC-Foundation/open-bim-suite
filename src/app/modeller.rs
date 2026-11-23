@@ -59,6 +59,8 @@ pub enum ModelTool {
     RoundDuct,
     Pipe,
     CableTray,
+    /// A terminal or an appliance of a building service: a radiator, a boiler, a wash basin.
+    Appliance,
 }
 
 impl ModelTool {
@@ -68,6 +70,8 @@ impl ModelTool {
     pub const OPENINGS: [ModelTool; 2] = [ModelTool::Door, ModelTool::Window];
     /// The tools that draw a run of a building service.
     pub const SERVICES: [ModelTool; 4] = [ModelTool::Duct, ModelTool::RoundDuct, ModelTool::Pipe, ModelTool::CableTray];
+    /// The tools that place what the runs of the services serve.
+    pub const APPLIANCES: [ModelTool; 1] = [ModelTool::Appliance];
 
     /// The role of the runs it draws; none for a tool of the building itself.
     pub fn service(self) -> Option<bim_core::LinearRole> {
@@ -99,6 +103,7 @@ impl ModelTool {
             ModelTool::RoundDuct => "mep.round-duct",
             ModelTool::Pipe => "mep.pipe",
             ModelTool::CableTray => "mep.cable-tray",
+            ModelTool::Appliance => "mep.appliance",
         }
     }
 
@@ -117,13 +122,14 @@ impl ModelTool {
             ModelTool::RoundDuct => l.text("Rond kanaal", "Round duct"),
             ModelTool::Pipe => l.text("Leiding", "Pipe"),
             ModelTool::CableTray => l.text("Kabelgoot", "Cable tray"),
+            ModelTool::Appliance => l.text("Toestel", "Appliance"),
         }
     }
 
     /// Its ribbon icon.
     pub fn icon(self) -> &'static str {
         match self {
-            ModelTool::Point => "draw.coordinate",
+            ModelTool::Point | ModelTool::Appliance => "draw.coordinate",
             ModelTool::Column => "pile.columns",
             ModelTool::Beam => "draw.line",
             ModelTool::Wall => "construction.types",
@@ -140,7 +146,7 @@ impl ModelTool {
     pub fn base(self) -> bim_core::BaseKind {
         use bim_core::BaseKind;
         match self {
-            ModelTool::Point => BaseKind::Point,
+            ModelTool::Point | ModelTool::Appliance => BaseKind::Point,
             ModelTool::Column | ModelTool::Beam | ModelTool::Duct | ModelTool::RoundDuct | ModelTool::Pipe | ModelTool::CableTray => BaseKind::Linear,
             ModelTool::Wall | ModelTool::Slab | ModelTool::Door | ModelTool::Window => BaseKind::Planar,
             ModelTool::System => BaseKind::System,
@@ -150,7 +156,7 @@ impl ModelTool {
     /// The clicks it takes.
     pub(super) fn clicks(self) -> usize {
         match self {
-            ModelTool::Point | ModelTool::Column | ModelTool::Door | ModelTool::Window => 1,
+            ModelTool::Point | ModelTool::Appliance | ModelTool::Column | ModelTool::Door | ModelTool::Window => 1,
             ModelTool::Beam | ModelTool::Wall | ModelTool::Slab | ModelTool::System | ModelTool::Duct | ModelTool::RoundDuct | ModelTool::Pipe | ModelTool::CableTray => 2,
         }
     }
@@ -164,6 +170,7 @@ impl ModelTool {
     pub fn hint(self, l: Language, placed: usize) -> &'static str {
         match (self, placed) {
             (ModelTool::Point, _) => l.text("Klik waar het object staat · Esc: stoppen", "Click where the object stands · Esc: stop"),
+            (ModelTool::Appliance, _) => l.text("Klik waar het toestel staat · Esc: stoppen", "Click where the appliance stands · Esc: stop"),
             (ModelTool::Column, _) => l.text("Klik waar de kolom staat · Esc: stoppen", "Click where the column stands · Esc: stop"),
             (ModelTool::Door, _) => l.text("Klik op een wand waar de deur komt · Esc: stoppen", "Click a wall where the door goes · Esc: stop"),
             (ModelTool::Window, _) => l.text("Klik op een wand waar het raam komt · Esc: stoppen", "Click a wall where the window goes · Esc: stop"),
@@ -634,7 +641,7 @@ impl App {
         }
         let name = self.placed_name(tool, name);
         // a run of a service starting where one ends at another height: a riser between them
-        let service = self.modeller.placement.of(tool).service.filter(|v| Some(v.role()) == tool.service());
+        let service = self.modeller.placement.of(tool).service.filter(|v| tool == ModelTool::Appliance || Some(v.role()) == tool.service());
         if let Some(riser) = self.riser_to(tool, service, &shape) {
             let _ = self.add_element_served(name, level.clone(), None, service, riser);
         }
@@ -980,7 +987,7 @@ impl App {
             self.modeller.model.replace(joint).expect("the demo's end plate");
             self.show_modelled();
         }
-        add(self, "Object", Shape::Point(PointDef { at: DVec3::new(7.0, 3.0, 0.0), rotation: 0.4, size: OBJECT, opening: None }));
+        add(self, "Object", Shape::Point(PointDef { at: DVec3::new(7.0, 3.0, 0.0), rotation: 0.4, size: OBJECT, opening: None, role: Default::default() }));
         // a beam through the side wall, cutting its way
         let through = add(self, "Beam", beam(p(8.5, 3.0), p(13.0, 3.0)));
         add(self, "Cut-out", Shape::Connection(ConnectionDef { kind: ConnectionKind::Cut, primary: through, secondary: side }));
@@ -1023,8 +1030,9 @@ pub(super) fn tool_shape(tool: ModelTool, a: DVec3, b: DVec3, z: f64, storey: f6
     let build_up = |id: &Option<String>| id.as_deref().and_then(|id| bim_core::BuildUpDef::from_library(library, id));
     match tool {
         // an opening tool places none of its own (see `openings`): an object stands for it
+        ModelTool::Appliance => Shape::Point(PointDef { at: a + DVec3::Z * s.offset, rotation: 0.0, size: DVec3::new(s.width, s.depth.max(0.01), s.height.unwrap_or(OBJECT.z)), opening: None, role: s.appliance }),
         ModelTool::Point | ModelTool::Door | ModelTool::Window => {
-            Shape::Point(PointDef { at: a + DVec3::Z * s.offset, rotation: 0.0, size: DVec3::new(s.width, s.depth.max(0.01), s.height.unwrap_or(OBJECT.z)), opening: None })
+            Shape::Point(PointDef { at: a + DVec3::Z * s.offset, rotation: 0.0, size: DVec3::new(s.width, s.depth.max(0.01), s.height.unwrap_or(OBJECT.z)), opening: None, role: Default::default() })
         }
         ModelTool::Column => {
             let base = z + s.offset;
@@ -1148,6 +1156,9 @@ fn class_colour(class: &str) -> [f32; 3] {
         "IfcDuctSegment" | "IfcDuctFitting" => [0.45, 0.68, 0.86],
         "IfcPipeSegment" | "IfcPipeFitting" => [0.36, 0.66, 0.42],
         "IfcCableCarrierSegment" | "IfcCableCarrierFitting" => [0.88, 0.72, 0.28],
+        "IfcSpaceHeater" | "IfcSanitaryTerminal" => [0.94, 0.94, 0.95],
+        "IfcBoiler" | "IfcPump" | "IfcFan" | "IfcUnitaryEquipment" | "IfcTank" | "IfcValve" => [0.72, 0.74, 0.78],
+        "IfcAirTerminal" | "IfcOutlet" | "IfcLightFixture" => [0.90, 0.90, 0.86],
         _ => [0.90, 0.60, 0.30],
     }
 }
@@ -1463,6 +1474,42 @@ mod tests {
         assert_eq!(names, ["Bend 1", "Bend 2", "Transition 1", "Bend 3", "Bend 4"]);
         app.set_model_tool(None);
         assert!(app.join_marks(iced::Color::BLACK, iced::Color::WHITE).is_none());
+    }
+
+    #[test]
+    fn the_appliance_tool_places_a_radiator_of_its_usual_size_in_a_service() {
+        use super::super::placement::PlaceMessage;
+        use bim_core::{PointRole, Service};
+        let mut app = modelling();
+        app.set_model_tool(Some((ModelTool::Appliance, "Appliance")));
+        app.place_message(PlaceMessage::Service(Some(Service::HeatingSupply)));
+        click(&mut app, 2.0, 3.0);
+        // another kind takes its own usual size and class, and keeps the service
+        app.place_message(PlaceMessage::Appliance(PointRole::Boiler));
+        click(&mut app, 5.0, 3.0);
+        let placed: Vec<(&str, &str, Option<Service>, DVec3, f64)> = app
+            .modeller
+            .model
+            .iter()
+            .filter_map(|e| match &e.shape {
+                Shape::Point(p) => Some((e.name.as_str(), e.class(), e.service, p.size, p.at.z)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            placed,
+            [
+                ("Radiator 1", "IfcSpaceHeater", Some(Service::HeatingSupply), DVec3::new(1.0, 0.1, 0.6), 0.15),
+                ("Boiler 1", "IfcBoiler", Some(Service::HeatingSupply), DVec3::new(0.45, 0.35, 0.7), 1.2),
+            ]
+        );
+        // picked up again, the tool takes its kind, size and service
+        let boiler = app.modeller.model.iter().last().unwrap().id;
+        app.place_message(PlaceMessage::Appliance(PointRole::Pump));
+        app.set_model_tool(None);
+        app.select_modelled(boiler);
+        app.create_similar(Language::English);
+        assert_eq!(app.tool_settings().map(|(tool, s)| (tool, s.appliance, s.service, s.width)), Some((ModelTool::Appliance, PointRole::Boiler, Some(Service::HeatingSupply), 0.45)));
     }
 
     #[test]

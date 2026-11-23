@@ -1573,7 +1573,7 @@ impl Studio {
                 .toggle(app.section_tool && sections)
                 .enabled(sections),
         );
-        for tool in crate::app::modeller::ModelTool::ALL.into_iter().chain(crate::app::modeller::ModelTool::OPENINGS).chain(crate::app::modeller::ModelTool::SERVICES) {
+        for tool in crate::app::modeller::ModelTool::ALL.into_iter().chain(crate::app::modeller::ModelTool::OPENINGS).chain(crate::app::modeller::ModelTool::SERVICES).chain(crate::app::modeller::ModelTool::APPLIANCES) {
             let on = app.modeller.tool.is_some_and(|t| t.0 == tool);
             list.push(Command::new(tool.id(), tool.label(l), go(Message::ModelTool(Some((tool, tool.label(l)))))).icon(small(tool.icon()), large(tool.icon())).mode(on).enabled(loaded));
         }
@@ -2627,6 +2627,7 @@ impl Studio {
                 (l.text("Ventilatie", "HVAC"), vec![large("mep.duct"), large("mep.round-duct")]),
                 (l.text("Leidingen", "Plumbing"), vec![large("mep.pipe")]),
                 (l.text("Elektra", "Electrical"), vec![large("mep.cable-tray")]),
+                (l.text("Toestellen", "Equipment"), vec![large("mep.appliance")]),
                 (l.text("Verbinding", "Connection"), vec![smalls(&["model.cut", "model.apart"])]),
                 (l.text("Wijzigen", "Modify"), vec![large("model.edit"), smalls(&["model.move", "model.copy"]), smalls(&["model.rotate", "model.mirror"]), smalls(&["model.align"]), large("model.delete")]),
             ],

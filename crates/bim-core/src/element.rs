@@ -60,6 +60,88 @@ pub struct PointDef {
     pub size: DVec3,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opening: Option<OpeningKind>,
+    /// What it is: an object, or a terminal or an appliance of the installations.
+    #[serde(default, skip_serializing_if = "PointRole::is_object")]
+    pub role: PointRole,
+}
+
+/// What a point element is. The element is the same in every role (a box standing on a point);
+/// the role says which IFC class it has: an object of the building, or a terminal or an
+/// appliance of its installations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PointRole {
+    /// Anything else: a proxy.
+    #[default]
+    Object,
+    Radiator,
+    Boiler,
+    Pump,
+    Fan,
+    AirHandlingUnit,
+    AirTerminal,
+    Sanitary,
+    Valve,
+    Tank,
+    Outlet,
+    Light,
+}
+
+impl PointRole {
+    /// The roles of the installations: terminals and appliances.
+    pub const APPLIANCES: [PointRole; 11] = [
+        PointRole::Radiator,
+        PointRole::Boiler,
+        PointRole::Pump,
+        PointRole::Fan,
+        PointRole::AirHandlingUnit,
+        PointRole::AirTerminal,
+        PointRole::Sanitary,
+        PointRole::Valve,
+        PointRole::Tank,
+        PointRole::Outlet,
+        PointRole::Light,
+    ];
+
+    pub fn is_object(&self) -> bool {
+        *self == PointRole::Object
+    }
+
+    /// Its IFC class (IFC4.3 names).
+    pub fn class(self) -> &'static str {
+        match self {
+            PointRole::Object => "IfcBuildingElementProxy",
+            PointRole::Radiator => "IfcSpaceHeater",
+            PointRole::Boiler => "IfcBoiler",
+            PointRole::Pump => "IfcPump",
+            PointRole::Fan => "IfcFan",
+            PointRole::AirHandlingUnit => "IfcUnitaryEquipment",
+            PointRole::AirTerminal => "IfcAirTerminal",
+            PointRole::Sanitary => "IfcSanitaryTerminal",
+            PointRole::Valve => "IfcValve",
+            PointRole::Tank => "IfcTank",
+            PointRole::Outlet => "IfcOutlet",
+            PointRole::Light => "IfcLightFixture",
+        }
+    }
+
+    /// The size it usually has (width, depth, height) and how far above its level it stands.
+    pub fn usual(self) -> (DVec3, f64) {
+        match self {
+            PointRole::Object => (DVec3::new(0.6, 0.6, 0.9), 0.0),
+            PointRole::Radiator => (DVec3::new(1.0, 0.1, 0.6), 0.15),
+            PointRole::Boiler => (DVec3::new(0.45, 0.35, 0.7), 1.2),
+            PointRole::Pump => (DVec3::new(0.18, 0.15, 0.18), 1.0),
+            PointRole::Fan => (DVec3::new(0.6, 0.6, 0.3), 0.0),
+            PointRole::AirHandlingUnit => (DVec3::new(2.0, 1.0, 1.2), 0.0),
+            PointRole::AirTerminal => (DVec3::new(0.3, 0.3, 0.1), 2.5),
+            PointRole::Sanitary => (DVec3::new(0.4, 0.7, 0.4), 0.0),
+            PointRole::Valve => (DVec3::new(0.1, 0.1, 0.15), 1.0),
+            PointRole::Tank => (DVec3::new(0.6, 0.6, 1.5), 0.0),
+            PointRole::Outlet => (DVec3::new(0.08, 0.04, 0.08), 0.3),
+            PointRole::Light => (DVec3::new(0.3, 0.3, 0.1), 2.5),
+        }
+    }
 }
 
 /// What a point element that cuts an opening is.
@@ -599,7 +681,7 @@ impl Element {
         match &self.shape {
             Shape::Point(PointDef { opening: Some(OpeningKind::Door), .. }) => "IfcDoor",
             Shape::Point(PointDef { opening: Some(OpeningKind::Window), .. }) => "IfcWindow",
-            Shape::Point(_) => "IfcBuildingElementProxy",
+            Shape::Point(p) => p.role.class(),
             Shape::Linear(l) => l.role.segment_class().unwrap_or_else(|| linear_class(l.end - l.start)),
             Shape::Planar(PlanarDef { form: PlanarForm::Wall { .. }, .. }) => "IfcWall",
             Shape::Planar(PlanarDef { form: PlanarForm::Slab { role: SlabRole::Roof, .. }, .. }) => "IfcRoof",
@@ -762,7 +844,7 @@ pub fn opening_solids(p: &PointDef) -> Result<Vec<(Solid, bool)>, Refusal> {
     let (sin, cos) = p.rotation.sin_cos();
     let along = DVec3::new(cos, sin, 0.0);
     // a block: its middle along the width, its foot above the sill, and its sizes
-    let block = |x: f64, z: f64, size: DVec3| point_solid(&PointDef { at: p.at + along * x + DVec3::Z * z, rotation: p.rotation, size, opening: None });
+    let block = |x: f64, z: f64, size: DVec3| point_solid(&PointDef { at: p.at + along * x + DVec3::Z * z, rotation: p.rotation, size, opening: None, role: Default::default() });
     let side = w / 2.0 - f / 2.0;
     let mut solids = Vec::new();
     match kind {
@@ -1296,7 +1378,7 @@ mod tests {
     #[test]
     fn an_element_lives_in_the_tile_of_its_placement() {
         let grid = TileGrid::default();
-        let shape = Shape::Point(PointDef { at: DVec3::new(1500.25, -20.5, 1.0), rotation: 0.0, size: DVec3::ONE, opening: None });
+        let shape = Shape::Point(PointDef { at: DVec3::new(1500.25, -20.5, 1.0), rotation: 0.0, size: DVec3::ONE, opening: None, role: Default::default() });
         let mut e = Element::in_project(&grid, "Box", None, shape.clone());
         assert_eq!(e.tile, TileKey { x: 1, y: -1 });
         assert_eq!(e.shape_in_project(&grid), shape);
