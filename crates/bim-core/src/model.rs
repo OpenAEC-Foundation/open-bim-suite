@@ -261,6 +261,13 @@ impl Model {
                 }
             }
         }
+        // its reinforcement: the bars and stirrups in its concrete, as its definition gives them
+        // (not cut or trimmed with it); one that cannot be made is left out of the body
+        if let (Some(r), Shape::Linear(l)) = (&element.reinforcement, &element.shape) {
+            if let Ok(bars) = r.solids(l) {
+                parts.extend(bars.into_iter().map(|(_, solid)| Part { class: crate::reinforcement::BAR_CLASS, tile: element.tile, solid, material: Some(crate::reinforcement::BAR_MATERIAL.into()) }));
+            }
+        }
         Ok(parts)
     }
 

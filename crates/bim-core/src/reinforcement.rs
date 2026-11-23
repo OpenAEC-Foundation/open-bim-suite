@@ -12,6 +12,10 @@ use serde::{Deserialize, Serialize};
 
 /// The density of reinforcing steel (kg/m³).
 pub const STEEL_DENSITY: f64 = 7850.0;
+/// The IFC class of a bar or a stirrup as a part of its member, and what it is made of (a
+/// material key of the project's library).
+pub const BAR_CLASS: &str = "IfcReinforcingBar";
+pub const BAR_MATERIAL: &str = "steel";
 /// The length of each of a stirrup's two hooks, in bar diameters.
 pub const HOOK_DIAMETERS: f64 = 10.0;
 /// The least clear distance between two bars beside each other (metres), where their own
@@ -132,6 +136,33 @@ impl Reinforcement {
         Ok(centres)
     }
 
+    /// The bars as solids in a member's own frame: every bar along it a round rod inside the
+    /// cover at both ends, every stirrup a closed ring round the section, square in section and
+    /// as thick as its diameter (its hooks and bends are not made). Refused as
+    /// [`Reinforcement::bars`].
+    pub fn solids(&self, member: &crate::element::LinearDef) -> Result<Vec<(BarKind, crate::Solid)>, Refusal> {
+        use crate::solid::{Axes, Solid};
+        let profile = member.profile.profile()?;
+        let (axes, length) = crate::element::linear_axes(member)?;
+        let centres = self.centres(&profile)?;
+        let outer = profile.outer();
+        let lo = outer.iter().fold(glam::DVec2::splat(f64::INFINITY), |a, p| a.min(*p));
+        let hi = outer.iter().fold(glam::DVec2::splat(f64::NEG_INFINITY), |a, p| a.max(*p));
+        let mut solids = Vec::new();
+        for (i, (centre, diameter)) in centres.iter().enumerate() {
+            let at = Axes { origin: axes.point(*centre) + axes.z * self.cover, ..axes };
+            let kind = if i < self.top.count as usize { BarKind::Top } else { BarKind::Bottom };
+            solids.push((kind, Solid::extrude(&Profile::circle(*diameter)?, &at, length - 2.0 * self.cover)?));
+        }
+        let rectangle = |inset: f64| vec![glam::DVec2::new(lo.x + inset, lo.y + inset), glam::DVec2::new(hi.x - inset, lo.y + inset), glam::DVec2::new(hi.x - inset, hi.y - inset), glam::DVec2::new(lo.x + inset, hi.y - inset)];
+        let ring = Profile::new(rectangle(self.cover), vec![rectangle(self.cover + self.stirrup)])?;
+        for s in self.stirrups(length) {
+            let at = Axes { origin: axes.origin + axes.z * (s - self.stirrup / 2.0), ..axes };
+            solids.push((BarKind::Stirrup, Solid::extrude(&ring, &at, self.stirrup)?));
+        }
+        Ok(solids)
+    }
+
     /// Where the stirrups stand along a member `length` long, from its start: as many as
     /// [`Reinforcement::bars`] counts, their spacing apart and in the middle of the length
     /// inside the cover. Empty where that length is not positive.
@@ -181,6 +212,29 @@ mod tests {
         assert!((stirrups[0] - 0.075).abs() < 1e-9 && (stirrups[39] - 5.925).abs() < 1e-9 && (stirrups[1] - stirrups[0] - 0.15).abs() < 1e-9, "{stirrups:?}");
         assert!(r.stirrups(0.05).is_empty());
         assert_eq!(r.centres(&Profile::circle(0.4).unwrap()), Err(Refusal::NotRectangular));
+    }
+
+    #[test]
+    fn the_bars_of_a_beam_are_solids_inside_its_concrete() {
+        use crate::element::LinearDef;
+        use crate::profile::ProfileDef;
+        let beam = LinearDef { start: glam::DVec3::new(1.0, 2.0, 3.0), end: glam::DVec3::new(7.0, 2.0, 3.0), profile: ProfileDef::Rectangle { width: 0.3, height: 0.5 }, roll: 0.0 };
+        let r = Reinforcement::default();
+        let solids = r.solids(&beam).unwrap();
+        assert_eq!(solids.iter().filter(|(k, _)| *k == BarKind::Top).count(), 2);
+        assert_eq!(solids.iter().filter(|(k, _)| *k == BarKind::Bottom).count(), 3);
+        assert_eq!(solids.iter().filter(|(k, _)| *k == BarKind::Stirrup).count(), 40);
+        // all of it lies inside the concrete, the cover from every face
+        let (lo, hi) = solids.iter().fold((glam::DVec3::splat(f64::INFINITY), glam::DVec3::splat(f64::NEG_INFINITY)), |(lo, hi), (_, s)| (lo.min(s.bounds().0), hi.max(s.bounds().1)));
+        assert!((lo - glam::DVec3::new(1.03, 1.88, 2.78)).abs().max_element() < 1e-6 && (hi - glam::DVec3::new(6.97, 2.12, 3.22)).abs().max_element() < 1e-6, "{lo} {hi}");
+        // a bottom bar: as long as the beam less its cover, 16 thick
+        let (_, bar) = solids.iter().find(|(k, _)| *k == BarKind::Bottom).unwrap();
+        let size = bar.bounds().1 - bar.bounds().0;
+        assert!((size.x - 5.94).abs() < 1e-9 && (size.z - 0.016).abs() < 1e-3, "{size}");
+        // a stirrup: a ring 8 thick round the section inside the cover
+        let (_, stirrup) = solids.iter().find(|(k, _)| *k == BarKind::Stirrup).unwrap();
+        let size = stirrup.bounds().1 - stirrup.bounds().0;
+        assert!((size - glam::DVec3::new(0.008, 0.24, 0.44)).abs().max_element() < 1e-9, "{size}");
     }
 
     #[test]
