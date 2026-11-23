@@ -8,7 +8,7 @@
 use super::libraries::{tile, tile_more, Category, TILE};
 use super::{App, Message, FONT_BOLD};
 use crate::theme::Palette;
-use bim_library::drawing::{self, scale_text, Discipline, DrawingKind, LineStyle, Origin, Pen, Standard, TextStyle, View};
+use bim_library::drawing::{self, scale_text, Discipline, DrawingKind, LinePattern, LineStyle, Origin, Pen, Standard, TextStyle, View};
 use bim_library::{Lang, LibraryError, Names};
 use iced::mouse;
 use iced::widget::canvas::{self, Frame, LineDash, Path, Stroke};
@@ -22,8 +22,10 @@ use serde_json::Value;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Setting {
     Kind(String),
-    LineStyle(String),
+    LinePattern(String),
     Pen(String),
+    /// A line style: a pen, a line pattern and a colour under a name.
+    LineStyle(String),
     TextStyle(String),
     /// A scale, as 1 to this.
     Scale(u32),
@@ -32,8 +34,9 @@ pub enum Setting {
 /// A kind of setting one more can be added of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Part {
-    LineStyle,
+    LinePattern,
     Pen,
+    LineStyle,
     TextStyle,
 }
 
@@ -54,6 +57,14 @@ pub enum Field {
     Width,
     Height,
     Dashes,
+    /// A pen's widths at scales: "100=0.35 200=0.25".
+    Scaled,
+    /// The pen of a line style.
+    Pen,
+    /// The line pattern of a line style.
+    Pattern,
+    /// The colour of a line style: "#rrggbb", or nothing.
+    Colour,
 }
 
 impl Field {
@@ -76,8 +87,16 @@ pub enum StandardMessage {
     Scale(u32),
     Hatched(bool),
     AddKind,
-    /// A line style, a pen or a text style more, to be set after.
+    /// A line pattern, a pen, a line style or a text style more, to be set after.
     Add(Part),
+    /// Reads a file of AutoCAD linetypes (`.lin`) into the line patterns.
+    OpenLin,
+    /// The text of the file picked; none when none was.
+    LinRead(Option<Result<String, String>>),
+    /// Writes the line patterns as a file of AutoCAD linetypes.
+    SaveLin,
+    /// The name of the file written; none when none was.
+    LinSaved(Option<Result<String, String>>),
     /// Typed as a scale to add: "1:25".
     ScaleTyped(String),
     /// Enter in the field of a scale to add.
@@ -94,6 +113,8 @@ pub struct StandardView {
     pub refused: Option<String>,
     /// What is typed as a scale to add.
     pub scale: String,
+    /// What came of the last file of linetypes: how many patterns were read, or its name.
+    pub lin: Option<String>,
 }
 
 /// A number as typed, with a decimal point or comma.
@@ -105,6 +126,32 @@ pub(super) fn number(text: &str) -> Option<f64> {
 /// continuous line.
 fn dashes(text: &str) -> Result<Vec<f64>, LibraryError> {
     text.split(|c: char| c.is_whitespace() || c == ';').filter(|part| !part.is_empty()).map(|part| number(part).ok_or(LibraryError::NotPositive)).collect()
+}
+
+/// A pen's widths at scales as typed: "100=0.35 200=0.25", with "1:" before a scale or not.
+fn scaled(text: &str) -> Result<std::collections::BTreeMap<u32, f64>, LibraryError> {
+    let unknown = || LibraryError::UnknownSetting(text.trim().to_string());
+    text.split(|c: char| c.is_whitespace() || c == ';')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let (scale, width) = part.split_once('=').ok_or_else(unknown)?;
+            Ok((scale.trim().trim_start_matches("1:").parse().map_err(|_| unknown())?, number(width).ok_or(LibraryError::NotPositive)?))
+        })
+        .collect()
+}
+
+/// A pen's widths at scales as they are typed: "100=0.35 200=0.25".
+fn scaled_text(at: &std::collections::BTreeMap<u32, f64>) -> String {
+    at.iter().map(|(scale, width)| format!("{scale}={width}")).collect::<Vec<_>>().join(" ")
+}
+
+/// The patterns of a file of AutoCAD linetypes the standard does not have yet go into it; how
+/// many did.
+pub fn take_lin(standard: &mut Standard, text: &str) -> usize {
+    let new: Vec<LinePattern> = drawing::from_lin(text, drawing::LIN_WIDTH).into_iter().filter(|p| standard.line_pattern(&p.key).is_none()).collect();
+    let taken = new.len();
+    standard.line_patterns.extend(new);
+    taken
 }
 
 fn rename(names: &mut Names, lang: Lang, value: &str) -> Result<(), LibraryError> {
@@ -155,11 +202,11 @@ pub fn set(standard: &mut Standard, picked: &Setting, field: Field, value: &str,
                 Field::Beyond => kind.beyond = value.into(),
                 Field::Hidden => kind.hidden = value.into(),
                 Field::Text => kind.text = value.into(),
-                Field::Width | Field::Height | Field::Dashes => return Err(unknown()),
+                Field::Width | Field::Height | Field::Dashes | Field::Scaled | Field::Pen | Field::Pattern | Field::Colour => return Err(unknown()),
             }
         }
-        Setting::LineStyle(key) => {
-            let style = next.line_styles.iter_mut().find(|s| &s.key == key).ok_or_else(unknown)?;
+        Setting::LinePattern(key) => {
+            let style = next.line_patterns.iter_mut().find(|s| &s.key == key).ok_or_else(unknown)?;
             match field {
                 Field::Name => rename(&mut style.names, lang, value)?,
                 Field::Dashes => style.dashes = dashes(value)?,
@@ -168,9 +215,25 @@ pub fn set(standard: &mut Standard, picked: &Setting, field: Field, value: &str,
         }
         Setting::Pen(key) => {
             let pen = next.pens.iter_mut().find(|p| &p.key == key).ok_or_else(unknown)?;
-            let Field::Width = field else { return Err(unknown()) };
-            pen.width = number(value).ok_or(LibraryError::NotPositive)?;
-            pen.names = Names::same(&format!("{} mm", pen.width));
+            match field {
+                Field::Width => {
+                    pen.width = number(value).ok_or(LibraryError::NotPositive)?;
+                    pen.names = Names::same(&format!("{} mm", pen.width));
+                }
+                Field::Scaled => pen.at = scaled(value)?,
+                _ => return Err(unknown()),
+            }
+        }
+        Setting::LineStyle(key) => {
+            let style = next.line_styles.iter_mut().find(|s| &s.key == key).ok_or_else(unknown)?;
+            match field {
+                Field::Name => rename(&mut style.names, lang, value)?,
+                Field::Pen => style.pen = value.into(),
+                Field::Pattern => style.pattern = value.into(),
+                // nothing typed is no colour of its own
+                Field::Colour => style.colour = if value.trim().is_empty() { None } else { Some(super::materials::colour_of(value).ok_or_else(unknown)?) },
+                _ => return Err(unknown()),
+            }
         }
         Setting::TextStyle(key) => {
             let style = next.text_styles.iter_mut().find(|t| &t.key == key).ok_or_else(unknown)?;
@@ -218,15 +281,22 @@ pub fn add_scale(standard: &mut Standard, typed: &str) -> Result<u32, LibraryErr
 pub fn add(standard: &mut Standard, part: Part) -> Setting {
     let fresh = |prefix: &str, taken: &[&str]| (1..).map(|n| format!("{prefix}-{n}")).find(|key| !taken.contains(&key.as_str())).unwrap_or_default();
     match part {
-        Part::LineStyle => {
-            let key = fresh("style", &standard.line_styles.iter().map(|s| s.key.as_str()).collect::<Vec<_>>());
-            standard.line_styles.push(LineStyle { key: key.clone(), names: Names::new("nieuwe lijnstijl", "new line style", "neuer Linienstil", "nouveau style de ligne"), dashes: vec![12.0, 3.0] });
-            Setting::LineStyle(key)
+        Part::LinePattern => {
+            let key = fresh("pattern", &standard.line_patterns.iter().map(|s| s.key.as_str()).collect::<Vec<_>>());
+            standard.line_patterns.push(LinePattern { key: key.clone(), names: Names::new("nieuw lijnpatroon", "new line pattern", "neues Linienmuster", "nouveau motif de ligne"), dashes: vec![12.0, 3.0], number: None });
+            Setting::LinePattern(key)
         }
         Part::Pen => {
             let key = fresh("pen", &standard.pens.iter().map(|p| p.key.as_str()).collect::<Vec<_>>());
-            standard.pens.push(Pen { key: key.clone(), names: Names::same("0.5 mm"), width: 0.5 });
+            standard.pens.push(Pen { names: Names::same("0.5 mm"), ..Pen::new(&key, 0.5) });
             Setting::Pen(key)
+        }
+        Part::LineStyle => {
+            // drawn with the standard's first pen and pattern until they are picked
+            let key = fresh("line", &standard.line_styles.iter().map(|s| s.key.as_str()).collect::<Vec<_>>());
+            let (pen, pattern) = (standard.pens.first().map(|p| p.key.clone()).unwrap_or_default(), standard.line_patterns.first().map(|p| p.key.clone()).unwrap_or_default());
+            standard.line_styles.push(LineStyle { key: key.clone(), names: Names::new("nieuwe lijnstijl", "new line style", "neuer Linienstil", "nouveau style de ligne"), pen, pattern, colour: None });
+            Setting::LineStyle(key)
         }
         Part::TextStyle => {
             let key = fresh("text", &standard.text_styles.iter().map(|t| t.key.as_str()).collect::<Vec<_>>());
@@ -236,13 +306,15 @@ pub fn add(standard: &mut Standard, part: Part) -> Setting {
     }
 }
 
-/// Takes `setting` out of the standard; refused while a kind of drawing still uses it.
+/// Takes `setting` out of the standard; refused while a kind of drawing or a line style still
+/// uses it.
 pub fn remove(standard: &mut Standard, setting: &Setting) -> Result<(), LibraryError> {
     let mut next = standard.clone();
     match setting {
         Setting::Kind(key) => next.kinds.retain(|k| &k.key != key),
-        Setting::LineStyle(key) => next.line_styles.retain(|s| &s.key != key),
+        Setting::LinePattern(key) => next.line_patterns.retain(|s| &s.key != key),
         Setting::Pen(key) => next.pens.retain(|p| &p.key != key),
+        Setting::LineStyle(key) => next.line_styles.retain(|s| &s.key != key),
         Setting::TextStyle(key) => next.text_styles.retain(|t| &t.key != key),
         Setting::Scale(scale) => next.scales.retain(|s| s != scale),
     }
@@ -350,6 +422,47 @@ impl App {
                 self.standard_view = StandardView { picked: Some(added), ..StandardView::default() };
                 return Task::none();
             }
+            StandardMessage::OpenLin => {
+                let dialog = rfd::AsyncFileDialog::new().set_title("AutoCAD linetypes").add_filter("LIN", &["lin"]);
+                return Task::perform(
+                    // (read through the handle, so it works in the browser too)
+                    async move {
+                        let file = dialog.pick_file().await?;
+                        Some(String::from_utf8(file.read().await).map_err(|why| why.to_string()))
+                    },
+                    |read| Message::Standard(StandardMessage::LinRead(read)),
+                );
+            }
+            StandardMessage::LinRead(read) => {
+                match read {
+                    None => {}
+                    Some(Err(why)) => self.standard_view.refused = Some(why),
+                    Some(Ok(text)) => {
+                        let taken = take_lin(&mut self.standard, &text);
+                        (self.standard_view.refused, self.standard_view.lin) = (None, Some(format!("{taken}")));
+                    }
+                }
+                return Task::none();
+            }
+            StandardMessage::SaveLin => {
+                let text = drawing::lin(&self.standard.line_patterns, drawing::LIN_WIDTH);
+                let dialog = rfd::AsyncFileDialog::new().set_title("AutoCAD linetypes").set_file_name("open-bim-suite.lin").add_filter("LIN", &["lin"]);
+                return Task::perform(
+                    async move {
+                        let file = dialog.save_file().await?;
+                        Some(file.write(text.as_bytes()).await.map(|()| file.file_name()).map_err(|why| why.to_string()))
+                    },
+                    |saved| Message::Standard(StandardMessage::LinSaved(saved)),
+                );
+            }
+            StandardMessage::LinSaved(saved) => {
+                match saved {
+                    None => {}
+                    Some(Ok(name)) => (self.standard_view.refused, self.standard_view.lin) = (None, Some(name)),
+                    Some(Err(why)) => self.standard_view.refused = Some(why),
+                }
+                return Task::none();
+            }
             StandardMessage::ScaleTyped(typed) => {
                 self.standard_view.scale = typed;
                 return Task::none();
@@ -399,15 +512,17 @@ impl App {
     }
 
     /// The tiles of a category of the standard on the Library page: its kinds of drawing, its
-    /// scales, its line styles, its line weights or its text styles, each with a look at it. A
+    /// scales, its line patterns, its line weights, its line styles or its text styles, each with a look at it. A
     /// click picks one (its fields are in the right pane); the last tile makes one more.
     pub(super) fn standard_tiles(&self, p: Palette, l: Language, category: Category) -> Vec<Element<'_, Message>> {
         let lang = super::library::lang(l);
         let standard = &self.standard;
         let picked = &self.standard_view.picked;
         let pick = |setting: Setting| Some(Message::Standard(StandardMessage::Pick(setting)));
-        // a line as a pen and a line style draw it
+        // a line as a pen and a line pattern draw it
         let sample = |dashes: &[f64], width: f64| -> Element<'_, Message> { canvas_widget(LineSample::new(dashes, width, p.text)).width(Fill).height(14).into() };
+        // how many line styles use a setting
+        let styled = |uses: &dyn Fn(&LineStyle) -> bool| format!("{}: {}", l.text("Lijnstijlen", "Line styles"), standard.line_styles.iter().filter(|style| uses(style)).count());
         // how many kinds of drawing use a setting
         let used = |uses: &dyn Fn(&DrawingKind) -> bool| format!("{}: {}", l.text("Tekeningsoorten", "Kinds of drawing"), standard.kinds.iter().filter(|kind| uses(kind)).count());
         let width_of = |pen: &str| standard.pen(pen).map_or(0.25, |pen| pen.width);
@@ -419,7 +534,7 @@ impl App {
                     .iter()
                     .map(|kind| {
                         let setting = Setting::Kind(kind.key.clone());
-                        let hidden = standard.line_style(&kind.hidden).map_or(&[][..], |style| style.dashes.as_slice());
+                        let hidden = standard.line_pattern(&kind.hidden).map_or(&[][..], |style| style.dashes.as_slice());
                         // what is cut, what is seen beyond it and what is hidden, as the kind
                         // draws them
                         let look = column![sample(&[], width_of(&kind.cut)), sample(&[], width_of(&kind.beyond)), sample(hidden, width_of(&kind.beyond))].spacing(8);
@@ -448,16 +563,20 @@ impl App {
                 tiles.push(openaec_ui::design::a11y::named(typed, openaec_ui::design::a11y::Role::TextField, name));
                 tiles
             }
-            Category::LineStyles => {
+            Category::LinePatterns => {
                 let mut tiles: Vec<Element<'_, Message>> = standard
-                    .line_styles
+                    .line_patterns
                     .iter()
                     .map(|style| {
-                        let setting = Setting::LineStyle(style.key.clone());
-                        tile(p, sample(&style.dashes, 0.35), style.names.get(lang).to_string(), used(&|kind| kind.hidden == style.key), *picked == Some(setting.clone()), pick(setting))
+                        let setting = Setting::LinePattern(style.key.clone());
+                        let about = format!("{} · {}", used(&|kind| kind.hidden == style.key), styled(&|line| line.pattern == style.key));
+                        tile(p, sample(&style.dashes, 0.35), style.names.get(lang).to_string(), about, *picked == Some(setting.clone()), pick(setting))
                     })
                     .collect();
-                tiles.push(more(l.text("+ Lijnstijl", "+ Line style"), StandardMessage::Add(Part::LineStyle)));
+                tiles.push(more(l.text("+ Lijnpatroon", "+ Line pattern"), StandardMessage::Add(Part::LinePattern)));
+                // AutoCAD's linetypes, in and out
+                tiles.push(more(l.text("AutoCAD-lijntypen inlezen (.lin)", "Read AutoCAD linetypes (.lin)"), StandardMessage::OpenLin));
+                tiles.push(more(l.text("Opslaan als AutoCAD-lijntypen (.lin)", "Save as AutoCAD linetypes (.lin)"), StandardMessage::SaveLin));
                 tiles
             }
             Category::Pens => {
@@ -466,10 +585,28 @@ impl App {
                     .iter()
                     .map(|pen| {
                         let setting = Setting::Pen(pen.key.clone());
-                        tile(p, sample(&[], pen.width), pen.names.get(lang).to_string(), used(&|kind| kind.cut == pen.key || kind.beyond == pen.key), *picked == Some(setting.clone()), pick(setting))
+                        let about = format!("{} · {}", used(&|kind| kind.cut == pen.key || kind.beyond == pen.key), styled(&|line| line.pen == pen.key));
+                        tile(p, sample(&[], pen.width), pen.names.get(lang).to_string(), about, *picked == Some(setting.clone()), pick(setting))
                     })
                     .collect();
                 tiles.push(more(l.text("+ Lijndikte", "+ Line weight"), StandardMessage::Add(Part::Pen)));
+                tiles
+            }
+            Category::LineStyles => {
+                let mut tiles: Vec<Element<'_, Message>> = standard
+                    .line_styles
+                    .iter()
+                    .map(|style| {
+                        let setting = Setting::LineStyle(style.key.clone());
+                        // the line as it is drawn: its pen, its pattern and its colour
+                        let (pen, pattern) = (standard.pen(&style.pen), standard.line_pattern(&style.pattern));
+                        let ink = style.colour.map_or(p.text, |c| Color::from_rgb8(c[0], c[1], c[2]));
+                        let look: Element<'_, Message> = canvas_widget(LineSample::new(pattern.map_or(&[][..], |pattern| pattern.dashes.as_slice()), pen.map_or(0.25, |pen| pen.width), ink)).width(Fill).height(14).into();
+                        let about = format!("{} · {}", pen.map_or("", |pen| pen.names.get(lang)), pattern.map_or("", |pattern| pattern.names.get(lang)));
+                        tile(p, look, style.names.get(lang).to_string(), about, *picked == Some(setting.clone()), pick(setting))
+                    })
+                    .collect();
+                tiles.push(more(l.text("+ Lijnstijl", "+ Line style"), StandardMessage::Add(Part::LineStyle)));
                 tiles
             }
             Category::TextStyles => {
@@ -524,7 +661,7 @@ impl App {
                 let disciplines = Discipline::ALL.map(|d| Choice { key: d.code().into(), label: format!("{} · {}", d.code(), discipline_name(d, l)) }).to_vec();
                 let views = View::ALL.map(|v| Choice { key: view_key(v).into(), label: view_name(v, l).into() }).to_vec();
                 let scales = kind.scales.iter().map(|s| Choice { key: s.to_string(), label: scale_text(*s) }).collect::<Vec<_>>();
-                let styles = standard.line_styles.iter().map(|s| Choice { key: s.key.clone(), label: s.names.get(lang).to_string() }).collect::<Vec<_>>();
+                let styles = standard.line_patterns.iter().map(|s| Choice { key: s.key.clone(), label: s.names.get(lang).to_string() }).collect::<Vec<_>>();
                 let texts = standard.text_styles.iter().map(|t| Choice { key: t.key.clone(), label: t.names.get(lang).to_string() }).collect::<Vec<_>>();
                 // every scale of the standard: on when this kind is drawn at it
                 let chips = row(standard.scales.iter().map(|&scale| {
@@ -548,8 +685,8 @@ impl App {
                     .push(checkbox(kind.hatched).label(l.text("Doorgesneden materiaal arceren", "Hatch what is cut")).on_toggle(StandardMessage::Hatched).size(14).text_size(12))
                     .push(labelled(p, l.text("Herkomst", "Origin"), text(origin_name(kind.origin, l)).size(12).color(p.text_secondary).into()));
             }
-            Setting::LineStyle(key) => {
-                let Some(style) = standard.line_style(key) else { return Space::new().into() };
+            Setting::LinePattern(key) => {
+                let Some(style) = standard.line_pattern(key) else { return Space::new().into() };
                 title = style.names.get(lang).to_string();
                 fields = fields
                     .push(labelled(p, l.text("Naam", "Name"), typed(Field::Name, style.names.get(lang).to_string())))
@@ -560,7 +697,25 @@ impl App {
             Setting::Pen(key) => {
                 let Some(pen) = standard.pen(key) else { return Space::new().into() };
                 title = pen.names.get(lang).to_string();
-                fields = fields.push(labelled(p, l.text("Breedte (mm)", "Width (mm)"), typed(Field::Width, pen.width.to_string()))).push(canvas_widget(LineSample::new(&[], pen.width, p.text)).width(Fill).height(16));
+                fields = fields
+                    .push(labelled(p, l.text("Breedte (mm)", "Width (mm)"), typed(Field::Width, pen.width.to_string())))
+                    .push(labelled(p, l.text("Per schaal", "At a scale"), typed(Field::Scaled, scaled_text(&pen.at))))
+                    .push(text(l.text("Een andere breedte op een schaal: 100=0.35 200=0.25. Leeg is overal dezelfde breedte.", "Another width at a scale: 100=0.35 200=0.25. Empty is the same width at every scale.")).size(11).color(p.text_muted).wrapping(Wrapping::Word))
+                    .push(canvas_widget(LineSample::new(&[], pen.width, p.text)).width(Fill).height(16));
+            }
+            Setting::LineStyle(key) => {
+                let Some(style) = standard.line_style(key) else { return Space::new().into() };
+                title = style.names.get(lang).to_string();
+                let patterns = standard.line_patterns.iter().map(|s| Choice { key: s.key.clone(), label: s.names.get(lang).to_string() }).collect::<Vec<_>>();
+                let dashes = standard.line_pattern(&style.pattern).map_or(&[][..], |pattern| pattern.dashes.as_slice());
+                let ink = style.colour.map_or(p.text, |c| Color::from_rgb8(c[0], c[1], c[2]));
+                fields = fields
+                    .push(labelled(p, l.text("Naam", "Name"), typed(Field::Name, style.names.get(lang).to_string())))
+                    .push(labelled(p, l.text("Lijndikte", "Line weight"), pick(Field::Pen, pens(), &style.pen)))
+                    .push(labelled(p, l.text("Lijnpatroon", "Line pattern"), pick(Field::Pattern, patterns, &style.pattern)))
+                    .push(labelled(p, l.text("Kleur", "Colour"), typed(Field::Colour, style.colour.map(super::materials::hex).unwrap_or_default())))
+                    .push(text(l.text("Een kleur als #rrggbb. Leeg is de kleur van wat getekend wordt.", "A colour as #rrggbb. Empty is the colour of what is drawn.")).size(11).color(p.text_muted).wrapping(Wrapping::Word))
+                    .push(canvas_widget(LineSample::new(dashes, standard.pen(&style.pen).map_or(0.25, |pen| pen.width), ink)).width(Fill).height(16));
             }
             Setting::TextStyle(key) => {
                 let Some(style) = standard.text_style(key) else { return Space::new().into() };
@@ -574,6 +729,10 @@ impl App {
                 let users = if users.is_empty() { l.text("geen tekeningsoort", "no kind of drawing").to_string() } else { users.join(", ") };
                 fields = fields.push(labelled(p, l.text("Gebruikt door", "Used by"), text(users).size(12).color(p.text_secondary).wrapping(Wrapping::Word).into()));
             }
+        }
+        // what came of a file of linetypes, under the fields of a line pattern
+        if let (Setting::LinePattern(_), Some(lin)) = (picked, &view.lin) {
+            fields = fields.push(text(format!("{}: {lin}", l.text("AutoCAD-lijntypen", "AutoCAD linetypes"))).size(11).color(p.text_muted).wrapping(Wrapping::Word));
         }
         fields = fields.push(button(text(l.text("Verwijderen", "Remove")).size(12).color(p.text_secondary)).padding([3, 8]).style(move |_, s| p.row_button(s)).on_press(StandardMessage::Remove)).push(refused);
         let pane = column![text(title).size(14).font(FONT_BOLD).color(p.text), fields].spacing(10);
@@ -673,13 +832,13 @@ mod tests {
         assert!(app.standard_view.refused.is_some() && app.standard_view.draft.is_some());
         assert_eq!(app.standard.pen("0.25").unwrap().width, 0.3);
         // a line style: dashes with their gaps; a dash alone is refused
-        let _ = app.standard_update(StandardMessage::Pick(Setting::LineStyle("dashed".into())));
+        let _ = app.standard_update(StandardMessage::Pick(Setting::LinePattern("dashed".into())));
         let _ = app.standard_update(StandardMessage::Typed(Field::Dashes, "6 3".into(), Lang::Nl));
         let _ = app.standard_update(StandardMessage::Done);
-        assert_eq!(app.standard.line_style("dashed").unwrap().dashes, [6.0, 3.0]);
+        assert_eq!(app.standard.line_pattern("dashed").unwrap().dashes, [6.0, 3.0]);
         let _ = app.standard_update(StandardMessage::Typed(Field::Dashes, "6".into(), Lang::Nl));
         let _ = app.standard_update(StandardMessage::Done);
-        assert_eq!(app.standard.line_style("dashed").unwrap().dashes, [6.0, 3.0]);
+        assert_eq!(app.standard.line_pattern("dashed").unwrap().dashes, [6.0, 3.0]);
         let _ = app.standard_update(StandardMessage::Pick(Setting::TextStyle("2.5".into())));
         let _ = app.standard_update(StandardMessage::Typed(Field::Height, "3".into(), Lang::Nl));
         let _ = app.standard_update(StandardMessage::Done);
@@ -729,16 +888,16 @@ mod tests {
         let _ = app.standard_update(StandardMessage::Remove);
         assert!(app.standard.scales.contains(&50) && app.standard_view.refused.is_some());
         // a line style, a pen and a text style more: each is picked, to be set
-        let (styles, pens, texts) = (app.standard.line_styles.len(), app.standard.pens.len(), app.standard.text_styles.len());
-        let _ = app.standard_update(StandardMessage::Add(Part::LineStyle));
-        assert_eq!(app.standard_view.picked, Some(Setting::LineStyle("style-1".into())));
+        let (styles, pens, texts) = (app.standard.line_patterns.len(), app.standard.pens.len(), app.standard.text_styles.len());
+        let _ = app.standard_update(StandardMessage::Add(Part::LinePattern));
+        assert_eq!(app.standard_view.picked, Some(Setting::LinePattern("pattern-1".into())));
         let _ = app.standard_update(StandardMessage::Typed(Field::Name, "erfgrens".into(), Lang::Nl));
         let _ = app.standard_update(StandardMessage::Add(Part::Pen));
         let _ = app.standard_update(StandardMessage::Typed(Field::Width, "1.4".into(), Lang::Nl));
         let _ = app.standard_update(StandardMessage::Done);
         let _ = app.standard_update(StandardMessage::Add(Part::TextStyle));
-        assert_eq!((app.standard.line_styles.len(), app.standard.pens.len(), app.standard.text_styles.len()), (styles + 1, pens + 1, texts + 1));
-        assert_eq!((app.standard.line_style("style-1").unwrap().names.nl.as_str(), app.standard.pen("pen-1").unwrap().width), ("erfgrens", 1.4));
+        assert_eq!((app.standard.line_patterns.len(), app.standard.pens.len(), app.standard.text_styles.len()), (styles + 1, pens + 1, texts + 1));
+        assert_eq!((app.standard.line_pattern("pattern-1").unwrap().names.nl.as_str(), app.standard.pen("pen-1").unwrap().width), ("erfgrens", 1.4));
         assert_eq!(app.standard.check(), Ok(()));
         // the new pen goes again; the pen floor plans are cut with does not
         let _ = app.standard_update(StandardMessage::Pick(Setting::Pen("pen-1".into())));
@@ -747,6 +906,124 @@ mod tests {
         let _ = app.standard_update(StandardMessage::Pick(Setting::Pen("0.5".into())));
         let _ = app.standard_update(StandardMessage::Remove);
         assert!(app.standard.pen("0.5").is_some() && app.standard_view.refused.is_some());
+    }
+
+    #[test]
+    fn a_line_style_is_a_pen_a_pattern_and_a_colour_and_a_pen_has_widths_at_scales() {
+        let mut app = App::default();
+        let _ = app.standard_update(StandardMessage::Pick(Setting::LineStyle("hidden".into())));
+        let _ = app.standard_update(StandardMessage::Set(Field::Pen, "0.25".into()));
+        let _ = app.standard_update(StandardMessage::Set(Field::Pattern, "dotted".into()));
+        let _ = app.standard_update(StandardMessage::Typed(Field::Colour, "#ff00".into(), Lang::Nl));
+        assert!(app.standard.line_style("hidden").unwrap().colour.is_none(), "half typed, a colour waits for Enter");
+        let _ = app.standard_update(StandardMessage::Typed(Field::Colour, "#ff0000".into(), Lang::Nl));
+        let _ = app.standard_update(StandardMessage::Done);
+        let style = app.standard.line_style("hidden").unwrap();
+        assert_eq!((style.pen.as_str(), style.pattern.as_str(), style.colour), ("0.25", "dotted", Some([255, 0, 0])));
+        assert_eq!(app.standard.drawn("hidden", 50).map(|d| (d.width, d.dashes.len(), d.colour)), Some((0.25, 2, Some([255, 0, 0]))));
+        // nothing typed is no colour of its own; what is no colour is refused
+        let _ = app.standard_update(StandardMessage::Typed(Field::Colour, "red".into(), Lang::Nl));
+        let _ = app.standard_update(StandardMessage::Done);
+        assert!(app.standard_view.refused.is_some() && app.standard.line_style("hidden").unwrap().colour.is_some());
+        let _ = app.standard_update(StandardMessage::Typed(Field::Colour, String::new(), Lang::Nl));
+        let _ = app.standard_update(StandardMessage::Done);
+        assert!(app.standard_view.refused.is_none() && app.standard.line_style("hidden").unwrap().colour.is_none());
+        // a pen the standard does not have is refused
+        let _ = app.standard_update(StandardMessage::Set(Field::Pen, "3".into()));
+        assert!(app.standard_view.refused.is_some());
+        assert_eq!(app.standard.line_style("hidden").unwrap().pen, "0.25");
+        // one more: drawn with the first pen and pattern until they are picked, named as typed
+        let styles = app.standard.line_styles.len();
+        let _ = app.standard_update(StandardMessage::Add(Part::LineStyle));
+        assert_eq!(app.standard_view.picked, Some(Setting::LineStyle("line-1".into())));
+        let _ = app.standard_update(StandardMessage::Typed(Field::Name, "brandscheiding".into(), Lang::Nl));
+        let made = app.standard.line_style("line-1").unwrap();
+        assert_eq!((made.names.nl.as_str(), made.pen.as_str(), made.pattern.as_str()), ("brandscheiding", "0.13", "continuous"));
+        assert_eq!(app.standard.check(), Ok(()));
+        let _ = app.standard_update(StandardMessage::Remove);
+        assert_eq!(app.standard.line_styles.len(), styles);
+        // a pattern and a pen a line style is drawn with stay
+        let _ = app.standard_update(StandardMessage::Pick(Setting::LinePattern("long-double-short".into())));
+        let _ = app.standard_update(StandardMessage::Remove);
+        assert!(app.standard.line_pattern("long-double-short").is_some() && app.standard_view.refused.is_some());
+        let _ = app.standard_update(StandardMessage::Pick(Setting::Pen("0.13".into())));
+        let _ = app.standard_update(StandardMessage::Remove);
+        assert!(app.standard.pen("0.13").is_some() && app.standard_view.refused.is_some());
+        // no kind and no style uses the widest pen: it goes
+        let _ = app.standard_update(StandardMessage::Pick(Setting::Pen("2".into())));
+        let _ = app.standard_update(StandardMessage::Remove);
+        assert!(app.standard.pen("2").is_none());
+        // a pen's widths at scales, typed with or without "1:"
+        let _ = app.standard_update(StandardMessage::Pick(Setting::Pen("0.5".into())));
+        let _ = app.standard_update(StandardMessage::Typed(Field::Scaled, "1:100=0,35 200=0.25".into(), Lang::Nl));
+        assert!(app.standard.pen("0.5").unwrap().at.is_empty());
+        let _ = app.standard_update(StandardMessage::Done);
+        let pen = app.standard.pen("0.5").unwrap();
+        assert_eq!((pen.width_at(50), pen.width_at(100), pen.width_at(200), pen.width_at(500)), (0.35, 0.35, 0.25, 0.25));
+        assert_eq!(scaled_text(&pen.at), "100=0.35 200=0.25");
+        for bad in ["100", "x=0.3", "100=0"] {
+            let _ = app.standard_update(StandardMessage::Typed(Field::Scaled, bad.into(), Lang::Nl));
+            let _ = app.standard_update(StandardMessage::Done);
+            assert!(app.standard_view.refused.is_some(), "{bad}");
+        }
+        assert_eq!(app.standard.pen("0.5").unwrap().at.len(), 2);
+        let _ = app.standard_update(StandardMessage::Typed(Field::Scaled, String::new(), Lang::Nl));
+        let _ = app.standard_update(StandardMessage::Done);
+        assert!(app.standard.pen("0.5").unwrap().at.is_empty());
+    }
+
+    #[test]
+    fn autocad_linetypes_are_read_into_the_line_patterns() {
+        let mut app = App::default();
+        let patterns = app.standard.line_patterns.len();
+        let lin = "*CENTER,Center ____ _ ____\nA,31.75,-6.35,6.35,-6.35\n*HIDDEN,Hidden __ __ __\nA,6.35,-3.175\n*DASHED,Dashed __ __\nA,12.7,-6.35\n";
+        // none picked: nothing happens
+        let _ = app.standard_update(StandardMessage::LinRead(None));
+        assert_eq!(app.standard.line_patterns.len(), patterns);
+        // the ones the standard does not have yet come in; "dashed" it has
+        let _ = app.standard_update(StandardMessage::LinRead(Some(Ok(lin.to_string()))));
+        assert_eq!((app.standard.line_patterns.len(), app.standard_view.lin.as_deref()), (patterns + 2, Some("2")));
+        assert_eq!(app.standard.line_pattern("hidden").map(|p| p.dashes.clone()), Some(vec![25.4, 12.7]));
+        assert_eq!(app.standard.line_pattern("dashed").unwrap().dashes, [12.0, 3.0]);
+        assert_eq!(app.standard.check(), Ok(()));
+        // read again, none is new
+        let _ = app.standard_update(StandardMessage::LinRead(Some(Ok(lin.to_string()))));
+        assert_eq!((app.standard.line_patterns.len(), app.standard_view.lin.as_deref()), (patterns + 2, Some("0")));
+        // a file that could not be read says why; a file written says its name
+        let _ = app.standard_update(StandardMessage::LinRead(Some(Err("no text".into()))));
+        assert_eq!(app.standard_view.refused.as_deref(), Some("no text"));
+        let _ = app.standard_update(StandardMessage::LinSaved(Some(Ok("office.lin".into()))));
+        assert_eq!((app.standard_view.refused.as_deref(), app.standard_view.lin.as_deref()), (None, Some("office.lin")));
+        // a picked pattern's pane says what came of the file
+        let _ = app.standard_update(StandardMessage::Pick(Setting::LinePattern("center".into())));
+        let _ = app.standard_update(StandardMessage::LinSaved(Some(Ok("office.lin".into()))));
+        let mut pane = crate::app::test_ui_of(iced::Size::new(320.0, 700.0), app.standard_pane(app.theme.palette(), Language::English));
+        assert!(pane.find("Dashes and gaps").is_ok() && pane.find("AutoCAD linetypes: office.lin").is_ok());
+    }
+
+    #[test]
+    fn the_page_lists_the_line_styles_and_the_pane_shows_their_fields() {
+        let mut app = App::default();
+        use super::super::libraries::{Country, LibrariesMessage};
+        let _ = app.libraries_update(LibrariesMessage::Country(Country::Netherlands));
+        let _ = app.libraries_update(LibrariesMessage::Category(Category::LineStyles));
+        {
+            let mut page = crate::app::test_ui_of(iced::Size::new(1300.0, 1200.0), app.libraries_page(app.theme.palette(), Language::English));
+            assert!(page.find("Line styles").is_ok() && page.find("hidden line").is_ok() && page.find("0.18 mm · dashed").is_ok() && page.find("+ Line style").is_ok());
+        }
+        let _ = app.libraries_update(LibrariesMessage::Category(Category::LinePatterns));
+        {
+            let mut page = crate::app::test_ui_of(iced::Size::new(1300.0, 1600.0), app.libraries_page(app.theme.palette(), Language::English));
+            assert!(page.find("long-dashed short-dashed").is_ok() && page.find("Read AutoCAD linetypes (.lin)").is_ok() && page.find("Save as AutoCAD linetypes (.lin)").is_ok());
+        }
+        let _ = app.standard_update(StandardMessage::Pick(Setting::LineStyle("centre".into())));
+        {
+            let mut pane = crate::app::test_ui_of(iced::Size::new(320.0, 700.0), app.standard_pane(app.theme.palette(), Language::English));
+            assert!(pane.find("centre line").is_ok() && pane.find("Line weight").is_ok() && pane.find("Line pattern").is_ok() && pane.find("Colour").is_ok());
+        }
+        let _ = app.standard_update(StandardMessage::Pick(Setting::Pen("0.5".into())));
+        let mut pane = crate::app::test_ui_of(iced::Size::new(320.0, 700.0), app.standard_pane(app.theme.palette(), Language::English));
+        assert!(pane.find("At a scale").is_ok());
     }
 
     #[test]
@@ -760,10 +1037,10 @@ mod tests {
             assert!(page.find("Kinds of drawing").is_ok() && page.find("Country · Netherlands · 20").is_ok() && page.find("pile plan").is_ok());
             assert!(page.find("PLG · CON · 1:100").is_ok() && page.find("+ Kind of drawing").is_ok() && page.find("First sheet: 300").is_ok());
         }
-        let _ = app.libraries_update(LibrariesMessage::Category(Category::LineStyles));
+        let _ = app.libraries_update(LibrariesMessage::Category(Category::LinePatterns));
         {
             let mut page = crate::app::test_ui_of(iced::Size::new(1300.0, 900.0), app.libraries_page(app.theme.palette(), Language::English));
-            assert!(page.find("Line styles").is_ok() && page.find("long-dashed dotted").is_ok() && page.find("+ Line style").is_ok());
+            assert!(page.find("Line patterns").is_ok() && page.find("long-dashed dotted").is_ok() && page.find("+ Line pattern").is_ok());
         }
         let _ = app.libraries_update(LibrariesMessage::Category(Category::Scales));
         {

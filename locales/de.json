@@ -1822,6 +1822,16 @@
     "Level of detail of the project": "Detaillierungsgrad des Projekts",
     "design element: the outline alone": "Entwurfselement: nur der Umriss",
     "as it is built: layers, parts and hatches": "wie gebaut: Schichten, Teile und Schraffuren",
-    "everything there is: every part and all the data": "alles, was es gibt: jedes Teil und alle Daten"
+    "everything there is: every part and all the data": "alles, was es gibt: jedes Teil und alle Daten",
+    "Line patterns": "Linienmuster",
+    "+ Line pattern": "+ Linienmuster",
+    "Line pattern": "Linienmuster",
+    "Line weight": "Linienstärke",
+    "At a scale": "Je Maßstab",
+    "Another width at a scale: 100=0.35 200=0.25. Empty is the same width at every scale.": "Eine andere Breite je Maßstab: 100=0.35 200=0.25. Leer ist dieselbe Breite in jedem Maßstab.",
+    "A colour as #rrggbb. Empty is the colour of what is drawn.": "Eine Farbe als #rrggbb. Leer ist die Farbe dessen, was gezeichnet wird.",
+    "Read AutoCAD linetypes (.lin)": "AutoCAD-Linientypen einlesen (.lin)",
+    "Save as AutoCAD linetypes (.lin)": "Als AutoCAD-Linientypen speichern (.lin)",
+    "AutoCAD linetypes": "AutoCAD-Linientypen"
   }
 }

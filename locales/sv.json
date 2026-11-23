@@ -1822,6 +1822,16 @@
     "Level of detail of the project": "Projektets detaljnivå",
     "design element: the outline alone": "designelement: endast konturen",
     "as it is built: layers, parts and hatches": "som det byggs: skikt, delar och skrafferingar",
-    "everything there is: every part and all the data": "allt som finns: varje del och all data"
+    "everything there is: every part and all the data": "allt som finns: varje del och all data",
+    "Line patterns": "Linjemönster",
+    "+ Line pattern": "+ Linjemönster",
+    "Line pattern": "Linjemönster",
+    "Line weight": "Linjetjocklek",
+    "At a scale": "Per skala",
+    "Another width at a scale: 100=0.35 200=0.25. Empty is the same width at every scale.": "En annan bredd i en skala: 100=0.35 200=0.25. Tomt är samma bredd i alla skalor.",
+    "A colour as #rrggbb. Empty is the colour of what is drawn.": "En färg som #rrggbb. Tomt är färgen på det som ritas.",
+    "Read AutoCAD linetypes (.lin)": "Läs in AutoCAD-linjetyper (.lin)",
+    "Save as AutoCAD linetypes (.lin)": "Spara som AutoCAD-linjetyper (.lin)",
+    "AutoCAD linetypes": "AutoCAD-linjetyper"
   }
 }
