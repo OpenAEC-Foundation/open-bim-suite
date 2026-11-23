@@ -255,6 +255,68 @@ impl App {
         let faces = rings.into_iter().chain(lines.into_iter().map(|l| l.to_vec())).map(|ring| vec![ring.into_iter().map(|p| p.as_vec3()).collect()]).collect();
         Some(super::placing::PlacingOverlay { faces, points: vec![from.as_vec3()], cursor: to.as_vec3(), view_proj: self.camera.view_proj(self.aspect()) * self.model_matrix(), ink, mark: None, readout })
     }
+    /// The signs of the reinforcement the section along `from` → `to` cuts, in the section's
+    /// own coordinates (along the line, up): of every reinforced element the upright plane goes
+    /// through, a bar that crosses the plane a ring as thick as it is, and a bar or a side of a
+    /// stirrup beyond the plane, no further than `depth`, a line. So a beam cut across shows
+    /// its bars as dots in a stirrup, and a slab its bars along the cut as lines with those
+    /// across as dots. Elements the plane does not go through show none: their bars lie in
+    /// their concrete.
+    pub(super) fn rebar_signs(&self, from: [f64; 2], to: [f64; 2], depth: f64) -> Vec<crate::drawing::Segment> {
+        let (from, to) = (DVec2::from(from), DVec2::from(to));
+        let run = from.distance(to);
+        let Some(way) = (to - from).try_normalize() else { return Vec::new() };
+        // along the line, up, and how far beyond the plane
+        let seen = |p: DVec3| DVec3::new((p.truncate() - from).dot(way), p.z, (p.truncate() - from).dot(way.perp()));
+        let model = &self.modeller.model;
+        let mut signs = Vec::new();
+        for e in model.iter() {
+            let lines = match (e.shape_in_project(&model.grid), e.reinforcement, e.nets) {
+                (Shape::Linear(l), Some(r), _) => r.lines(&l, &e.extras),
+                (Shape::Planar(p), _, Some(n)) => n.lines(&p, &model.openings_of(e.id), &e.extras),
+                _ => continue,
+            };
+            let Ok(lines) = lines else { continue };
+            let lines: Vec<(DVec3, DVec3, f64, bool)> = lines.iter().map(|l| (seen(l.a), seen(l.b), l.diameter, l.stirrup)).collect();
+            // the plane goes through it, within the line's ends
+            let ends = lines.iter().flat_map(|l| [l.0, l.1]);
+            let (near, far) = ends.clone().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| (lo.min(p.z), hi.max(p.z)));
+            let (left, right) = ends.fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| (lo.min(p.x), hi.max(p.x)));
+            if near >= 0.0 || far <= 0.0 || right <= 0.0 || left >= run {
+                continue;
+            }
+            let flat = |p: DVec3| [p.x as f32, p.y as f32];
+            for (a, b, diameter, stirrup) in lines {
+                if (a.z < 0.0) != (b.z < 0.0) {
+                    // it crosses the plane: a ring there (a stirrup's sides that do are left out)
+                    let at = a + (b - a) * (a.z / (a.z - b.z));
+                    if stirrup || at.x < 0.0 || at.x > run {
+                        continue;
+                    }
+                    let corner = |i: usize| {
+                        let turn = std::f64::consts::TAU * i as f64 / 8.0;
+                        flat(at + DVec3::new(turn.cos(), turn.sin(), 0.0) * diameter / 2.0)
+                    };
+                    signs.extend((0..8).map(|i| [corner(i), corner(i + 1)]));
+                } else if a.z >= 0.0 && a.z.max(b.z) <= depth {
+                    // beyond the plane: its line, between the ends of the section's line
+                    let (a, b) = if a.x <= b.x { (a, b) } else { (b, a) };
+                    if b.x - a.x < 1e-9 {
+                        if a.x >= 0.0 && a.x <= run && a.distance(b) > 1e-6 {
+                            signs.push([flat(a), flat(b)]);
+                        }
+                        continue;
+                    }
+                    let (lo, hi) = (a.x.max(0.0), b.x.min(run));
+                    if hi > lo {
+                        let on = |x: f64| a + (b - a) * ((x - a.x) / (b.x - a.x));
+                        signs.push([flat(on(lo)), flat(on(hi))]);
+                    }
+                }
+            }
+        }
+        signs
+    }
 }
 
 #[cfg(test)]
@@ -292,6 +354,53 @@ mod tests {
     fn hover(app: &mut App, at: DVec3) {
         let (x, y) = app.on_screen(at, 1000.0, 800.0).unwrap();
         let _ = app.update(Message::Navigate(Navigate::Hover { x, y, width: 1000.0, height: 800.0 }));
+    }
+
+    #[test]
+    fn a_section_shows_the_bars_it_cuts_as_rings_and_those_beyond_as_lines() {
+        let (mut app, beam, slab) = model();
+        let _ = app.update(Message::RebarTool(RebarTool::Usual));
+        click(&mut app, DVec3::new(1.0, 0.0, 3.25));
+        click(&mut app, DVec3::new(3.0, 4.0, 0.0));
+        let (r, nets) = (app.modeller.model.get(beam).unwrap().reinforcement.unwrap(), app.modeller.model.get(slab).unwrap().nets);
+        assert!(nets.is_some());
+        let long = |s: &crate::drawing::Segment| (s[0][0] - s[1][0]).hypot(s[0][1] - s[1][1]);
+        // across the beam: a ring of eight sides for every bar, and the stirrups beyond the
+        // plane as the four sides of one rectangle, all inside the beam's section
+        let signs = app.rebar_signs([2.0, -1.0], [2.0, 1.0], 10.0);
+        let bars = (r.top.count + r.bottom.count) as usize;
+        let rings = signs.iter().filter(|s| long(s) < 0.01).count();
+        assert_eq!(rings, 8 * bars);
+        let sides: Vec<_> = signs.iter().filter(|s| long(s) > 0.1).collect();
+        assert!(!sides.is_empty() && sides.len() % 4 == 0, "{}", sides.len());
+        assert!(signs.iter().flatten().all(|p| (0.85..=1.15).contains(&p[0]) && (2.75..=3.25).contains(&p[1])), "inside 300 × 500 round (1, 3)");
+        // along the slab's short side: the bars along the cut as lines over its width, those
+        // across as rings, all within its thickness
+        let signs = app.rebar_signs([3.0, 1.0], [3.0, 7.0], 10.0);
+        assert!(signs.iter().any(|s| long(s) > 3.5) && signs.iter().filter(|s| long(s) < 0.01).count() >= 8 * 2 * 20);
+        assert!(signs.iter().flatten().all(|p| (1.0..=5.0).contains(&p[0]) && (-0.25..=0.0).contains(&p[1])));
+        // the section's drawing has the signs with its cut lines, and the beam's cut face whole
+        app.new_section([2.0, -1.0], [2.0, 1.0], "Section");
+        let path = app.document.sections()[0].path.clone();
+        app.cut_view(&path);
+        let cut = app.cuts.get(&path).expect("cut").clone();
+        assert!(cut.segments.iter().filter(|s| long(s) < 0.01).count() >= 8 * bars);
+        let faces: Vec<_> = cut.fills.iter().filter(|f| f.element == Some(beam.0)).collect();
+        assert!(faces.len() == 1 && faces[0].loops.len() == 1, "{:?}", faces.iter().map(|f| (f.part, f.loops.len(), f.rows.len())).collect::<Vec<_>>());
+        // of no material told, with bars in it: it is cut as concrete
+        let scene = app.model.clone().unwrap();
+        assert!(scene.element_props(beam.0).iter().any(|(k, v)| k == "Material" && v == "Reinforced concrete"));
+        assert_eq!(crate::hatching::kind_of(&scene, faces[0].layer, Some(beam.0)), crate::hatching::kind_in("concrete").unwrap());
+        // a section that goes right through a stirrup: the beam's cut face is whole there too
+        let at = r.stirrups_in(6.0, &[])[5].0;
+        app.new_section([at, -1.0], [at, 1.0], "Section");
+        let path = app.document.sections()[1].path.clone();
+        app.cut_view(&path);
+        let cut = app.cuts.get(&path).expect("cut").clone();
+        let faces: Vec<_> = cut.fills.iter().filter(|f| f.element == Some(beam.0)).collect();
+        assert!(faces.len() == 1 && faces[0].loops.len() == 1, "{:?}", faces.iter().map(|f| (f.part, f.loops.len(), f.rows.len())).collect::<Vec<_>>());
+        // a section that goes through nothing reinforced shows none
+        assert!(app.rebar_signs([10.0, -1.0], [10.0, 1.0], 10.0).is_empty());
     }
 
     #[test]

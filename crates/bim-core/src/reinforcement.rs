@@ -314,6 +314,34 @@ impl Reinforcement {
         Ok(solids)
     }
 
+    /// The centre lines of the bars [`Reinforcement::solids`] makes, in the member's own frame:
+    /// a line for every bar along it, and four for every stirrup (the middle of its sides).
+    /// For drawings that show bars by signs. Refused as [`Reinforcement::rows`].
+    pub fn lines(&self, member: &crate::element::LinearDef, extras: &[Extra]) -> Result<Vec<BarLine>, Refusal> {
+        let profile = member.profile.profile()?;
+        let (axes, length) = crate::element::linear_axes(member)?;
+        let centres = self.centres(&profile)?;
+        self.rows(&profile, length, extras)?;
+        let outer = profile.outer();
+        let lo = outer.iter().fold(glam::DVec2::splat(f64::INFINITY), |a, p| a.min(*p));
+        let hi = outer.iter().fold(glam::DVec2::splat(f64::NEG_INFINITY), |a, p| a.max(*p));
+        let mut lines = Vec::new();
+        for (_, centre, diameter, start, end) in self.extra_bars(&profile, length, extras) {
+            lines.push(BarLine { a: axes.point(centre) + axes.z * start, b: axes.point(centre) + axes.z * end, diameter, stirrup: false });
+        }
+        for (centre, diameter) in centres {
+            lines.push(BarLine { a: axes.point(centre) + axes.z * self.cover, b: axes.point(centre) + axes.z * (length - self.cover), diameter, stirrup: false });
+        }
+        for (s, diameter, _) in self.stirrups_in(length, extras) {
+            let inset = self.cover + diameter / 2.0;
+            let ring = [glam::DVec2::new(lo.x + inset, lo.y + inset), glam::DVec2::new(hi.x - inset, lo.y + inset), glam::DVec2::new(hi.x - inset, hi.y - inset), glam::DVec2::new(lo.x + inset, hi.y - inset)];
+            for i in 0..4 {
+                lines.push(BarLine { a: axes.point(ring[i]) + axes.z * s, b: axes.point(ring[(i + 1) % 4]) + axes.z * s, diameter, stirrup: true });
+            }
+        }
+        Ok(lines)
+    }
+
     /// Where the stirrups stand along a member `length` long, from its start: as many as
     /// [`Reinforcement::bars`] counts, their spacing apart and in the middle of the length
     /// inside the cover. Empty where that length is not positive.
@@ -355,6 +383,16 @@ impl Default for Nets {
     fn default() -> Self {
         Self { cover: 0.03, bottom: Net { diameter: 0.01, spacing: 0.15 }, top: Some(Net { diameter: 0.008, spacing: 0.15 }) }
     }
+}
+
+/// The centre line of a straight piece of a bar, where its element is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BarLine {
+    pub a: glam::DVec3,
+    pub b: glam::DVec3,
+    pub diameter: f64,
+    /// A side of a stirrup, else (a piece of) a bar.
+    pub stirrup: bool,
 }
 
 /// A bar of a net, in the plane of its slab (in plan) or its wall (along it and up from its
@@ -563,6 +601,30 @@ impl Nets {
             }
         }
         Ok(solids)
+    }
+
+    /// The centre lines of the bars [`Nets::solids`] makes, in the element's own frame; a
+    /// hairpin its two legs and what joins them. Refused as [`Nets::laid`].
+    pub fn lines(&self, def: &crate::element::PlanarDef, openings: &[crate::element::Opening], extras: &[Extra]) -> Result<Vec<BarLine>, Refusal> {
+        use crate::element::PlanarForm;
+        let thickness = def.total_thickness();
+        let mut lines = Vec::new();
+        for bar in self.laid(def, openings, extras)? {
+            let place = |p: glam::DVec2, depth: f64| match &def.form {
+                PlanarForm::Slab { top, .. } => p.extend(top - depth),
+                PlanarForm::Wall { start, end, base, .. } => {
+                    let along = (*end - *start).normalize_or_zero();
+                    (*start + along * p.x - along.perp() * (thickness / 2.0 - depth)).extend(base + p.y)
+                }
+            };
+            let mut line = |a, b| lines.push(BarLine { a, b, diameter: bar.diameter, stirrup: false });
+            line(place(bar.a, bar.depth), place(bar.b, bar.depth));
+            if bar.drop > 0.0 {
+                line(place(bar.a, bar.depth + bar.drop), place(bar.b, bar.depth + bar.drop));
+                line(place(bar.a, bar.depth + bar.drop), place(bar.a, bar.depth));
+            }
+        }
+        Ok(lines)
     }
 }
 

@@ -1051,7 +1051,9 @@ fn viewer_layers(model: &bim_core::Model, levels: &[(String, String)], library: 
         let layer = &mut layers[k];
         let first = layer.indices.len() as u32;
         // of several materials: each part is told from the others where it is cut
-        let several = parts.iter().filter_map(|p| p.material.as_deref()).collect::<std::collections::HashSet<_>>().len() > 1;
+        // (its reinforcing bars are no part of that: no drawing cuts them)
+        let bar = |p: &bim_core::Part| p.class == bim_core::reinforcement::BAR_CLASS;
+        let several = parts.iter().filter(|p| !bar(p)).filter_map(|p| p.material.as_deref()).collect::<std::collections::HashSet<_>>().len() > 1;
         for part in &parts {
             let Ok(mesh) = Mesh::of(&part.solid) else { continue };
             let part_first = layer.indices.len() as u32;
@@ -1073,7 +1075,7 @@ fn viewer_layers(model: &bim_core::Model, levels: &[(String, String)], library: 
                 layer.normals.extend(n.as_vec3().to_array());
             }
             layer.indices.extend(mesh.indices.iter().map(|i| i + base));
-            if let Some(material) = part.material.as_deref().filter(|_| several).and_then(|key| library.materials.iter().position(|m| m.key == key)) {
+            if let Some(material) = part.material.as_deref().filter(|_| several && !bar(part)).and_then(|key| library.materials.iter().position(|m| m.key == key)) {
                 of_parts.push((k, part_first, layer.indices.len() as u32 - part_first, material as u32));
             }
         }
@@ -1200,8 +1202,13 @@ fn properties(model: &bim_core::Model, e: &Element, parts: &[bim_core::Part], le
         put(crate::export::ifc::NLSFB, code);
     }
     // what it is made of, when it is of one material: the cut of it takes that material's hatch
-    if let Some(key) = parts.first().and_then(|p| p.material.as_deref()).filter(|key| parts.iter().all(|p| p.material.as_deref() == Some(key))) {
+    // (the bars in it apart: concrete with bars is concrete)
+    let body = || parts.iter().filter(|p| p.class != bim_core::reinforcement::BAR_CLASS);
+    if let Some(key) = body().next().and_then(|p| p.material.as_deref()).filter(|key| body().all(|p| p.material.as_deref() == Some(key))) {
         put("Material", library.material(key).map_or(key, |m| m.name(bim_library::Lang::En)).to_string());
+    } else if e.reinforcement.is_some() || e.nets.is_some() {
+        // of no material told, with bars in it: reinforced concrete, and cut as concrete
+        put("Material", "Reinforced concrete".into());
     }
     let volume: f64 = parts.iter().map(|p| p.solid.volume()).sum();
     if volume > 0.0 {
