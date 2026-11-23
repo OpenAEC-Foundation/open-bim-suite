@@ -12,8 +12,11 @@
 //! its place in the order. A sample wall is drawn as the template draws one, so a change is seen
 //! at once. A template of another library is taken into the project as a copy.
 //!
-//! Not yet: a whole sample building drawn by the template, pens and colours per rule, a rule
-//! added here, and a view of the Modeller that follows one.
+//! A rule is added (it is tried last, so it changes nothing until it is set and moved up) and
+//! the IFC classes it takes are typed between commas.
+//!
+//! Not yet: a whole sample building drawn by the template, pens and colours per rule, and a view
+//! of the Modeller that follows one.
 
 use super::{App, Message, FONT_BOLD};
 use crate::theme::Palette;
@@ -75,6 +78,10 @@ pub enum ViewTemplateMessage {
     /// Move a rule (its key) one place up, or down.
     Move(String, bool),
     RuleRemove(String),
+    /// A rule more, tried last.
+    RuleAdd,
+    /// Typed as the IFC classes a rule (its key) takes, between commas.
+    Classes(String, String),
 }
 
 /// Which view template the right pane shows.
@@ -83,6 +90,8 @@ pub struct ViewTemplateView {
     pub picked: Option<String>,
     /// What is being typed in a field, as it is typed.
     pub typing: Option<(Field, String)>,
+    /// The classes of a rule (its key) as they are being typed (a comma at the end stays).
+    pub classes: Option<(String, String)>,
 }
 
 /// A scale as it is typed: "100", "1:50".
@@ -133,12 +142,12 @@ impl App {
         let picked = self.view_template_view.picked.clone();
         let picked = picked.as_deref();
         match message {
-            ViewTemplateMessage::Pick(key) => self.view_template_view = ViewTemplateView { picked: Some(key), typing: None },
+            ViewTemplateMessage::Pick(key) => self.view_template_view = ViewTemplateView { picked: Some(key), ..ViewTemplateView::default() },
             ViewTemplateMessage::Copy(key) => {
                 let from = self.shown_shelf().and_then(|shelf| self.shelf(shelf).view_template(&key).cloned());
                 if let Some(from) = from {
                     let key = self.library.copy_view_template(&from);
-                    self.view_template_view = ViewTemplateView { picked: Some(key), typing: None };
+                    self.view_template_view = ViewTemplateView { picked: Some(key), ..ViewTemplateView::default() };
                     self.show_in_project(super::libraries::Category::ViewTemplates);
                 }
             }
@@ -216,6 +225,19 @@ impl App {
             ViewTemplateMessage::RuleRemove(rule) => {
                 if let Some(template) = own_of(self, picked) {
                     template.remove_rule(&rule);
+                }
+            }
+            ViewTemplateMessage::RuleAdd => {
+                let names = bim_library::Names::new("nieuwe regel", "new rule", "neue Regel", "nouvelle règle");
+                if let Some(template) = own_of(self, picked) {
+                    template.add_rule(names);
+                    self.view_template_view.classes = None;
+                }
+            }
+            ViewTemplateMessage::Classes(rule, typed) => {
+                if let Some(of) = own_of(self, picked).and_then(|template| template.rules.iter_mut().find(|r| r.key == rule)) {
+                    of.filter.classes = bim_library::annotate::list(&typed);
+                    self.view_template_view.classes = Some((rule, typed));
                 }
             }
         }
@@ -304,9 +326,15 @@ impl App {
                 let now = choices.iter().find(|c| c.value == rule.look.detail).cloned();
                 let detail_key = key.clone();
                 let detail = pick_list(choices, now, move |c: Choice<Option<Detail>>| Message::ViewTemplate(ViewTemplateMessage::Detail(Some(detail_key.clone()), c.value))).text_size(11).padding([2, 6]).width(Fill);
+                let typed = self.view_template_view.classes.as_ref().filter(|(of, _)| *of == key).map_or_else(|| rule.filter.classes.join(", "), |(_, typed)| typed.clone());
+                let classes_key = key.clone();
+                pane = pane.push(text_input("IfcWall, IfcSlab", &typed).on_input(move |typed| Message::ViewTemplate(ViewTemplateMessage::Classes(classes_key.clone(), typed))).size(12).padding([2, 6]));
                 pane = pane.push(row![tick(l.text("toon", "show"), !rule.look.hidden, Flag::Shown(key.clone())), tick(l.text("grijs", "faint"), rule.look.faint, Flag::Faint(key.clone()))].spacing(12));
                 pane = pane.push(row![detail, small_button("↑", ViewTemplateMessage::Move(key.clone(), true)), small_button("↓", ViewTemplateMessage::Move(key.clone(), false)), small_button("×", ViewTemplateMessage::RuleRemove(key))].spacing(2).align_y(Center));
             }
+        }
+        if project {
+            pane = pane.push(row![iced::widget::Space::new().width(Fill), small_button(l.text("+ Regel", "+ Rule"), ViewTemplateMessage::RuleAdd)]);
         }
         pane = pane.push(named(l.text("Al het andere", "Everything else").to_string())).push(line(look_line(&template.otherwise, l)));
         if project {
@@ -417,6 +445,28 @@ mod tests {
         assert_eq!((app.libraries.source, app.view_template_view.picked.as_deref(), app.library.view_templates.len()), (Source::Project, Some("section-do-100-2"), 21));
         app.view_template_update(ViewTemplateMessage::Remove);
         assert_eq!((app.library.view_templates.len(), app.view_template_view.picked.clone()), (20, None));
+    }
+
+    #[test]
+    fn a_rule_is_added_to_a_template_of_the_project_and_its_classes_typed() {
+        use crate::app::libraries::{LibrariesMessage, Source};
+        let mut app = App::default();
+        let l = Language::English;
+        let _ = app.libraries_update(LibrariesMessage::Source(Source::Project));
+        let key = "floor-plan-do-100".to_string();
+        app.view_template_update(ViewTemplateMessage::Pick(key.clone()));
+        let of = |app: &App| app.library.view_template(&key).cloned().unwrap();
+        app.view_template_update(ViewTemplateMessage::RuleAdd);
+        assert_eq!((of(&app).rules.len(), of(&app).rules[5].key.as_str()), (6, "rule-1"));
+        // its classes, typed between commas: what is typed stays in the field
+        app.view_template_update(ViewTemplateMessage::Classes("rule-1".into(), "IfcStair, IfcRailing, ".into()));
+        assert_eq!((of(&app).rules[5].filter.classes.clone(), app.view_template_view.classes.clone()), (vec!["IfcStair".to_string(), "IfcRailing".to_string()], Some(("rule-1".to_string(), "IfcStair, IfcRailing, ".to_string()))));
+        app.view_template_update(ViewTemplateMessage::Set(Flag::Faint("rule-1".into()), true));
+        let stair = of(&app).look(&Described { class: "IfcStair".into(), ..Described::default() });
+        let wall = of(&app).look(&Described { class: "IfcWall".into(), ..Described::default() });
+        assert!(stair.faint && !wall.faint && of(&app).check().is_ok());
+        let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 2400.0), app.view_template_pane(app.theme.palette(), l, &app.library));
+        assert!(pane.find("+ Rule").is_ok() && pane.find("6. new rule").is_ok());
     }
 
 }
