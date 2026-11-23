@@ -2565,6 +2565,7 @@ impl App {
                         self.select_box(rect, width, height, add);
                     }
                 }
+                Navigate::Hover { x, y, width, height } if self.rebar_hover(x, y, width, height) => {}
                 Navigate::Hover { x, y, width, height } if self.grab_hover(x, y, width, height) => {}
                 Navigate::Hover { x, y, width, height } if self.sketch_hover(x, y, width, height) => {}
                 Navigate::Hover { x, y, width, height } if self.edit_hover(x, y, width, height) => {}
@@ -2578,6 +2579,7 @@ impl App {
                 }
                 Navigate::HoverOff => {
                     self.modeller.cursor = None;
+                    self.modeller.rebar_at = None;
                     self.modeller.aim = None;
                     self.hover_request = None;
                     self.measure.hover = None;
@@ -4638,7 +4640,7 @@ impl App {
             drag_selects: self.drag_selects(),
             cursor3d: self.has_cursor3d(),
             buttons: self.mouse_buttons,
-            hover: (self.measure.tool.is_some() || self.structural_hover_on() || self.edit_follows_cursor() || self.modeller.sketch.is_some() || self.modeller.grab.is_some() || self.modeller.tool.is_some() || self.modeller.grid_tool) && !self.plane_picking,
+            hover: (self.measure.tool.is_some() || self.structural_hover_on() || self.edit_follows_cursor() || self.modeller.sketch.is_some() || self.modeller.grab.is_some() || self.modeller.tool.is_some() || self.modeller.grid_tool || self.modeller.rebar_on.is_some()) && !self.plane_picking,
             crosshair: (self.measure.tool.is_some() && !self.plane_picking) || (self.shown_view().is_some() && (self.dimension_tool || self.note_tool)),
             structural_selected: &self.structural.selected_marks,
             structural_hovered: &self.structural.hovered_marks,

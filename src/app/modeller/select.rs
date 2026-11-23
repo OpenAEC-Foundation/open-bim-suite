@@ -11,6 +11,7 @@ impl App {
         self.modeller.grid_tool = false;
         self.modeller.rebar_tool = None;
         self.modeller.rebar_on = None;
+        self.modeller.rebar_at = None;
         self.modeller.points.clear();
         self.modeller.cursor = None;
         self.modeller.transform = None;

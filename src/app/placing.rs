@@ -57,6 +57,9 @@ impl App {
         if self.modeller.grid_tool {
             return self.grid_overlay(ink);
         }
+        if let Some(overlay) = self.rebar_overlay(ink) {
+            return Some(overlay);
+        }
         self.modeller.tool?;
         let cursor = self.modeller.cursor?;
         let mut faces = Vec::new();

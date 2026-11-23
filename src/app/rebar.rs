@@ -91,6 +91,7 @@ impl App {
     /// Esc while a reinforcement tool is on: drop the first click, else switch the tool off.
     pub(super) fn escape_rebar_tool(&mut self) {
         self.modeller.refusal = None;
+        self.modeller.rebar_at = None;
         if self.modeller.rebar_on.take().is_none() {
             self.modeller.rebar_tool = None;
         }
@@ -124,6 +125,7 @@ impl App {
     pub(super) fn rebar_first(&mut self, tool: RebarTool, x: f32, y: f32, width: f32, height: f32) {
         self.modeller.points.clear();
         self.modeller.rebar_on = None;
+        self.modeller.rebar_at = None;
         if tool == RebarTool::Usual {
             return self.reinforce_clicked();
         }
@@ -157,9 +159,19 @@ impl App {
     pub(super) fn rebar_second(&mut self, x: f32, y: f32, width: f32, height: f32) {
         let (Some(id), Some(tool), Some(&first)) = (self.modeller.rebar_on.take(), self.modeller.rebar_tool, self.modeller.points.first()) else { return };
         self.modeller.points.clear();
+        self.modeller.rebar_at = None;
         self.select_modelled(id);
         let (Some(e), Some(second)) = (self.defined().cloned(), self.rebar_place(x, y, width, height)) else { return };
-        let extra = match (e.shape_in_project(&self.modeller.model.grid), tool, e.reinforcement, e.nets) {
+        let Some(extra) = self.rebar_extra(&e, tool, first, second) else { return };
+        let mut extras = e.extras.clone();
+        extras.push(extra);
+        self.change_extras(&e, extras);
+        self.select_modelled(id);
+    }
+    /// What tool `tool` draws on `e` from place `first` to place `second` (see `rebar_place`),
+    /// with the tool's usual sizes; `None` where it draws nothing on such an element.
+    fn rebar_extra(&self, e: &bim_core::Element, tool: RebarTool, first: DVec3, second: DVec3) -> Option<Extra> {
+        Some(match (e.shape_in_project(&self.modeller.model.grid), tool, e.reinforcement, e.nets) {
             (Shape::Linear(_), RebarTool::Stirrups, Some(r), _) => Extra::Stirrups { from: first.x.min(second.x), to: first.x.max(second.x), diameter: r.stirrup, spacing: STIRRUPS },
             (Shape::Linear(_), RebarTool::Bars, Some(r), _) => Extra::Bars { from: first.x.min(second.x), to: first.x.max(second.x), count: BARS, diameter: r.bottom.diameter.max(r.stirrup), top: false },
             (Shape::Planar(PlanarDef { form: PlanarForm::Slab { outline, .. }, .. }), RebarTool::Bars | RebarTool::Hairpins, _, Some(_)) if outline.len() > 1 => {
@@ -169,12 +181,79 @@ impl App {
                 let (diameter, spacing, length, form) = if tool == RebarTool::Hairpins { (HAIRPIN.0, HAIRPIN.1, HAIRPIN.2, LineForm::Hairpin) } else { (STRAIGHT.0, STRAIGHT.1, STRAIGHT.2, LineForm::Top) };
                 Extra::Line { a: own(first), b: own(second), diameter, spacing, length, form }
             }
-            _ => return,
-        };
-        let mut extras = e.extras.clone();
-        extras.push(extra);
-        self.change_extras(&e, extras);
-        self.select_modelled(id);
+            _ => return None,
+        })
+    }
+
+    /// The cursor rests at (x, y) after the first click of a reinforcement tool: the preview
+    /// runs to there. False when no stretch or line is under way.
+    pub(super) fn rebar_hover(&mut self, x: f32, y: f32, width: f32, height: f32) -> bool {
+        if self.modeller.rebar_on.is_none() {
+            return false;
+        }
+        self.modeller.rebar_at = self.rebar_place(x, y, width.max(1.0), height.max(1.0));
+        true
+    }
+
+    /// The preview of the stretch or the line under way, over the viewport: from the first
+    /// click to the cursor, the stirrups, bars or hairpins a click there would give, as lines,
+    /// and beside the cursor how many and what. An end the kernel refuses (a line of no length,
+    /// bars that lie outside the slab) shows the two points only.
+    pub(super) fn rebar_overlay(&self, ink: iced::Color) -> Option<super::placing::PlacingOverlay> {
+        let (id, tool, first, second) = (self.modeller.rebar_on?, self.modeller.rebar_tool?, *self.modeller.points.first()?, self.modeller.rebar_at?);
+        let e = self.defined().filter(|e| e.id == id)?;
+        let shape = e.shape_in_project(&self.modeller.model.grid);
+        let mm = |v: f64| (v * 1000.0).round();
+        let mut lines: Vec<[DVec3; 2]> = Vec::new();
+        let mut rings: Vec<Vec<DVec3>> = Vec::new();
+        let mut readout = None;
+        let (mut from, mut to) = (first, second);
+        let extra = self.rebar_extra(e, tool, first, second);
+        match (&shape, e.reinforcement, e.nets, extra) {
+            (Shape::Linear(l), Some(r), _, Some(extra)) => {
+                let (axes, length) = bim_core::element::linear_axes(l).ok()?;
+                (from, to) = (axes.origin + axes.z * first.x, axes.origin + axes.z * second.x);
+                if let Ok(profile) = l.profile.profile() {
+                    let outer = profile.outer();
+                    let lo = outer.iter().fold(DVec2::splat(f64::INFINITY), |a, p| a.min(*p));
+                    let hi = outer.iter().fold(DVec2::splat(f64::NEG_INFINITY), |a, p| a.max(*p));
+                    let (lo, hi) = (lo + DVec2::splat(r.cover), hi - DVec2::splat(r.cover));
+                    let extras = [extra];
+                    let stirrups: Vec<_> = r.stirrups_in(length, &extras).into_iter().filter(|s| s.2.is_some()).collect();
+                    for (s, _, _) in &stirrups {
+                        rings.push([lo, DVec2::new(hi.x, lo.y), hi, DVec2::new(lo.x, hi.y)].iter().map(|c| axes.point(*c) + axes.z * *s).collect());
+                    }
+                    let bars = r.extra_bars(&profile, length, &extras);
+                    lines.extend(bars.iter().map(|(_, c, _, start, end)| [axes.point(*c) + axes.z * *start, axes.point(*c) + axes.z * *end]));
+                    let stretch = format!("x = {}-{}", mm(first.x.min(second.x)), mm(first.x.max(second.x)));
+                    readout = match extras[0] {
+                        Extra::Stirrups { diameter, spacing, .. } => Some(format!("{} × Ø{}-{} · {stretch}", stirrups.len(), mm(diameter), mm(spacing))),
+                        Extra::Bars { count, diameter, .. } => Some(format!("{count}Ø{} · {stretch}", mm(diameter))),
+                        Extra::Line { .. } => None,
+                    };
+                }
+            }
+            (Shape::Planar(def @ PlanarDef { form: PlanarForm::Slab { top, .. }, .. }), _, Some(nets), Some(extra)) => {
+                lines.push([first, second]);
+                if let Ok(bars) = nets.laid(def, &self.modeller.model.openings_of(id), &[extra]) {
+                    let bars: Vec<_> = bars.into_iter().filter(|b| b.extra.is_some()).collect();
+                    for b in &bars {
+                        let at = |p: DVec2, depth: f64| p.extend(top - depth);
+                        lines.push([at(b.a, b.depth), at(b.b, b.depth)]);
+                        if b.drop > 0.0 {
+                            lines.push([at(b.a, b.depth + b.drop), at(b.b, b.depth + b.drop)]);
+                            lines.push([at(b.a, b.depth), at(b.a, b.depth + b.drop)]);
+                        }
+                    }
+                    if let Extra::Line { diameter, spacing, .. } = extra {
+                        readout = Some(format!("{} × Ø{}-{} · {} mm", bars.len(), mm(diameter), mm(spacing), mm(first.distance(second))));
+                    }
+                }
+            }
+            _ => {}
+        }
+        let faces = rings.into_iter().chain(lines.into_iter().map(|l| l.to_vec())).map(|ring| vec![ring.into_iter().map(|p| p.as_vec3()).collect()]).collect();
+        Some(super::placing::PlacingOverlay { faces, points: vec![from.as_vec3()], cursor: to.as_vec3(), view_proj: self.camera.view_proj(self.aspect()) * self.model_matrix(), ink, mark: None, readout })
     }
 }
 
@@ -208,6 +287,42 @@ mod tests {
     fn click(app: &mut App, at: DVec3) {
         let (x, y) = app.on_screen(at, 1000.0, 800.0).unwrap();
         let _ = app.update(Message::Navigate(Navigate::Pick { x, y, width: 1000.0, height: 800.0, add: false }));
+    }
+
+    fn hover(app: &mut App, at: DVec3) {
+        let (x, y) = app.on_screen(at, 1000.0, 800.0).unwrap();
+        let _ = app.update(Message::Navigate(Navigate::Hover { x, y, width: 1000.0, height: 800.0 }));
+    }
+
+    #[test]
+    fn after_the_first_click_the_preview_runs_to_the_cursor() {
+        let (mut app, _, _) = model();
+        let ink = iced::Color::BLACK;
+        // no preview before a click, nor for the tool that takes one click
+        let _ = app.update(Message::RebarTool(RebarTool::Stirrups));
+        hover(&mut app, DVec3::new(1.0, 0.0, 3.25));
+        assert!(app.rebar_overlay(ink).is_none() && app.placing_overlay(ink).is_none());
+        // a stretch of stirrups: a ring for each, and beside the cursor how many and where
+        click(&mut app, DVec3::new(0.5, 0.0, 3.25));
+        assert!(app.rebar_overlay(ink).is_none(), "the cursor has not moved yet");
+        hover(&mut app, DVec3::new(1.5, 0.0, 3.25));
+        let overlay = app.placing_overlay(ink).unwrap();
+        assert_eq!(overlay.readout.as_deref(), Some("11 × Ø8-100 · x = 500-1500"));
+        assert!(overlay.faces.len() == 11 && overlay.faces.iter().all(|f| f[0].len() == 4), "{}", overlay.faces.len());
+        assert!((overlay.points[0].x - 0.5).abs() < 1e-6 && (overlay.cursor.x - 1.5).abs() < 1e-6);
+        // Esc drops the first click and its preview
+        let _ = app.update(Message::Escape);
+        assert!(app.rebar_overlay(ink).is_none() && app.modeller.rebar_at.is_none());
+        // a line of hairpins in the slab: the line, and three lines for every hairpin
+        let _ = app.update(Message::RebarTool(RebarTool::Hairpins));
+        click(&mut app, DVec3::new(1.0, 2.0, 0.0));
+        hover(&mut app, DVec3::new(4.0, 2.0, 0.0));
+        let overlay = app.placing_overlay(ink).unwrap();
+        assert_eq!(overlay.readout.as_deref(), Some("20 × Ø8-150 · 3000 mm"));
+        assert_eq!(overlay.faces.len(), 1 + 3 * 20);
+        // the second click draws it, and the preview is gone
+        click(&mut app, DVec3::new(4.0, 2.0, 0.0));
+        assert!(app.rebar_overlay(ink).is_none() && app.modeller.rebar_at.is_none());
     }
 
     #[test]

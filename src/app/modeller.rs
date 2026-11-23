@@ -187,6 +187,9 @@ pub struct Modeller {
     /// that click's place is the first of `points`.
     pub rebar_tool: Option<super::rebar::RebarTool>,
     pub rebar_on: Option<ElementId>,
+    /// Where the stretch or the line under way would end with a click where the cursor is
+    /// (see `rebar::App::rebar_place`): the preview runs to it.
+    pub rebar_at: Option<DVec3>,
     /// The points clicked so far for the tool (scene coordinates).
     pub points: Vec<DVec3>,
     /// The viewer model that shows the elements (its id), an entry of `App::models`.
@@ -358,6 +361,7 @@ impl App {
         self.modeller.grid_tool = false;
         self.modeller.rebar_tool = None;
         self.modeller.rebar_on = None;
+        self.modeller.rebar_at = None;
         self.modeller.points.clear();
         self.modeller.cursor = None;
         self.modeller.aim = None;
