@@ -471,7 +471,7 @@ mod tests {
         let path = level.clone().unwrap();
         // 4.2 m wide (three planks of 1200 and a narrow one) spanning 6 m
         let t = app.library.system_type("system.hollow-core-200").unwrap().clone();
-        let generic = SystemDef { start: DVec2::ZERO, end: DVec2::new(4.2, 0.0), base: t.lying.unwrap(), height: 6.0, spacing: DVec2::splat(0.6), member: DVec2::new(0.045, 0.14), panel: 0.012, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new() };
+        let generic = SystemDef { start: DVec2::ZERO, end: DVec2::new(4.2, 0.0), base: t.lying.unwrap(), height: 6.0, spacing: DVec2::splat(0.6), member: DVec2::new(0.045, 0.14), panel: 0.012, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), division: Some(bim_core::Division::Equal) };
         let floor = app.add_element("Floor", level, Shape::System(generic.clone().laid(&t).unwrap())).unwrap();
         // a second floor beside it, spanning 4 m: other planks, another mark
         let short = SystemDef { start: DVec2::new(5.0, 0.0), end: DVec2::new(7.4, 0.0), height: 4.0, ..generic.clone() };

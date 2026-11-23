@@ -174,8 +174,9 @@ pub enum Category {
     /// The drawing standard: its kinds of drawing and the settings they pick from.
     Kinds,
     Scales,
-    LineStyles,
+    LinePatterns,
     Pens,
+    LineStyles,
     TextStyles,
     /// The hatches of a set of the catalogue: the signs of NEN 47, or the suite's coloured ones.
     HatchSet(HatchSet),
@@ -270,8 +271,9 @@ impl Category {
             Category::Systems(group) => super::library::system_group_label(group, l),
             Category::Kinds => l.text("Tekeningsoorten", "Kinds of drawing"),
             Category::Scales => l.text("Schalen", "Scales"),
-            Category::LineStyles => l.text("Lijnstijlen", "Line styles"),
+            Category::LinePatterns => l.text("Lijnpatronen", "Line patterns"),
             Category::Pens => l.text("Lijndiktes", "Line weights"),
+            Category::LineStyles => l.text("Lijnstijlen", "Line styles"),
             Category::TextStyles => l.text("Tekststijlen", "Text styles"),
             Category::HatchSet(set) => set.name(),
             Category::Hatches => l.text("Per materiaalsoort", "By kind of material"),
@@ -293,15 +295,16 @@ impl Category {
 
     /// Whether it is a part of the drawing standard that is set in the right pane.
     pub fn of_standard(self) -> bool {
-        matches!(self, Category::Kinds | Category::Scales | Category::LineStyles | Category::Pens | Category::TextStyles)
+        matches!(self, Category::Kinds | Category::Scales | Category::LinePatterns | Category::Pens | Category::LineStyles | Category::TextStyles)
     }
 
     /// The category a setting of the drawing standard is shown in.
     pub fn of_setting(setting: &Setting) -> Category {
         match setting {
             Setting::Kind(_) => Category::Kinds,
-            Setting::LineStyle(_) => Category::LineStyles,
+            Setting::LinePattern(_) => Category::LinePatterns,
             Setting::Pen(_) => Category::Pens,
+            Setting::LineStyle(_) => Category::LineStyles,
             Setting::TextStyle(_) => Category::TextStyles,
             Setting::Scale(_) => Category::Scales,
         }
@@ -645,8 +648,9 @@ impl App {
             Category::Systems(group) => of(&|lib| lib.system_types_of(group).count()),
             Category::Kinds => self.standard.kinds.len(),
             Category::Scales => self.standard.scales.len(),
-            Category::LineStyles => self.standard.line_styles.len(),
+            Category::LinePatterns => self.standard.line_patterns.len(),
             Category::Pens => self.standard.pens.len(),
+            Category::LineStyles => self.standard.line_styles.len(),
             Category::TextStyles => self.standard.text_styles.len(),
             Category::HatchSet(set) => hatch::of(set).count(),
             Category::Hatches => HatchKind::ALL.len(),
@@ -673,7 +677,7 @@ impl App {
     pub fn library_tree(&self) -> Vec<(Heading, Vec<(Category, usize)>)> {
         let view = &self.libraries;
         let counted = |categories: Vec<Category>| -> Vec<(Category, usize)> { categories.into_iter().map(|category| (category, self.category_count(category))).collect() };
-        let standard = || vec![Category::Kinds, Category::Scales, Category::LineStyles, Category::Pens, Category::TextStyles];
+        let standard = || vec![Category::Kinds, Category::Scales, Category::LinePatterns, Category::Pens, Category::LineStyles, Category::TextStyles];
         // the hatches: NEN 47's signs where the Netherlands' content shows, the suite's own in
         // its general library too, and everywhere what each kind of material is drawn with
         let hatches = |sets: &[HatchSet]| -> (Heading, Vec<(Category, usize)>) { (Heading::Hatches, counted(sets.iter().map(|set| Category::HatchSet(*set)).chain([Category::Hatches]).collect())) };
@@ -792,6 +796,11 @@ impl App {
         for kind in &standard.kinds {
             if hit(&[kind.names.get(lang), &kind.code, &kind.key]) {
                 add(&mut found, kind.names.get(lang).to_string(), l.text("Tekeningsoorten", "Kinds of drawing"), place, Item::Setting(Setting::Kind(kind.key.clone())));
+            }
+        }
+        for style in &standard.line_patterns {
+            if hit(&[style.names.get(lang), &style.key]) {
+                add(&mut found, style.names.get(lang).to_string(), l.text("Lijnpatronen", "Line patterns"), place, Item::Setting(Setting::LinePattern(style.key.clone())));
             }
         }
         for style in &standard.line_styles {
@@ -1144,8 +1153,9 @@ impl App {
             };
             match category {
                 Category::Kinds => standard.kinds.iter().for_each(|k| push(k.names.get(lang).to_string(), Setting::Kind(k.key.clone()), node(drawing::KIND, &k.key))),
-                Category::LineStyles => standard.line_styles.iter().for_each(|s| push(s.names.get(lang).to_string(), Setting::LineStyle(s.key.clone()), node(drawing::LINE_STYLE, &s.key))),
+                Category::LinePatterns => standard.line_patterns.iter().for_each(|s| push(s.names.get(lang).to_string(), Setting::LinePattern(s.key.clone()), node(drawing::LINE_PATTERN, &s.key))),
                 Category::Pens => standard.pens.iter().for_each(|pen| push(pen.names.get(lang).to_string(), Setting::Pen(pen.key.clone()), node(drawing::PEN, &pen.key))),
+                Category::LineStyles => standard.line_styles.iter().for_each(|s| push(s.names.get(lang).to_string(), Setting::LineStyle(s.key.clone()), node(drawing::LINE_STYLE, &s.key))),
                 Category::TextStyles => standard.text_styles.iter().for_each(|t| push(t.names.get(lang).to_string(), Setting::TextStyle(t.key.clone()), node(drawing::TEXT_STYLE, &t.key))),
                 // the scales are a list of the standard's own node
                 _ => {
@@ -1275,8 +1285,9 @@ impl App {
                 Item::Component(id) => component_look(p, bim_library::component::item(id)?),
                 Item::Setting(setting) => words(match setting {
                     Setting::Kind(key) => self.standard.kind(key).map(|k| format!("{} · {} · {}", k.code, k.discipline.code(), k.scales.iter().map(|s| bim_library::drawing::scale_text(*s)).collect::<Vec<_>>().join(", "))),
-                    Setting::LineStyle(key) => self.standard.line_style(key).map(|s| s.names.get(lang).to_string()),
+                    Setting::LinePattern(key) => self.standard.line_pattern(key).map(|s| s.names.get(lang).to_string()),
                     Setting::Pen(key) => self.standard.pen(key).map(|pen| format!("{} mm", pen.width)),
+                    Setting::LineStyle(key) => self.standard.line_style(key).map(|s| format!("{} mm · {}", self.standard.pen(&s.pen).map_or(0.0, |pen| pen.width), self.standard.line_pattern(&s.pattern).map_or("", |pattern| pattern.names.get(lang)))),
                     Setting::TextStyle(key) => self.standard.text_style(key).map(|t| format!("{} mm", t.height)),
                     Setting::Scale(scale) => Some(bim_library::drawing::scale_text(*scale)),
                 }?),
@@ -1686,7 +1697,7 @@ mod tests {
         assert_eq!((app.category(), app.shown_hatches().1), (Category::Hatches, "DIN 1356"));
         let _ = app.libraries_update(LibrariesMessage::Country(Country::Netherlands));
         let netherlands = app.library_tree();
-        assert_eq!(categories(&netherlands, Heading::Standard), [Category::Kinds, Category::Scales, Category::LineStyles, Category::Pens, Category::TextStyles]);
+        assert_eq!(categories(&netherlands, Heading::Standard), [Category::Kinds, Category::Scales, Category::LinePatterns, Category::Pens, Category::LineStyles, Category::TextStyles]);
         assert_eq!(categories(&netherlands, Heading::Hatches), [Category::HatchSet(HatchSet::Nen47), Category::HatchSet(HatchSet::OpenAec), Category::Hatches]);
         assert!(netherlands.iter().all(|(_, list)| list.iter().all(|(category, count)| *count > 0 || category.of_standard())), "only what the template has: {netherlands:?}");
         assert!(categories(&netherlands, Heading::Planar).contains(&Category::Planar(Role::Wall)) && categories(&netherlands, Heading::Systems).is_empty());

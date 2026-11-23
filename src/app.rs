@@ -960,6 +960,7 @@ pub enum Message {
     RemoveBreak(usize),
     /// An opening more in the selected floor system: rectangular, or round.
     AddRecess(bool),
+    SetDivision(bim_core::Division),
     /// The element drawings of the selected system: ask for a folder, then write them there.
     ElementDrawings(openaec_ui::Language),
     ElementDrawingsTo(Option<std::path::PathBuf>, openaec_ui::Language),
@@ -2284,6 +2285,7 @@ impl App {
             Message::ResetOpeningFraming(index) => self.reset_opening_framing(index),
             Message::AddBreak => self.add_break(),
             Message::AddRecess(round) => self.add_recess(round),
+            Message::SetDivision(division) => self.set_division(division),
             Message::RemoveBreak(index) => self.remove_break(index),
             Message::ElementDrawings(l) => return self.element_drawings_dialog(l),
             Message::ElementDrawingsTo(folder, l) => {
@@ -4807,8 +4809,10 @@ impl App {
             .width(Fill)
             .height(Fill)
         });
+        // the sketch's drawing tools as a toolbar under the banner, over the view
+        let mut sketch_tools = self.sketch_bar(p, l);
         let picking = banner.filter(|_| overlay.is_none()).map(|banner| {
-            container(
+            let mut over = iced::widget::Column::new().spacing(6).align_x(iced::Alignment::Center).push(
                 container(text(banner).size(12).color(Color::WHITE))
                     .padding([6, 12])
                     .style(|_| container::Style {
@@ -4816,10 +4820,16 @@ impl App {
                         border: Border { radius: 4.0.into(), ..Default::default() },
                         ..Default::default()
                     }),
-            )
-            .padding(12)
-            .align_top(Fill)
-            .center_x(Fill)
+            );
+            if let Some(tools) = sketch_tools.take() {
+                // no wider than leaves the view cube free: its buttons wrap
+                over = over.push(container(tools).padding(4).max_width(520).style(move |_| container::Style {
+                    background: Some(Background::Color(p.surface)),
+                    border: Border { radius: 4.0.into(), width: 1.0, color: p.border },
+                    ..Default::default()
+                }));
+            }
+            container(over).padding(12).align_top(Fill).center_x(Fill)
         });
         let grids = (overlay.is_none() && !datums.is_empty()).then(|| {
                 canvas(crate::annotations::GridOverlay {

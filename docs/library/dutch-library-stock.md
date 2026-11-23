@@ -9,7 +9,7 @@ small utility building still misses. Written for issue 307. The numbers are coun
 
 | | General library | Dutch library |
 |---|---|---|
-| Materials | 77 | 132 |
+| Materials | 93 | 132 |
 | Wall build-ups | 21 | 63 |
 | Floor build-ups | 13 | 48 |
 | Roof build-ups | 4 | 7 |

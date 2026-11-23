@@ -242,6 +242,16 @@ fn starter_sign(key: &str) -> Option<&'static str> {
         "sand" => "openaec-26",
         "gravel" => "openaec-27",
         "water" => "openaec-28",
+        "clay" => "openaec-25-clay",
+        "peat" => "openaec-25-peat",
+        "frosted-glass" => "openaec-29-frosted-glass",
+        "toughened-glass" => "openaec-29-clear-glass",
+        "bamboo" => "openaec-12-bamboo",
+        "anhydrite-screed" => "openaec-10",
+        "concrete-paver" => "openaec-7",
+        "gypsum-block" => "openaec-4",
+        "polyester" => "openaec-22",
+        "anodised-aluminium" => "openaec-19",
         _ => return None,
     })
 }
@@ -303,6 +313,25 @@ pub fn common() -> Vec<Material> {
         m("asphalt", "asfalt", "asphalt", "Asphalt", "enrobé", Generic, [70, 70, 72]),
         m("grass", "gras", "grass", "Rasen", "gazon", Generic, [120, 160, 90]),
         m("water", "water", "water", "Wasser", "eau", Generic, [150, 195, 225]),
+        m("clay", "klei", "clay", "Ton", "argile", Generic, [140, 120, 100]),
+        m("peat", "veen", "peat", "Torf", "tourbe", Generic, [85, 65, 50]),
+        m("planting", "beplanting", "planting", "Bepflanzung", "plantation", Generic, [80, 130, 70]),
+        // a roof and what grows on it
+        m("roof-tile", "dakpannen", "roof tiles", "Dachziegel", "tuiles", Brick, [165, 85, 60]),
+        m("reed", "riet", "reed", "Reet", "chaume", Generic, [190, 165, 110]),
+        m("sedum", "sedum", "sedum", "Sedum", "sedum", Generic, [110, 150, 90]),
+        m("roof-substrate", "daktuinsubstraat", "roof garden substrate", "Dachsubstrat", "substrat de toiture", Generic, [120, 95, 75]),
+        m("drainage-layer", "drainagelaag", "drainage layer", "Dränschicht", "couche drainante", Generic, [95, 100, 105]),
+        // more of what a floor and a partition are made of
+        m("anhydrite-screed", "anhydriet dekvloer", "anhydrite screed", "Anhydritestrich", "chape anhydrite", Concrete, [225, 222, 212]),
+        m("concrete-paver", "betontegels", "concrete pavers", "Betonplatten", "dalles en béton", Concrete, [160, 160, 156]),
+        m("gypsum-block", "gipsblokken", "gypsum blocks", "Gipsdielen", "carreaux de plâtre", Gypsum, [240, 238, 232]),
+        m("polyester", "polyester", "polyester", "Polyester", "polyester", Generic, [235, 235, 230]),
+        // variants a model tells apart
+        m("toughened-glass", "gehard glas", "toughened glass", "Sicherheitsglas", "verre trempé", Generic, [185, 215, 230]),
+        m("frosted-glass", "mat glas", "frosted glass", "Mattglas", "verre dépoli", Generic, [215, 228, 232]),
+        m("anodised-aluminium", "geanodiseerd aluminium", "anodised aluminium", "eloxiertes Aluminium", "aluminium anodisé", Steel, [165, 168, 172]),
+        m("bamboo", "bamboe", "bamboo", "Bambus", "bambou", Timber, [205, 180, 120]),
     ]
 }
 
@@ -412,7 +441,7 @@ mod tests {
     #[test]
     fn the_common_kinds_of_material_are_in_the_general_library_each_once() {
         let common = common();
-        assert_eq!(common.len(), 39);
+        assert_eq!(common.len(), 55);
         let library = crate::Library::starter();
         assert_eq!(library.materials.len(), starter().len() + common.len());
         let mut keys: Vec<&str> = library.materials.iter().map(|m| m.key.as_str()).collect();

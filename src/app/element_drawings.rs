@@ -1,4 +1,5 @@
-//! Element drawings from the app: the drawings of the prefab units of the framed systems (see
+//! Element drawings from the app: the drawings of the prefab units of the framed systems, the
+//! elevations of the systems on a grid and the laying plans of floors and ceilings (see
 //! [`crate::element_drawing`]) written into a folder, for the properties panel's button, the
 //! remote control and the command line.
 
@@ -33,7 +34,7 @@ impl App {
             made.extend(drawings);
         }
         if made.is_empty() {
-            return Err("nothing to draw: element drawings are of timber frames, steel frames and metal stud walls, and laying plans of floor systems".to_string());
+            return Err("nothing to draw: element drawings are of framed systems, elevations of systems on a grid, and laying plans of floors and ceilings; a system without a type and brickwork have none".to_string());
         }
         std::fs::create_dir_all(folder).map_err(|e| format!("{}: {e}", folder.display()))?;
         let mut files = Vec::with_capacity(made.len());

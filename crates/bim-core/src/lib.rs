@@ -31,7 +31,7 @@ pub mod tile;
 
 pub use boolean::{boolean, BooleanOp};
 pub use datum::GridDef;
-pub use element::{Fixity, BaseKind, OpeningKind, SlabRole, Slope, Top, BuildUpDef, ConnectionDef, ConnectionKind, Element, ElementId, LayerDef, LinearDef, Opening, OpeningFraming, PlanarDef, PointDef, Shape, SystemDef};
+pub use element::{Division, Fixity, BaseKind, OpeningKind, SlabRole, Slope, Top, BuildUpDef, ConnectionDef, ConnectionKind, Element, ElementId, LayerDef, LinearDef, Opening, OpeningFraming, PlanarDef, PointDef, Shape, SystemDef};
 pub use mesh::Mesh;
 pub use model::{Model, Part};
 pub use profile::{Profile, ProfileDef};
@@ -99,7 +99,8 @@ pub enum Refusal {
     NoLayers,
     /// A system would be generated as more parts than [`system::MAX_PARTS`].
     TooManyParts,
-    /// A system that is not framed has an opening.
+    /// A system that is not framed has an opening. (No longer refused: a system on a grid is cut
+    /// where an opening lies. Kept so that what names it still reads.)
     OpeningNotFramed,
     /// A frame cannot be split into prefab units short enough, with their joints clear of its
     /// openings.
