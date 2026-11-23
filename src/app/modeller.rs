@@ -62,11 +62,14 @@ pub enum ModelTool {
     CableTray,
     /// A terminal or an appliance of a building service: a radiator, a boiler, a wash basin.
     Appliance,
+    /// A stair: two clicks draw a straight one along the line between them; its sketch draws one
+    /// in an outline or along a line with landings (see `sketch`).
+    Stair,
 }
 
 impl ModelTool {
     /// The tools that place an element of their own.
-    pub const ALL: [ModelTool; 6] = [ModelTool::Wall, ModelTool::Slab, ModelTool::Column, ModelTool::Beam, ModelTool::System, ModelTool::Point];
+    pub const ALL: [ModelTool; 7] = [ModelTool::Wall, ModelTool::Slab, ModelTool::Column, ModelTool::Beam, ModelTool::System, ModelTool::Point, ModelTool::Stair];
     /// The tools that make an opening in a wall.
     pub const OPENINGS: [ModelTool; 2] = [ModelTool::Door, ModelTool::Window];
     /// The tools that draw a run of a building service.
@@ -105,6 +108,7 @@ impl ModelTool {
             ModelTool::Pipe => "mep.pipe",
             ModelTool::CableTray => "mep.cable-tray",
             ModelTool::Appliance => "mep.appliance",
+            ModelTool::Stair => "model.stair",
         }
     }
 
@@ -124,6 +128,7 @@ impl ModelTool {
             ModelTool::Pipe => l.text("Leiding", "Pipe"),
             ModelTool::CableTray => l.text("Kabelgoot", "Cable tray"),
             ModelTool::Appliance => l.text("Toestel", "Appliance"),
+            ModelTool::Stair => l.text("Trap", "Stair"),
         }
     }
 
@@ -135,6 +140,7 @@ impl ModelTool {
             ModelTool::Beam => "draw.line",
             ModelTool::Wall => "construction.types",
             ModelTool::Slab => "draw.filled-area",
+            ModelTool::Stair => "draw.polyline",
             ModelTool::System => "curtain.new",
             ModelTool::Door => "frame.new-door",
             ModelTool::Window => "frame.new-turn-tilt",
@@ -149,7 +155,7 @@ impl ModelTool {
         match self {
             ModelTool::Point | ModelTool::Appliance => BaseKind::Point,
             ModelTool::Column | ModelTool::Beam | ModelTool::Duct | ModelTool::RoundDuct | ModelTool::Pipe | ModelTool::CableTray => BaseKind::Linear,
-            ModelTool::Wall | ModelTool::Slab | ModelTool::Door | ModelTool::Window => BaseKind::Planar,
+            ModelTool::Wall | ModelTool::Slab | ModelTool::Stair | ModelTool::Door | ModelTool::Window => BaseKind::Planar,
             ModelTool::System => BaseKind::System,
         }
     }
@@ -158,7 +164,7 @@ impl ModelTool {
     pub(super) fn clicks(self) -> usize {
         match self {
             ModelTool::Point | ModelTool::Appliance | ModelTool::Column | ModelTool::Door | ModelTool::Window => 1,
-            ModelTool::Beam | ModelTool::Wall | ModelTool::Slab | ModelTool::System | ModelTool::Duct | ModelTool::RoundDuct | ModelTool::Pipe | ModelTool::CableTray => 2,
+            ModelTool::Beam | ModelTool::Wall | ModelTool::Slab | ModelTool::Stair | ModelTool::System | ModelTool::Duct | ModelTool::RoundDuct | ModelTool::Pipe | ModelTool::CableTray => 2,
         }
     }
 
@@ -175,6 +181,8 @@ impl ModelTool {
             (ModelTool::Column, _) => l.text("Klik waar de kolom staat · Esc: stoppen", "Click where the column stands · Esc: stop"),
             (ModelTool::Door, _) => l.text("Klik op een wand waar de deur komt · Esc: stoppen", "Click a wall where the door goes · Esc: stop"),
             (ModelTool::Window, _) => l.text("Klik op een wand waar het raam komt · Esc: stoppen", "Click a wall where the window goes · Esc: stop"),
+            (ModelTool::Stair, 0) => l.text("Klik de voet van de trap · Esc: stoppen", "Click the foot of the stair · Esc: stop"),
+            (ModelTool::Stair, _) => l.text("Klik de richting waarin de trap omhoog loopt · Esc: opnieuw", "Click the way the stair climbs · Esc: start again"),
             (ModelTool::Slab, 0) => l.text("Klik een hoek van de vloer · Esc: stoppen", "Click a corner of the slab · Esc: stop"),
             (ModelTool::Slab, _) => l.text("Klik de andere hoek · Esc: opnieuw", "Click the opposite corner · Esc: start again"),
             (_, 0) => l.text("Klik het beginpunt · Esc: stoppen", "Click the start point · Esc: stop"),
@@ -521,6 +529,8 @@ impl App {
                 Shape::Point(p) => corners.push(p.at),
                 Shape::Linear(l) => line(l.start, l.end),
                 Shape::Planar(PlanarDef { form: PlanarForm::Wall { start, end, base, .. }, .. }) => line(start.extend(base), end.extend(base)),
+                // a stair: the ends of its line, or the corners of its outline
+                Shape::Planar(PlanarDef { form: PlanarForm::Stair { base, mut shape, .. }, .. }) => corners.extend(shape.points_mut().map(|p| p.extend(base))),
                 Shape::Planar(PlanarDef { form: PlanarForm::Slab { outline, top, .. }, .. }) => {
                     let n = outline.len();
                     for k in 0..n {
@@ -1145,6 +1155,20 @@ pub(super) fn tool_shape(tool: ModelTool, a: DVec3, b: DVec3, z: f64, storey: f6
             let wall = PlanarDef { form: PlanarForm::Wall { start: a.truncate(), end: b.truncate(), base, height: up_to(base) }, thickness: s.width, openings: Vec::new(), build_up: None };
             Shape::Planar(wall.with_build_up(build_up(&s.kind)))
         }
+        ModelTool::Stair => {
+            let base = z + s.offset;
+            let height = up_to(base);
+            let risers = stair_risers(s, height);
+            // with a going given the stair is as long as its treads make it, along the way clicked;
+            // with none it runs from click to click
+            let (from, to) = (a.truncate(), b.truncate());
+            let end = match (to - from).try_normalize() {
+                Some(way) if s.depth > 0.0 => from + way * (s.depth * (risers - 1) as f64),
+                _ => to,
+            };
+            let shape = bim_core::StairShape::Run { path: vec![from, end], width: s.width };
+            Shape::Planar(PlanarDef { form: PlanarForm::Stair { base, height, risers, shape }, thickness: STAIR_WAIST, openings: Vec::new(), build_up: None })
+        }
         ModelTool::Slab => {
             let (lo, hi) = (a.truncate().min(b.truncate()), a.truncate().max(b.truncate()));
             let outline = vec![lo, DVec2::new(hi.x, lo.y), hi, DVec2::new(lo.x, hi.y)];
@@ -1208,6 +1232,21 @@ impl App {
         moved.id = id;
         let _ = self.modeller.model.replace(moved);
     }
+}
+
+/// How thick a stair is under its treads, as its tool makes it (metres).
+pub const STAIR_WAIST: f64 = 0.15;
+/// The highest a step of a stair is when its tool counts the steps (metres).
+pub const HIGHEST_RISER: f64 = 0.185;
+
+/// How many steps the Stair tool gives a stair `height` high: what its strip says, else as few
+/// as keep every step under [`HIGHEST_RISER`].
+pub(super) fn stair_risers(s: &Settings, height: f64) -> usize {
+    let typed = s.sill.round() as usize;
+    if typed >= bim_core::element::FEWEST_RISERS {
+        return typed;
+    }
+    ((height / HIGHEST_RISER).ceil().clamp(2.0, 1000.0)) as usize
 }
 
 /// A click this near the line of an element selects it when it hits no body (logical pixels).
@@ -1394,6 +1433,18 @@ fn properties(model: &bim_core::Model, e: &Element, parts: &[bim_core::Part], le
             if let PlanarForm::Wall { start, end, height, .. } = p.form {
                 put("Length", m((end - start).length()));
                 put("Height", m(height));
+            }
+            // a stair: its steps, how high each is and, where they are all one depth, its going
+            if let PlanarForm::Stair { height, risers, shape, .. } = &p.form {
+                put("Height", m(*height));
+                put("Risers", risers.to_string());
+                put("Riser height", format!("{} mm", bim_library::millimetres(height / *risers as f64, bim_library::Lang::En)));
+                if let bim_core::StairShape::Run { path, width } = shape {
+                    put("Width", m(*width));
+                    if let ([a, b], true) = (&path[..], *risers > 1) {
+                        put("Going", format!("{} mm", bim_library::millimetres(a.distance(*b) / (*risers - 1) as f64, bim_library::Lang::En)));
+                    }
+                }
             }
         }
         Shape::System(s) => {

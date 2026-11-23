@@ -98,6 +98,8 @@ pub fn edit_points(shape: &Shape) -> (Vec<DVec3>, bool) {
         Shape::Linear(l) => (vec![l.start, l.end], false),
         Shape::Planar(PlanarDef { form: PlanarForm::Wall { start, end, base, .. }, .. }) => (vec![start.extend(*base), end.extend(*base)], false),
         Shape::Planar(PlanarDef { form: PlanarForm::Slab { outline, top, .. }, .. }) => (outline.iter().map(|p| p.extend(*top)).collect(), true),
+        // a stair's line, or its outline and then its foot and its head
+        Shape::Planar(PlanarDef { form: PlanarForm::Stair { base, shape, .. }, .. }) => (shape.clone().points_mut().map(|p| p.extend(*base)).collect(), false),
         Shape::System(s) => (vec![s.start.extend(s.base), s.end.extend(s.base)], false),
         Shape::Connection(_) => (Vec::new(), false),
     }
@@ -135,6 +137,12 @@ pub fn with_points(shape: &Shape, points: &[DVec3]) -> Shape {
             }
             *outline = points.iter().map(flat).collect();
             *top = points[0].z;
+        }
+        Shape::Planar(PlanarDef { form: PlanarForm::Stair { base, shape, .. }, .. }) => {
+            for (p, to) in shape.points_mut().zip(points) {
+                *p = flat(to);
+            }
+            *base = points[0].z;
         }
         Shape::System(s) => {
             // its openings stay where they stand, as a wall's do

@@ -931,6 +931,8 @@ pub enum Message {
     RemoveGridLine(bool, usize),
     /// The selected curtain wall gets its equal grid back.
     EqualGrid,
+    /// The Stair tool's Sketch: opens the sketch of a new stair, or closes it.
+    StairSketch,
     /// The angle typed for the turn under way (degrees), and Enter: the turn is made by it.
     TurnTyped(String),
     TurnApply,
@@ -2257,6 +2259,7 @@ impl App {
             Message::CurtainTool(tool) => self.toggle_curtain_tool(tool),
             Message::RemoveGridLine(upright, index) => self.remove_grid_line(upright, index),
             Message::EqualGrid => self.equal_grid(),
+            Message::StairSketch => self.toggle_stair_sketch(),
             Message::TurnTyped(typed) => self.modeller.turn_typed = typed,
             Message::TurnApply => self.turn_by_typed(),
             Message::SnapToggle(snap) => self.modeller.snaps.toggle(snap),

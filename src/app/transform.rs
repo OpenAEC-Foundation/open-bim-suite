@@ -214,6 +214,10 @@ pub fn transformed(shape: &Shape, map: &Map) -> Option<Shape> {
                 }
                 *top += map.lift();
             }
+            PlanarForm::Stair { base, shape, .. } => {
+                shape.points_mut().for_each(|q| *q = map.plan(*q));
+                *base += map.lift();
+            }
         },
         // a lying system keeps its line as it is turned and mirrored: its width and its
         // openings are measured to its left, so mirrored it is laid from its far side

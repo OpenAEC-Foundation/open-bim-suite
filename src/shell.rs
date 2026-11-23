@@ -2096,7 +2096,7 @@ impl Studio {
                 let sketching = self.app.modeller.sketch.is_some();
                 if self.dialog.is_none() && sketching && !press.modifiers.control() && !press.modifiers.alt() {
                     if let Key::Character(c) = &press.key {
-                        if let Some(c) = c.chars().next().filter(|c| "lrcaotLRCAOT".contains(*c)) {
+                        if let Some(c) = c.chars().next().filter(|c| "lrcaotpLRCAOTP".contains(*c)) {
                             return self.update(Msg::App(Message::EditKey(c)));
                         }
                     }
@@ -2618,6 +2618,7 @@ impl Studio {
                 (l.text("Vlak", "Planar"), vec![large("model.wall"), large("model.slab")]),
                 (l.text("Lijnvormig", "Linear"), vec![large("model.column"), large("model.beam")]),
                 (l.text("Systeem", "System"), vec![large("model.system"), smalls(&["model.curtain-line", "model.curtain-panel"])]),
+                (l.text("Trap", "Stair"), vec![large("model.stair")]),
                 (l.text("Puntvormig", "Point"), vec![large("model.point")]),
                 (l.text("Openingen", "Openings"), vec![large("model.door"), large("model.window")]),
                 (l.text("Verbinding", "Connection"), vec![smalls(&["model.butt", "model.mitre", "model.cut"]), smalls(&["model.end-plate", "model.apart"])]),

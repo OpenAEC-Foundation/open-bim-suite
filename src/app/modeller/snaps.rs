@@ -107,6 +107,13 @@ impl App {
                     let n = outline.len();
                     lines.extend((0..n).map(|k| (outline[k], outline[(k + 1) % n])));
                 }
+                Shape::Planar(PlanarDef { form: PlanarForm::Stair { shape, .. }, .. }) => match shape {
+                    bim_core::StairShape::Run { path, .. } => lines.extend(path.windows(2).map(|w| (w[0], w[1]))),
+                    bim_core::StairShape::Outline { outline, .. } => {
+                        let n = outline.len();
+                        lines.extend((0..n).map(|k| (outline[k], outline[(k + 1) % n])));
+                    }
+                },
                 Shape::System(s) => lines.push((s.start, s.end)),
                 Shape::Point(_) | Shape::Connection(_) => {}
             }

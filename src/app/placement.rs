@@ -114,6 +114,8 @@ impl Settings {
         match tool {
             ModelTool::Wall => plain(WALL_THICKNESS, 0.0, None),
             ModelTool::Slab => plain(SLAB_THICKNESS, 0.0, None),
+            // a stair 1 m wide with treads of 250 mm, up to the next level, its steps counted
+            ModelTool::Stair => plain(1.0, 0.25, None),
             ModelTool::Column => plain(COLUMN, COLUMN, None),
             ModelTool::Beam => plain(BEAM.0, BEAM.1, None),
             ModelTool::System => plain(0.0, 0.0, None),
@@ -222,6 +224,10 @@ impl App {
                     // a wall up to its level stays so; one with a height of its own keeps it
                     PlanarForm::Wall { height, .. } => (ModelTool::Wall, Settings { kind, width: p.total_thickness(), height: e.top.is_none().then_some(height), ..of(ModelTool::Wall) }),
                     PlanarForm::Slab { role, .. } => (ModelTool::Slab, Settings { kind, width: p.total_thickness(), role, ..of(ModelTool::Slab) }),
+                    PlanarForm::Stair { height, risers, ref shape, .. } => {
+                        let width = if let bim_core::StairShape::Run { width, .. } = shape { *width } else { of(ModelTool::Stair).width };
+                        (ModelTool::Stair, Settings { width, height: Some(height), sill: risers as f64, ..of(ModelTool::Stair) })
+                    }
                 }
             }
             Shape::Linear(d) => {
@@ -372,6 +378,7 @@ fn fields(tool: ModelTool, l: Language) -> Vec<(PlaceField, &'static str)> {
     match tool {
         ModelTool::Wall => vec![thickness, height, base],
         ModelTool::Slab => vec![thickness, (F::Offset, l.text("Bovenkant", "Top height"))],
+        ModelTool::Stair => vec![width, height, (F::Sill, l.text("Aantal optreden", "Risers")), (F::Depth, l.text("Aantrede", "Going")), base],
         ModelTool::Column => vec![width, depth, height, base],
         ModelTool::Beam => vec![width, (F::Depth, l.text("Profielhoogte", "Profile height")), (F::Height, l.text("Bovenkant", "Top height"))],
         ModelTool::System => vec![height, base],
@@ -391,6 +398,8 @@ fn shown(s: &Settings, field: PlaceField) -> String {
         PlaceField::Depth => m(s.depth),
         PlaceField::Height => s.height.map(m).unwrap_or_default(),
         PlaceField::Offset => m(s.offset),
+        // a stair's steps are counted; none typed: as many as its height asks
+        PlaceField::Sill if s.sill >= 2.0 && s.sill.fract() == 0.0 => format!("{}", s.sill as u64),
         PlaceField::Sill => m(s.sill),
     }
 }
@@ -403,7 +412,7 @@ fn with_typed(tool: ModelTool, s: &Settings, field: PlaceField, typed: &str) -> 
     let mut s = s.clone();
     let typed = typed.trim();
     if field == PlaceField::Height && typed.is_empty() {
-        let storey = matches!(tool, ModelTool::Wall | ModelTool::Column | ModelTool::Beam | ModelTool::System);
+        let storey = matches!(tool, ModelTool::Wall | ModelTool::Column | ModelTool::Beam | ModelTool::System | ModelTool::Stair);
         s.height = None;
         return storey.then_some(s);
     }
@@ -411,6 +420,8 @@ fn with_typed(tool: ModelTool, s: &Settings, field: PlaceField, typed: &str) -> 
     match field {
         PlaceField::Width if v > 0.0 => s.width = v,
         PlaceField::Depth if v > 0.0 => s.depth = v,
+        // a stair with no going runs from click to click
+        PlaceField::Depth if v == 0.0 && tool == ModelTool::Stair => s.depth = 0.0,
         PlaceField::Height if v > 0.0 || tool == ModelTool::Beam || tool.service().is_some() => s.height = Some(v),
         PlaceField::Offset => s.offset = v,
         PlaceField::Sill if v >= 0.0 => s.sill = v,
@@ -646,6 +657,12 @@ impl App {
             let name = if tool == ModelTool::Wall { l.text("Locatielijn", "Location line") } else { l.text("Uitlijning", "Alignment") };
             bar = bar.push(label(name)).push(pick_list(options, picked, |o: Located| Message::Place(PlaceMessage::Location(o.0))).text_size(12).padding([2, 6]).width(120));
         }
+        if tool == ModelTool::Stair {
+            // its sketch: an outline and the line it climbs along, or that line alone with landings
+            let on = self.modeller.sketch.as_ref().is_some_and(|s| s.stair);
+            let sketch = button(text(l.text("Schets", "Sketch")).size(12)).padding([3, 10]).style(move |_, st| p.ribbon_button(on, st)).on_press(Message::StairSketch);
+            bar = bar.push(sketch);
+        }
         if tool == ModelTool::Wall {
             let on = self.modeller.placement.rectangle;
             let rectangle = button(text(l.text("Rechthoek", "Rectangle")).size(12)).padding([3, 10]).style(move |_, st| p.ribbon_button(on, st)).on_press(Message::Place(PlaceMessage::Rectangle(!on)));
@@ -689,7 +706,7 @@ impl App {
                     }
                 }
             }
-            ModelTool::Point | ModelTool::Appliance | ModelTool::Door | ModelTool::Window | ModelTool::Duct | ModelTool::RoundDuct | ModelTool::Pipe | ModelTool::CableTray => return None,
+            ModelTool::Point | ModelTool::Appliance | ModelTool::Stair | ModelTool::Door | ModelTool::Window | ModelTool::Duct | ModelTool::RoundDuct | ModelTool::Pipe | ModelTool::CableTray => return None,
         }
         Some(choices)
     }

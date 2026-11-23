@@ -59,6 +59,8 @@ pub enum ElementField {
     /// level one's height above its base.
     GridAlong(usize),
     GridUp(usize),
+    /// How many steps a stair has.
+    Risers,
     /// An end plate's thickness, its margin past the profile, its bolts' and holes' diameter, and
     /// how many bolts in each row.
     PlateThickness,
@@ -109,6 +111,10 @@ fn value(shape: &Shape, field: ElementField) -> Option<f64> {
         (Shape::Planar(PlanarDef { form: PlanarForm::Slab { top, .. }, .. }), F::Base) => Some(*top),
         (Shape::Planar(PlanarDef { form: PlanarForm::Slab { slope, .. }, .. }), F::Slope) => Some(slope.map_or(0.0, |s| s.angle.to_degrees())),
         (Shape::Planar(PlanarDef { form: PlanarForm::Slab { slope: Some(s), outline, .. }, .. }), F::Eave) => Some((s.edge % outline.len().max(1) + 1) as f64),
+        (Shape::Planar(PlanarDef { form: PlanarForm::Stair { height, .. }, .. }), F::Height) => Some(*height),
+        (Shape::Planar(PlanarDef { form: PlanarForm::Stair { base, .. }, .. }), F::Base) => Some(*base),
+        (Shape::Planar(PlanarDef { form: PlanarForm::Stair { risers, .. }, .. }), F::Risers) => Some(*risers as f64),
+        (Shape::Planar(PlanarDef { form: PlanarForm::Stair { shape: bim_core::StairShape::Run { width, .. }, .. }, .. }), F::Width) => Some(*width),
         (Shape::Planar(p), F::Thickness) => Some(p.total_thickness()),
         (Shape::Planar(p), F::Along(i)) => opening(&p.openings, i).map(|o| o.along),
         (Shape::Planar(p), F::Sill(i)) => opening(&p.openings, i).map(|o| o.sill),
@@ -207,6 +213,10 @@ fn with_value(shape: &Shape, field: ElementField, v: f64) -> Option<Shape> {
             *slope = (v.abs() > 1e-9).then(|| bim_core::Slope { edge, angle: v.to_radians() });
         }
         (Shape::Planar(PlanarDef { form: PlanarForm::Slab { slope: Some(s), outline, .. }, .. }), F::Eave) if v >= 1.0 && v.fract() == 0.0 && v <= outline.len() as f64 => s.edge = v as usize - 1,
+        (Shape::Planar(PlanarDef { form: PlanarForm::Stair { height, .. }, .. }), F::Height) => set(height),
+        (Shape::Planar(PlanarDef { form: PlanarForm::Stair { base, .. }, .. }), F::Base) => set(base),
+        (Shape::Planar(PlanarDef { form: PlanarForm::Stair { risers, .. }, .. }), F::Risers) if v >= 2.0 && v.fract() == 0.0 && v <= 10_000.0 => *risers = v as usize,
+        (Shape::Planar(PlanarDef { form: PlanarForm::Stair { shape: bim_core::StairShape::Run { width, .. }, .. }, .. }), F::Width) => set(width),
         // a layered element is as thick as its type's layers
         (Shape::Planar(p), F::Thickness) if p.build_up.is_none() => set(&mut p.thickness),
         (Shape::Planar(p), F::Along(i)) => set(&mut p.openings.get_mut(i)?.along),
@@ -484,8 +494,9 @@ impl App {
             rows = rows.push(button(text(l.text("Elementtekening", "Element drawing")).size(12)).padding([3, 10]).style(move |_, s| p.row_button(s)).on_press(Message::ElementDrawing(l)));
         }
         let has = |f: F| value(&shape, f).is_some();
-        let fields: [(F, &str); 11] = [
+        let fields: [(F, &str); 12] = [
             (F::Height, l.text("Hoogte (m)", "Height (m)")),
+            (F::Risers, l.text("Aantal optreden", "Risers")),
             (F::Thickness, l.text("Dikte (m)", "Thickness (m)")),
             (F::Base, l.text("Basis (m)", "Base (m)")),
             (F::Width, l.text("Breedte (m)", "Width (m)")),

@@ -373,6 +373,202 @@ pub enum PlanarForm {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         slope: Option<Slope>,
     },
+    /// A stair from `base` up `height` in `risers` equal steps: a tread on every step but the
+    /// last, which is the floor it reaches. The element's thickness is how thick it is under its
+    /// treads. See [`StairShape`] for where its treads lie.
+    Stair {
+        base: f64,
+        height: f64,
+        risers: usize,
+        shape: StairShape,
+    },
+}
+
+/// Where the treads of a stair lie in plan.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StairShape {
+    /// Along a line from its foot, `width` wide: a flight on every stretch of `path`, and a
+    /// landing (a tread as wide as the stair is) on every corner of it.
+    Run { path: Vec<DVec2>, width: f64 },
+    /// Within an outline: the outline is cut into treads across the way it climbs, from `foot`
+    /// to `head`. What of the outline lies before the foot or past the head is left out.
+    Outline { outline: Vec<DVec2>, foot: DVec2, head: DVec2 },
+}
+
+impl StairShape {
+    /// Its points in plan, to move or turn it by.
+    pub fn points_mut(&mut self) -> Box<dyn Iterator<Item = &mut DVec2> + '_> {
+        match self {
+            StairShape::Run { path, .. } => Box::new(path.iter_mut()),
+            StairShape::Outline { outline, foot, head } => Box::new(outline.iter_mut().chain([foot, head])),
+        }
+    }
+}
+
+/// The fewest steps a stair has.
+pub const FEWEST_RISERS: usize = 2;
+
+/// The treads of a stair in plan, from its foot up, each a polygon (anticlockwise) with how many
+/// steps above the base its top is. A landing is a tread among them.
+pub fn stair_treads(risers: usize, shape: &StairShape) -> Result<Vec<(Vec<DVec2>, usize)>, Refusal> {
+    if risers < FEWEST_RISERS || risers > 10_000 {
+        return Err(Refusal::NotPositive);
+    }
+    let treads = risers - 1;
+    let ccw = |mut ring: Vec<DVec2>| {
+        let area: f64 = (0..ring.len()).map(|i| ring[i].perp_dot(ring[(i + 1) % ring.len()])).sum();
+        if area < 0.0 {
+            ring.reverse();
+        }
+        ring
+    };
+    match shape {
+        StairShape::Run { path, width } => {
+            if path.len() < 2 || !positive(*width) || path.iter().any(|p| !p.is_finite()) {
+                return Err(Refusal::NotPositive);
+            }
+            let half = width / 2.0;
+            let flights = path.len() - 1;
+            // each flight between its landings: where it starts, the way it runs and how long it is
+            let mut runs = Vec::with_capacity(flights);
+            for i in 0..flights {
+                let dir = (path[i + 1] - path[i]).try_normalize().ok_or(Refusal::ZeroLength)?;
+                let from = path[i] + if i > 0 { dir * half } else { DVec2::ZERO };
+                let to = path[i + 1] - if i + 1 < flights { dir * half } else { DVec2::ZERO };
+                let length = (to - from).dot(dir);
+                if length <= LINEAR_TOLERANCE {
+                    return Err(Refusal::NotPositive);
+                }
+                runs.push((from, dir, length));
+            }
+            // the treads that are no landing, shared out by the flights' lengths, one each at least
+            let landings = flights - 1;
+            if treads < landings + flights {
+                return Err(Refusal::NotPositive);
+            }
+            let free = treads - landings;
+            let total: f64 = runs.iter().map(|r| r.2).sum();
+            let mut counts: Vec<usize> = runs.iter().map(|r| ((free as f64 * r.2 / total).floor() as usize).max(1)).collect();
+            // what rounding left over goes to the flights with the deepest treads; too many come
+            // off those with the shallowest
+            while counts.iter().sum::<usize>() < free {
+                let k = (0..flights).max_by(|a, b| (runs[*a].2 / counts[*a] as f64).total_cmp(&(runs[*b].2 / counts[*b] as f64))).unwrap_or(0);
+                counts[k] += 1;
+            }
+            while counts.iter().sum::<usize>() > free {
+                let Some(k) = (0..flights).filter(|k| counts[*k] > 1).min_by(|a, b| (runs[*a].2 / counts[*a] as f64).total_cmp(&(runs[*b].2 / counts[*b] as f64))) else { return Err(Refusal::NotPositive) };
+                counts[k] -= 1;
+            }
+            let mut out = Vec::with_capacity(treads);
+            let mut step = 0;
+            for (i, ((from, dir, length), count)) in runs.iter().zip(&counts).enumerate() {
+                let (going, left) = (length / *count as f64, dir.perp() * half);
+                for j in 0..*count {
+                    let (a, b) = (*from + *dir * (j as f64 * going), *from + *dir * ((j + 1) as f64 * going));
+                    step += 1;
+                    out.push((vec![a - left, b - left, b + left, a + left], step));
+                }
+                if i + 1 < flights {
+                    // the landing: between the end of this flight and the start of the next, out
+                    // to its outer corner
+                    let (next, way, _) = runs[i + 1];
+                    let (end, corner) = (*from + *dir * *length, path[i + 1]);
+                    let across = way.perp() * half;
+                    let points = [end - left, end + left, next - across, next + across, corner + (*dir - way) * half, corner - (*dir - way) * half];
+                    step += 1;
+                    out.push((hull(&points), step));
+                }
+            }
+            Ok(out)
+        }
+        StairShape::Outline { outline, foot, head } => {
+            if outline.len() < 3 || outline.iter().chain([foot, head]).any(|p| !p.is_finite()) {
+                return Err(Refusal::NotPositive);
+            }
+            let dir = (*head - *foot).try_normalize().ok_or(Refusal::ZeroLength)?;
+            let going = (*head - *foot).length() / treads as f64;
+            if going <= LINEAR_TOLERANCE {
+                return Err(Refusal::NotPositive);
+            }
+            let ring = ccw(outline.clone());
+            let mut out = Vec::with_capacity(treads);
+            for j in 0..treads {
+                // what of the outline lies between this tread's two riser lines
+                let (lo, hi) = (j as f64 * going, (j + 1) as f64 * going);
+                let strip = clip(&clip(&ring, *foot, dir, lo, true), *foot, dir, hi, false);
+                let area: f64 = (0..strip.len()).map(|i| strip[i].perp_dot(strip[(i + 1) % strip.len()])).sum::<f64>() / 2.0;
+                if strip.len() >= 3 && area > LINEAR_TOLERANCE * going {
+                    out.push((strip, j + 1));
+                }
+            }
+            if out.is_empty() {
+                return Err(Refusal::NotPositive);
+            }
+            Ok(out)
+        }
+    }
+}
+
+/// `ring` cut by the line across `dir` at `at` along it from `origin`: what lies past it
+/// (`keep_past`) or before it.
+fn clip(ring: &[DVec2], origin: DVec2, dir: DVec2, at: f64, keep_past: bool) -> Vec<DVec2> {
+    let side = |p: DVec2| if keep_past { (p - origin).dot(dir) - at } else { at - (p - origin).dot(dir) };
+    let mut out: Vec<DVec2> = Vec::with_capacity(ring.len() + 2);
+    for i in 0..ring.len() {
+        let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
+        let (da, db) = (side(a), side(b));
+        if da >= 0.0 {
+            out.push(a);
+        }
+        if (da > 0.0 && db < 0.0) || (da < 0.0 && db > 0.0) {
+            out.push(a + (b - a) * (da / (da - db)));
+        }
+    }
+    // points that fell together are one
+    out.dedup_by(|a, b| a.distance(*b) <= LINEAR_TOLERANCE);
+    if out.len() > 1 && out[0].distance(out[out.len() - 1]) <= LINEAR_TOLERANCE {
+        out.pop();
+    }
+    out
+}
+
+/// The convex outline round `points`, anticlockwise.
+fn hull(points: &[DVec2]) -> Vec<DVec2> {
+    let mut sorted = points.to_vec();
+    sorted.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+    sorted.dedup_by(|a, b| a.distance(*b) <= LINEAR_TOLERANCE);
+    let mut chain = |points: &mut dyn Iterator<Item = DVec2>| {
+        let mut out: Vec<DVec2> = Vec::new();
+        for p in points {
+            while out.len() >= 2 && (out[out.len() - 1] - out[out.len() - 2]).perp_dot(p - out[out.len() - 1]) <= LINEAR_TOLERANCE * LINEAR_TOLERANCE {
+                out.pop();
+            }
+            out.push(p);
+        }
+        out.pop();
+        out
+    };
+    let mut ring = chain(&mut sorted.iter().copied());
+    ring.extend(chain(&mut sorted.iter().rev().copied()));
+    ring
+}
+
+/// The solids of a stair: a block under every tread, `thickness` thicker than a step is high (so
+/// each stands on the one below it), none reaching under the stair's base.
+pub fn stair_solids(thickness: f64, base: f64, height: f64, risers: usize, shape: &StairShape) -> Result<Vec<Solid>, Refusal> {
+    if !positive(thickness) || !positive(height) || !base.is_finite() {
+        return Err(Refusal::NotPositive);
+    }
+    let rise = height / risers.max(1) as f64;
+    let mut solids = Vec::new();
+    for (ring, step) in stair_treads(risers, shape)? {
+        let top = step as f64 * rise;
+        let foot = (top - rise - thickness).max(0.0);
+        let axes = Axes::new(DVec3::new(0.0, 0.0, base + foot), DVec3::X, DVec3::Z)?;
+        solids.push(Solid::extrude(&Profile::new(ring, Vec::new())?, &axes, top - foot)?);
+    }
+    Ok(solids)
 }
 
 /// What a slab is in the building: it is made the same, and classed and listed by this.
@@ -741,6 +937,7 @@ impl Element {
             Shape::Planar(PlanarDef { form: PlanarForm::Slab { role: SlabRole::Roof, .. }, .. }) => "IfcRoof",
             Shape::Planar(PlanarDef { form: PlanarForm::Slab { role: SlabRole::Ceiling, .. }, .. }) => "IfcCovering",
             Shape::Planar(PlanarDef { form: PlanarForm::Slab { .. }, .. }) => "IfcSlab",
+            Shape::Planar(PlanarDef { form: PlanarForm::Stair { .. }, .. }) => "IfcStair",
             Shape::System(_) => "IfcCurtainWall",
             // a join with parts of its own is an assembly of them; one without is a relation only
             Shape::Connection(ConnectionDef { kind: ConnectionKind::EndPlate(_) | ConnectionKind::FinPlate(_), .. }) => "IfcElementAssembly",
@@ -789,6 +986,10 @@ impl Shape {
             Shape::Linear(l) => Some(l.start),
             Shape::Planar(PlanarDef { form: PlanarForm::Wall { start, base, .. }, .. }) => Some(start.extend(*base)),
             Shape::Planar(PlanarDef { form: PlanarForm::Slab { outline, top, .. }, .. }) => outline.first().map(|p| p.extend(*top)),
+            Shape::Planar(PlanarDef { form: PlanarForm::Stair { base, shape, .. }, .. }) => match shape {
+                StairShape::Run { path, .. } => path.first().map(|p| p.extend(*base)),
+                StairShape::Outline { foot, .. } => Some(foot.extend(*base)),
+            },
             Shape::System(s) => Some(s.start.extend(s.base)),
             Shape::Connection(_) => None,
         }
@@ -811,6 +1012,10 @@ impl Shape {
             Shape::Planar(PlanarDef { form: PlanarForm::Slab { outline, holes, top, .. }, .. }) => {
                 outline.iter_mut().chain(holes.iter_mut().flatten()).for_each(|p| *p += flat);
                 *top += delta.z;
+            }
+            Shape::Planar(PlanarDef { form: PlanarForm::Stair { base, shape, .. }, .. }) => {
+                shape.points_mut().for_each(|p| *p += flat);
+                *base += delta.z;
             }
             Shape::System(s) => {
                 s.start += flat;
@@ -928,6 +1133,9 @@ pub fn planar_solids(p: &PlanarDef) -> Result<Vec<Solid>, Refusal> {
     if !positive(thickness) {
         return Err(Refusal::NotPositive);
     }
+    if let PlanarForm::Stair { base, height, risers, shape } = &p.form {
+        return stair_solids(thickness, *base, *height, *risers, shape);
+    }
     if let Some(b) = &p.build_up {
         b.check()?;
     }
@@ -944,6 +1152,10 @@ pub fn planar_parts(p: &PlanarDef) -> Result<Vec<(Option<String>, Solid)>, Refus
 /// The solids of a planar element as [`planar_parts`] makes them, a wall reaching `extend` metres
 /// past its start and its end (to be cut back to its corners, see `joins`); a slab as it is.
 pub fn planar_parts_extended(p: &PlanarDef, extend: [f64; 2]) -> Result<Vec<(Option<String>, Solid)>, Refusal> {
+    // a stair is its treads, of one material
+    if let PlanarForm::Stair { .. } = &p.form {
+        return Ok(planar_solids(p)?.into_iter().map(|solid| (None, solid)).collect());
+    }
     let Some(b) = &p.build_up else {
         let thickness = p.total_thickness();
         if !positive(thickness) {
@@ -1030,6 +1242,8 @@ fn planar_base(p: &PlanarDef, thickness: f64, extend: [f64; 2]) -> Result<(Vec<P
             let profile = Profile::new(ring.iter().map(on).collect(), holes.iter().map(|h| h.iter().map(on).collect()).collect())?;
             Ok((vec![profile], axes))
         }
+        // a stair is no one profile extruded (see `stair_solids`)
+        PlanarForm::Stair { .. } => Err(Refusal::Degenerate),
     }
 }
 
@@ -1488,5 +1702,55 @@ mod tests {
         let json = serde_json::to_string(&e).unwrap();
         assert_eq!(serde_json::from_str::<Element>(&json).unwrap(), e, "{json}");
         assert_eq!(e.reshaped(&grid, beam(5.0)).grade.as_deref(), Some("S355"));
+    }
+
+    #[test]
+    fn a_stair_drawn_as_a_line_has_a_tread_on_every_step_but_the_last() {
+        let stair = |path: Vec<DVec2>, risers: usize| PlanarDef { form: PlanarForm::Stair { base: 0.0, height: 3.0, risers, shape: StairShape::Run { path, width: 1.0 } }, thickness: 0.15, openings: Vec::new(), build_up: None };
+        // 16 steps of 187.5 mm over 3.75 m: 15 treads of 250 mm
+        let straight = stair(vec![DVec2::ZERO, DVec2::new(3.75, 0.0)], 16);
+        let solids = planar_solids(&straight).unwrap();
+        assert_eq!(solids.len(), 15);
+        let (lo, hi) = solids[0].bounds();
+        assert!((lo - DVec3::new(0.0, -0.5, 0.0)).length() < 1e-9 && (hi - DVec3::new(0.25, 0.5, 0.1875)).length() < 1e-9, "{lo} {hi}");
+        let (lo, hi) = solids[14].bounds();
+        // the top tread is one step under the floor it reaches, and 0.15 thick under the step before it
+        assert!((hi.z - (3.0 - 0.1875)).abs() < 1e-9 && (hi.x - 3.75).abs() < 1e-9 && (lo.z - (3.0 - 2.0 * 0.1875 - 0.15)).abs() < 1e-9, "{lo} {hi}");
+        assert!(solids.iter().all(|s| s.check().is_ok()));
+        // a quarter turn: a landing 1 by 1 on the corner, a tread among the others
+        let turned = stair(vec![DVec2::ZERO, DVec2::new(3.0, 0.0), DVec2::new(3.0, 3.0)], 16);
+        let PlanarForm::Stair { risers, shape, .. } = &turned.form else { panic!() };
+        let treads = stair_treads(*risers, shape).unwrap();
+        assert_eq!(treads.len(), 15);
+        assert_eq!(treads.iter().map(|t| t.1).collect::<Vec<_>>(), (1..=15).collect::<Vec<_>>());
+        let area = |ring: &[DVec2]| (0..ring.len()).map(|i| ring[i].perp_dot(ring[(i + 1) % ring.len()])).sum::<f64>() / 2.0;
+        let landing = treads.iter().find(|t| (area(&t.0) - 1.0).abs() < 1e-9).expect("a landing of 1 by 1");
+        assert!(landing.0.iter().all(|p| (2.5 - 1e-9..=3.5 + 1e-9).contains(&p.x) && (-0.5 - 1e-9..=0.5 + 1e-9).contains(&p.y)), "{:?}", landing.0);
+        assert_eq!(planar_solids(&turned).unwrap().len(), 15);
+        // too few steps for its flights and landing, or none at all, is refused
+        assert_eq!(planar_solids(&stair(vec![DVec2::ZERO, DVec2::new(3.0, 0.0), DVec2::new(3.0, 3.0)], 3)).err(), Some(Refusal::NotPositive));
+        assert_eq!(planar_solids(&stair(vec![DVec2::ZERO, DVec2::new(3.0, 0.0)], 1)).err(), Some(Refusal::NotPositive));
+        // it is an IfcStair, moves with its points and is kept in the file
+        let e = Element::in_project(&TileGrid::default(), "Stair", None, Shape::Planar(turned.clone()));
+        assert_eq!(e.class(), "IfcStair");
+        assert_eq!(serde_json::from_str::<PlanarDef>(&serde_json::to_string(&turned).unwrap()).unwrap(), turned);
+    }
+
+    #[test]
+    fn a_stair_in_an_outline_is_the_outline_cut_into_treads_across_its_way() {
+        // a tapering footprint: 2 wide at its foot, 1 wide at its head, 3 long; 11 steps: 10 treads of 0.3
+        let outline = vec![DVec2::new(0.0, -1.0), DVec2::new(3.0, -0.5), DVec2::new(3.0, 0.5), DVec2::new(0.0, 1.0)];
+        let shape = StairShape::Outline { outline, foot: DVec2::ZERO, head: DVec2::new(3.0, 0.0) };
+        let treads = stair_treads(11, &shape).unwrap();
+        assert_eq!(treads.len(), 10);
+        let area = |ring: &[DVec2]| (0..ring.len()).map(|i| ring[i].perp_dot(ring[(i + 1) % ring.len()])).sum::<f64>() / 2.0;
+        // together they are the footprint (4.5 m2), each narrower than the one before
+        assert!((treads.iter().map(|t| area(&t.0)).sum::<f64>() - 4.5).abs() < 1e-9);
+        assert!(treads.windows(2).all(|t| area(&t[1].0) < area(&t[0].0)));
+        let p = PlanarDef { form: PlanarForm::Stair { base: 1.0, height: 2.2, risers: 11, shape }, thickness: 0.1, openings: Vec::new(), build_up: None };
+        let solids = planar_solids(&p).unwrap();
+        assert!(solids.iter().all(|s| s.check().is_ok()));
+        let (lo, hi) = solids[9].bounds();
+        assert!((hi.z - (1.0 + 2.0)).abs() < 1e-9 && (lo.x - 2.7).abs() < 1e-9, "{lo} {hi}");
     }
 }
