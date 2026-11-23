@@ -40,7 +40,8 @@ impl CutJob {
         let (inks, unit_ink) = inks(looks.as_deref(), index.as_deref());
         let inked = |l: usize, v: u32| index.as_ref().and_then(|ix| unit_ink.get(ix.unit(l, v)).copied().flatten());
         let index = index.clone().filter(|_| units.iter().chain(&halftone).any(|u| *u));
-        let hidden = |l: usize, v: u32| index.as_ref().is_some_and(|ix| units.get(ix.unit(l, v)).copied().unwrap_or(false));
+        // reinforcing bars are left out: a reinforcement drawing has its own signs for them
+        let hidden = |l: usize, v: u32| model.project.bar_at(l, v) || index.as_ref().is_some_and(|ix| units.get(ix.unit(l, v)).copied().unwrap_or(false));
         let faint = |l: usize, v: u32| index.as_ref().is_some_and(|ix| halftone.get(ix.unit(l, v)).copied().unwrap_or(false));
         // the pieces joined elements of one material make: the seams within one are not drawn
         let pieces = crate::hatching::pieces(&model, bim_library::DrawingStandard::Nen47);

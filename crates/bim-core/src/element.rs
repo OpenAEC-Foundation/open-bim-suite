@@ -425,6 +425,13 @@ pub struct Element {
     /// The reinforcement of a concrete member with a rectangular section, when it is given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reinforcement: Option<crate::reinforcement::Reinforcement>,
+    /// The nets in a slab or a wall, when they are given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nets: Option<crate::reinforcement::Nets>,
+    /// Reinforcement drawn besides the usual one: stirrups or bars over a stretch of a
+    /// reinforced member, bars along a line in a slab with nets.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extras: Vec<crate::reinforcement::Extra>,
     pub shape: Shape,
 }
 
@@ -435,12 +442,12 @@ impl Element {
     pub fn in_project(grid: &TileGrid, name: impl Into<String>, level: Option<String>, mut shape: Shape) -> Self {
         let tile = shape.placement().map_or(TileKey::default(), |p| grid.tile_of(p));
         shape.translate(-grid.origin(tile));
-        Self { id: ElementId(0), name: name.into(), tile, level, top: None, grade: None, reinforcement: None, shape }
+        Self { id: ElementId(0), name: name.into(), tile, level, top: None, grade: None, reinforcement: None, nets: None, extras: Vec::new(), shape }
     }
 
     /// The same element (its id, name, level, top and grade) with `shape`, given in project coordinates.
     pub fn reshaped(&self, grid: &TileGrid, shape: Shape) -> Self {
-        Self { id: self.id, top: self.top.clone(), grade: self.grade.clone(), reinforcement: self.reinforcement, ..Self::in_project(grid, self.name.clone(), self.level.clone(), shape) }
+        Self { id: self.id, top: self.top.clone(), grade: self.grade.clone(), reinforcement: self.reinforcement, nets: self.nets, extras: self.extras.clone(), ..Self::in_project(grid, self.name.clone(), self.level.clone(), shape) }
     }
 
     /// Its definition in project coordinates.

@@ -293,6 +293,10 @@ pub struct ProjectData {
     /// triangles, and its material in `part_materials`; sorted by layer and first index. A cut
     /// through such an element is a face per part, each hatched as its material.
     pub parts: Vec<(usize, u32, u32, u32)>,
+    /// The reinforcing bars modelled elements carry in their concrete: the layer of the model,
+    /// the first vertex and the vertex count of each run of them; sorted. They show in 3D and
+    /// are left out of the cut drawings, where a reinforcement drawing has its own signs for them.
+    pub bars: Vec<(usize, u32, u32)>,
     /// What the parts are made of: each material with how a cut through it is hatched.
     pub part_materials: Vec<crate::hatching::PartMaterial>,
     /// The earth under the terrain a section cuts (Revit, the settings of the site): the height
@@ -364,6 +368,13 @@ pub struct Drawings {
 }
 
 impl ProjectData {
+    /// Whether vertex `v` of `layer` is of a reinforcing bar (see `bars`).
+    pub fn bar_at(&self, layer: usize, v: u32) -> bool {
+        let Some(k) = self.bars.partition_point(|b| (b.0, b.1) <= (layer, v)).checked_sub(1) else { return false };
+        let (of, first, count) = self.bars[k];
+        of == layer && v < first + count
+    }
+
     /// Puts in the drawings that were read after the model.
     pub fn take_over(&mut self, drawings: Drawings) {
         self.sheets = drawings.sheets;

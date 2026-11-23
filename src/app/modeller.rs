@@ -183,6 +183,10 @@ pub struct Modeller {
     pub level: Option<String>,
     /// The Grid tool is on: two clicks draw a grid line (see `grids`).
     pub grid_tool: bool,
+    /// The reinforcement tool that is on (see `rebar`), and the element its first click was on:
+    /// that click's place is the first of `points`.
+    pub rebar_tool: Option<super::rebar::RebarTool>,
+    pub rebar_on: Option<ElementId>,
     /// The points clicked so far for the tool (scene coordinates).
     pub points: Vec<DVec3>,
     /// The viewer model that shows the elements (its id), an entry of `App::models`.
@@ -199,7 +203,7 @@ pub struct Modeller {
     pub pile_schedule: String,
     /// What the bar schedule, its columns and its kinds of bar are called, in the interface
     /// language (see `structure::BAR_WORDS`), and the name the schedule has now.
-    pub bar_words: [&'static str; 11],
+    pub bar_words: [&'static str; 19],
     pub bar_schedule: String,
     /// The same of the precast schedule (see `structure::PLANK_WORDS`).
     pub plank_words: [&'static str; 8],
@@ -352,6 +356,8 @@ impl App {
         let same = tool.map(|t| t.0) == self.modeller.tool.map(|t| t.0);
         self.modeller.tool = if same { None } else { tool };
         self.modeller.grid_tool = false;
+        self.modeller.rebar_tool = None;
+        self.modeller.rebar_on = None;
         self.modeller.points.clear();
         self.modeller.cursor = None;
         self.modeller.aim = None;
@@ -745,7 +751,7 @@ impl App {
     pub(super) fn show_modelled(&mut self) {
         self.modeller.touched = true;
         let levels: Vec<(String, String)> = self.document.levels().iter().map(|l| (l.path.clone(), l.name.clone())).collect();
-        let (mut layers, parts) = viewer_layers(&self.modeller.model, &levels, &self.library);
+        let (mut layers, parts, bars) = viewer_layers(&self.modeller.model, &levels, &self.library);
         // the spaces its walls close in stand beside its elements, on a layer of their own
         layers.extend(spaces::space_layer(&self.spaces(), &levels));
         let mut built = Model::new(PathBuf::from("model.ifcx"), "IFCX", layers);
@@ -756,6 +762,7 @@ impl App {
         built.project.cut_patterns = crate::hatching::library_patterns(&self.library);
         // an element of several materials is cut a face per part, each hatched as its material
         built.project.parts = parts;
+        built.project.bars = bars;
         built.project.part_materials = crate::hatching::part_materials(&self.library);
         // and its drawing standard: the kinds of drawing and their settings, a node each
         built.project.types.extend(bim_library::drawing::nodes(&self.standard));
@@ -1007,9 +1014,10 @@ fn class_colour(class: &str) -> [f32; 3] {
 /// `levels` names the levels by path.
 /// A part of a layered element has the colour of its layer's material in `library`.
 pub fn viewer_model(model: &bim_core::Model, levels: &[(String, String)], library: &bim_library::Library) -> Model {
-    let (layers, parts) = viewer_layers(model, levels, library);
+    let (layers, parts, bars) = viewer_layers(model, levels, library);
     let mut built = Model::new(PathBuf::from("model.ifcx"), "IFCX", layers);
     built.project.parts = parts;
+    built.project.bars = bars;
     built.project.part_materials = crate::hatching::part_materials(library);
     built.project.cut_patterns = crate::hatching::library_patterns(library);
     built
@@ -1018,10 +1026,11 @@ pub fn viewer_model(model: &bim_core::Model, levels: &[(String, String)], librar
 /// The layers of the model shown: one per class, each element with its properties; and the
 /// parts of the elements that are of several materials (see `ProjectData::parts`): the layer,
 /// the first index and the index count of each part, and its material in the library's order.
-fn viewer_layers(model: &bim_core::Model, levels: &[(String, String)], library: &bim_library::Library) -> (Vec<Layer>, Vec<(usize, u32, u32, u32)>) {
+fn viewer_layers(model: &bim_core::Model, levels: &[(String, String)], library: &bim_library::Library) -> (Vec<Layer>, Vec<(usize, u32, u32, u32)>, Vec<(usize, u32, u32)>) {
     let grid = model.grid;
     let mut layers: Vec<Layer> = Vec::new();
     let mut of_parts: Vec<(usize, u32, u32, u32)> = Vec::new();
+    let mut bars: Vec<(usize, u32, u32)> = Vec::new();
     for element in model.iter() {
         let Ok(parts) = model.evaluate(element.id) else { continue };
         if parts.is_empty() {
@@ -1045,6 +1054,12 @@ fn viewer_layers(model: &bim_core::Model, levels: &[(String, String)], library: 
             // tile-local f64 to the scene's f32, through the tile origin in f64
             let origin = grid.origin(part.tile);
             let base = (layer.positions.len() / 3) as u32;
+            if part.class == bim_core::reinforcement::BAR_CLASS {
+                match bars.last_mut() {
+                    Some(run) if run.0 == k && run.1 + run.2 == base => run.2 += mesh.positions.len() as u32,
+                    _ => bars.push((k, base, mesh.positions.len() as u32)),
+                }
+            }
             let material = part.material.as_deref().and_then(|key| library.material(key));
             let colour = material.map_or_else(|| class_colour(part.class).map(|c| (c * 255.0).round() as u8), |m| m.colour);
             let colours = layer.colors.get_or_insert_with(Vec::new);
@@ -1064,7 +1079,8 @@ fn viewer_layers(model: &bim_core::Model, levels: &[(String, String)], library: 
         layer.props.push((element.id.0, properties(model, element, &parts, level, library)));
     }
     of_parts.sort_unstable();
-    (layers, of_parts)
+    bars.sort_unstable();
+    (layers, of_parts, bars)
 }
 
 /// The NL-SfB code of an element: of its build-up, its linear type (found by the name its
@@ -1127,6 +1143,9 @@ fn properties(model: &bim_core::Model, e: &Element, parts: &[bim_core::Part], le
         }
         Shape::Planar(p) => {
             put("Thickness", m(p.total_thickness()));
+            if let Some(n) = &e.nets {
+                put("Reinforcement", crate::app::element_props::nets_text(n, "bottom", "top"));
+            }
             if let Some(b) = &p.build_up {
                 // property values are data, in English as an IFC file's
                 put("Type", library.name(&b.id, bim_library::Lang::En).unwrap_or_else(|| b.id.clone()));
