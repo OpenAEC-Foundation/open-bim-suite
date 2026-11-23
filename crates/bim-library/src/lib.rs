@@ -53,7 +53,7 @@ pub use library::Library;
 pub use material::{DrawingStandard, HatchKind, HatchPattern, Material, Names};
 pub use standard::{Below, HatchStandard, MaterialHatch};
 pub use profile::{LinearRole, LinearType, ProfileShape, Series, SteelProfile};
-pub use system::{Clearance, Corner, Framing, Gauge, Grid, HeaderBand, StudStart, Members, Panels, Pattern, SystemGroup, SystemLayer, SystemType, Trimmer, Cores, Division};
+pub use system::{Clearance, Corner, Framing, Gauge, Grid, HeaderBand, StudStart, Members, Panels, Pattern, SystemGroup, SystemLayer, SystemType, Trimmer, Lintel, Cores, Division};
 
 use serde::{Deserialize, Serialize};
 

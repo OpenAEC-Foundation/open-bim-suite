@@ -595,6 +595,11 @@ fn elevation(model: &Model, element: &Element, s: &bim_core::SystemDef, t: &bim_
             outline(if members.iter().any(|m| drawn(&m)) { Pen::Beyond } else { Pen::Cut }, p);
         }
     }
+    // the lintels that carry it over its openings
+    let lintels: Vec<(Member, Option<&str>)> = own().filter(|p| p.class == "IfcBeam").map(|p| (faced(p), p.material.as_deref())).collect();
+    for (m, _) in &lintels {
+        outline(Pen::Cut, m);
+    }
     // its openings and those of the doors and windows standing in it: an outline and a cross
     let openings = model.openings_of(element.id);
     for o in &openings {
@@ -653,7 +658,9 @@ fn elevation(model: &Model, element: &Element, s: &bim_core::SystemDef, t: &bim_
     // its name, the panels numbered, and the members
     let thick = bim_library::millimetres(s.panel, bim_library::Lang::En);
     // courses too many to dimension one by one are counted: how many, and how high each is
-    let courses = if up.len() - 1 > SEAMS { format!(" · {} × {}", up.len() - 1, bim_library::millimetres(s.spacing.y, bim_library::Lang::En)) } else { String::new() };
+    // (counted by the grid: an opening cuts bricks, which is no course more)
+    let rows = if s.spacing.y > LINEAR_TOLERANCE { ((v1 - v0) / s.spacing.y).round().max(1.0) as usize } else { up.len() - 1 };
+    let courses = if up.len() - 1 > SEAMS { format!(" · {rows} × {}", bim_library::millimetres(s.spacing.y, bim_library::Lang::En)) } else { String::new() };
     let title = format!("{} · {} {thick} · {} × {} mm{courses} · 1:{}", element.name, named(&t.panel_material), mm(u1 - u0), mm(v1 - v0), PLAN_SCALE as i64);
     let mut y = v0 - (off * 2.5 + text);
     let before = d.texts.len();
@@ -677,6 +684,20 @@ fn elevation(model: &Model, element: &Element, s: &bim_core::SystemDef, t: &bim_
     list.sort_by(|a, b| b.0.cmp(&a.0));
     for (long, n) in list {
         d.texts.push(Text2d { pen: Pen::Text, at: [0.0, y], height: text, text: format!("{n} × {} {width}×{depth} L={long}", named(&t.member_material)), align: Align::Left, angle: 0.0 });
+        y -= text * 1.8;
+    }
+    // the lintels: as thick as the panels, alike ones counted together, the longest first
+    let mut over: Vec<((i64, i64, &str), usize)> = Vec::new();
+    for (m, material) in &lintels {
+        let key = (mm(m.section().0), mm(m.section().1), material.unwrap_or(""));
+        match over.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, n)) => *n += 1,
+            None => over.push((key, 1)),
+        }
+    }
+    over.sort_by(|a, b| b.0 .1.cmp(&a.0 .1));
+    for ((high, long, material), n) in over {
+        d.texts.push(Text2d { pen: Pen::Text, at: [0.0, y], height: text, text: format!("{n} × {} {thick}×{high} L={long}", named(material)), align: Align::Left, angle: 0.0 });
         y -= text * 1.8;
     }
     Some(d)
@@ -1051,18 +1072,21 @@ mod tests {
         let listed: usize = texts.iter().filter(|t| t.contains(" × ") && !t.contains("L=") && !t.contains("1:50")).map(|t| t.split(' ').next().unwrap().parse::<usize>().unwrap()).sum();
         assert_eq!(listed, panes, "{texts:?}");
         assert!(texts.iter().any(|t| t.contains("aluminium 50×150 L=")), "{texts:?}");
-        // brickwork is not drawn brick by brick: its outline, its courses and its bricks counted
-        let (m, id) = typed(16.0, Vec::new(), "system.masonry-waal-stretcher");
+        // brickwork is not drawn brick by brick: its outline, its courses and its bricks counted;
+        // a window in it is crossed and the lintel over it drawn and listed
+        let window = Opening { along: 4.0, sill: 0.9, width: 1.2, height: 1.2, framing: None };
+        let (m, id) = typed(16.0, vec![window], "system.masonry-waal-stretcher");
         let all = element_drawings(&m, m.get(id).unwrap(), &|key| key.to_string());
         assert_eq!(all.len(), 1);
         let d = &all[0];
-        assert_eq!(d.lines.iter().filter(|l| l.pen == Pen::Cut).count(), 4);
+        assert_eq!((d.lines.iter().filter(|l| l.pen == Pen::Cut).count(), d.lines.iter().filter(|l| l.pen == Pen::Detail).count()), (4 + 4, 6));
+        assert!(d.texts.iter().any(|t| t.text.starts_with("1 × concrete 100×11") && t.text.ends_with(" L=1400")), "{:?}", d.texts.iter().map(|t| &t.text).collect::<Vec<_>>());
         let texts: Vec<&str> = d.texts.iter().map(|t| t.text.as_str()).collect();
         assert!(texts[0].contains(" · 43 × 62.5 · 1:50"), "{texts:?}");
         let bricks: usize = texts.iter().filter(|t| t.contains(" × 100 × ")).map(|t| t.split(' ').next().unwrap().parse::<usize>().unwrap()).sum();
         assert!(bricks > 2500, "{bricks}");
         // alike bricks on one line: whole ones and halves at the ends of every other course
-        assert_eq!(texts.iter().filter(|t| t.contains(" × 100 × ")).count(), 2, "{texts:?}");
+        assert!(texts.iter().filter(|t| t.contains(" × 100 × ")).count() >= 2, "{texts:?}");
         let values: Vec<i64> = d.dimensions.iter().map(|x| mm(x.value)).collect();
         assert!(values.iter().any(|v| *v >= 16000) && values.iter().any(|v| (2690..=2710).contains(v)), "{values:?}");
     }

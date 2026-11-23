@@ -52,7 +52,7 @@ use crate::join::{self, JoinKind, Member, MemberEnd};
 use crate::profile::Profile;
 use crate::solid::{Axes, Plane, Solid};
 use crate::{positive, Refusal, LINEAR_TOLERANCE};
-use bim_library::system::{Cores, Corner, Framing, Gauge, Pattern, Trimmer, StudStart, SystemLayer, SystemType};
+use bim_library::system::{Cores, Corner, Framing, Gauge, Lintel, Pattern, Trimmer, StudStart, SystemLayer, SystemType};
 use bim_library::Library;
 use glam::{DVec2, DVec3};
 use serde::{Deserialize, Serialize};
@@ -99,6 +99,9 @@ pub struct SystemTypeDef {
     /// A floor of slabs: how the slabs an opening cuts through are carried.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trimmer: Option<Trimmer>,
+    /// Brickwork: how it is carried over an opening.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lintel: Option<Lintel>,
     /// Its bays are whole ones from its start, the last one cut to fit (a fitting slab), rather
     /// than equal ones.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -165,6 +168,7 @@ impl SystemDef {
             gauge: t.members.gauge,
             lying: t.lying.is_some(),
             trimmer: t.trimmer,
+            lintel: t.lintel,
             whole: t.whole,
             cores: t.cores,
             division: t.division,
@@ -194,6 +198,8 @@ struct Face<'a> {
     /// How its bays are divided along it.
     division: Division,
     panel: (f64, Option<&'a str>),
+    /// How it is carried over an opening (brickwork).
+    lintel: Option<Lintel>,
 }
 
 impl Face<'_> {
@@ -380,6 +386,7 @@ fn faces(s: &SystemDef) -> Vec<Face<'_>> {
         whole: t.is_some_and(|t| t.whole),
         division: s.divided(),
         panel: (s.panel, t.map(|t| t.panel_material.as_str())),
+        lintel: t.and_then(|t| t.lintel),
     };
     let layers = t.into_iter().flat_map(|t| &t.layers).map(|l| Face {
         offset: l.offset,
@@ -392,6 +399,7 @@ fn faces(s: &SystemDef) -> Vec<Face<'_>> {
         whole: false,
         division: Division::Equal,
         panel: (l.panels.thickness, Some(l.panels.material.as_str())),
+        lintel: None,
     });
     std::iter::once(own).chain(layers).collect()
 }
@@ -1008,6 +1016,32 @@ impl Line {
     fn grid(&self, f: &Face, openings: &[Opening], joints: &[f64], parts: &mut Vec<PartSolid>) -> Result<(), Refusal> {
         let (_, _, bay, row) = f.division(self.length, self.height);
         let w = f.width();
+        // brickwork is carried over an opening by a lintel: whole courses high, bearing either
+        // side; it takes the place of the bricks and joints there, as an opening does
+        let lintels: Vec<Opening> = match f.lintel.filter(|_| f.framing.is_none() && row > LINEAR_TOLERANCE) {
+            Some(rule) => openings
+                .iter()
+                .filter_map(|o| {
+                    let head = o.sill.max(0.0) + o.height;
+                    let courses = ((rule.height + w) / row).ceil().max(1.0);
+                    let high = courses * row - w;
+                    let (from, to) = ((o.along - rule.bearing).max(0.0), (o.along + o.width + rule.bearing).min(self.length));
+                    (head + high < self.height - LINEAR_TOLERANCE && to - from > LINEAR_TOLERANCE).then_some(Opening { along: from, sill: head, width: to - from, height: high, framing: None })
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        let held: Vec<Opening>;
+        let openings: &[Opening] = if lintels.is_empty() {
+            openings
+        } else {
+            held = openings.iter().chain(&lintels).copied().collect();
+            &held
+        };
+        for l in &lintels {
+            let lintel = self.panel(f, l.along, l.sill, l.width, l.height)?;
+            parts.push(PartSolid { class: "IfcBeam", material: Some("concrete".to_string()), ..lintel });
+        }
         // where division `i` along is, and row `j` up
         let lines = f.lines(self.length);
         let bays = lines.len() - 1;
@@ -1686,6 +1720,18 @@ mod tests {
                 let c = p.solid.positions.iter().fold(DVec3::ZERO, |sum, q| sum + *q) / p.solid.positions.len() as f64;
                 let inside = p.solid.positions.iter().all(|q| q.x > 1.5 + 1e-6 && q.x < 2.5 - 1e-6 && q.z > 0.9 + 1e-6 && q.z < 2.1 - 1e-6);
                 assert!(!inside, "{id}: a part in the window at {c}");
+            }
+            // over it in brickwork a concrete lintel: two courses high less a joint, bearing 100
+            // either side, and no brick or joint where it lies; sand-lime elements have none
+            let lintels: Vec<&PartSolid> = made.iter().filter(|p| p.class == "IfcBeam").collect();
+            assert_eq!(lintels.len(), usize::from(id.contains("waal")), "{id}");
+            for l in &lintels {
+                let (lo, hi) = l.solid.bounds();
+                assert!(l.material.as_deref() == Some("concrete") && (lo.x - 1.4).abs() < 1e-6 && (hi.x - 2.6).abs() < 1e-6 && (lo.z - 2.1).abs() < 1e-6 && (hi.z - 2.215).abs() < 1e-6, "{id}: {lo} {hi}");
+                for p in made.iter().filter(|p| p.class != "IfcBeam") {
+                    let within = p.solid.positions.iter().all(|q| q.x > 1.4 + 1e-6 && q.x < 2.6 - 1e-6 && q.z > 2.1 + 1e-6 && q.z < 2.215 - 1e-6);
+                    assert!(!within, "{id}: a part in the lintel");
+                }
             }
             let volume = |s: &SystemDef| parts(s).unwrap().iter().map(|p| p.solid.volume()).sum::<f64>();
             let thick = open.panel.max(open.member.y);

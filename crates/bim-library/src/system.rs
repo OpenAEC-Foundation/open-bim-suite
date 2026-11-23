@@ -453,6 +453,24 @@ impl Trimmer {
     }
 }
 
+/// How brickwork is carried over an opening: by a prefab concrete lintel as thick as the bricks,
+/// at least `height` high and as many whole courses as that takes (less the joint under the
+/// course above it), bearing `bearing` on the brickwork either side of the opening.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Lintel {
+    pub height: f64,
+    pub bearing: f64,
+}
+
+impl Lintel {
+    /// At least 100 high, bearing 100 either side.
+    pub const BRICKWORK: Lintel = Lintel { height: 0.1, bearing: 0.1 };
+
+    fn fits(&self) -> bool {
+        [self.height, self.bearing].into_iter().all(|v| v.is_finite() && v > 0.0)
+    }
+}
+
 /// How the bays of a system's face are divided along its line (and, but for slabs, its rows
 /// across it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -514,6 +532,9 @@ pub struct SystemType {
     /// A floor of slabs: how the slabs an opening cuts through are carried.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trimmer: Option<Trimmer>,
+    /// Brickwork: how it is carried over an opening.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lintel: Option<Lintel>,
     /// Its bays are whole ones from its start and the last one is cut to fit (slabs of a fixed
     /// width, the last a fitting slab), rather than equal ones as near the grid's as fit.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -651,7 +672,7 @@ impl SystemType {
             }
             known(&panels.material)?;
         }
-        if self.lying.is_some_and(|h| !h.is_finite()) || self.trimmer.is_some_and(|t| !t.fits()) || self.cores.is_some_and(|c| !c.fits()) {
+        if self.lying.is_some_and(|h| !h.is_finite()) || self.trimmer.is_some_and(|t| !t.fits()) || self.lintel.is_some_and(|l| !l.fits()) || self.cores.is_some_and(|c| !c.fits()) {
             return Err(LibraryError::NotPositive);
         }
         Ok(())
@@ -735,7 +756,7 @@ pub fn starter() -> Vec<SystemType> {
     use Pattern::*;
     use SystemGroup::*;
     let glass = || Panels::new("glass", 0.024);
-    let upright = |id: &str, group, grid, members, panels| SystemType { id: id.into(), group, grid, members, panels, layers: Vec::new(), corners: Corner::Butt, lying: None, code: None, trimmer: None, whole: false, cores: None, division: None };
+    let upright = |id: &str, group, grid, members, panels| SystemType { id: id.into(), group, grid, members, panels, layers: Vec::new(), corners: Corner::Butt, lying: None, code: None, trimmer: None, lintel: None, whole: false, cores: None, division: None };
     // aluminium and PVC frames are mitred at their corners
     let mitred = |t: SystemType| SystemType { corners: Corner::Mitre, ..t };
     // boards of `material` laid edge to edge, `bay` wide and `row` high; membranes come in rolls
@@ -887,13 +908,13 @@ pub fn starter() -> Vec<SystemType> {
         metal_stud(0.1, 1),
         metal_stud(0.1, 2),
         // bricks as panels, the mortar as members set back 5 mm from either face
-        upright("system.masonry-waal-stretcher", Masonry, Grid::new(0.22, 0.0625, RunningBond), Members::new(0.01, 0.09, "mortar"), Panels::new("brick", 0.1)),
-        upright("system.masonry-dik-stretcher", Masonry, Grid::new(0.22, 0.075, RunningBond), Members::new(0.01, 0.09, "mortar"), Panels::new("brick", 0.1)),
-        upright("system.masonry-waal-stack", Masonry, Grid::new(0.22, 0.0625, Stack), Members::new(0.01, 0.09, "mortar"), Panels::new("brick", 0.1)),
-        upright("system.masonry-waal-quarter", Masonry, Grid::new(0.22, 0.0625, Quarter), Members::new(0.01, 0.09, "mortar"), Panels::new("brick", 0.1)),
-        upright("system.masonry-waal-english", Masonry, Grid::new(0.22, 0.0625, English), Members::new(0.01, 0.2, "mortar"), Panels::new("brick", 0.21)),
-        upright("system.masonry-waal-cross", Masonry, Grid::new(0.22, 0.0625, EnglishCross), Members::new(0.01, 0.2, "mortar"), Panels::new("brick", 0.21)),
-        upright("system.masonry-waal-flemish", Masonry, Grid::new(0.22, 0.0625, Flemish), Members::new(0.01, 0.2, "mortar"), Panels::new("brick", 0.21)),
+        SystemType { lintel: Some(Lintel::BRICKWORK), ..upright("system.masonry-waal-stretcher", Masonry, Grid::new(0.22, 0.0625, RunningBond), Members::new(0.01, 0.09, "mortar"), Panels::new("brick", 0.1)) },
+        SystemType { lintel: Some(Lintel::BRICKWORK), ..upright("system.masonry-dik-stretcher", Masonry, Grid::new(0.22, 0.075, RunningBond), Members::new(0.01, 0.09, "mortar"), Panels::new("brick", 0.1)) },
+        SystemType { lintel: Some(Lintel::BRICKWORK), ..upright("system.masonry-waal-stack", Masonry, Grid::new(0.22, 0.0625, Stack), Members::new(0.01, 0.09, "mortar"), Panels::new("brick", 0.1)) },
+        SystemType { lintel: Some(Lintel::BRICKWORK), ..upright("system.masonry-waal-quarter", Masonry, Grid::new(0.22, 0.0625, Quarter), Members::new(0.01, 0.09, "mortar"), Panels::new("brick", 0.1)) },
+        SystemType { lintel: Some(Lintel::BRICKWORK), ..upright("system.masonry-waal-english", Masonry, Grid::new(0.22, 0.0625, English), Members::new(0.01, 0.2, "mortar"), Panels::new("brick", 0.21)) },
+        SystemType { lintel: Some(Lintel::BRICKWORK), ..upright("system.masonry-waal-cross", Masonry, Grid::new(0.22, 0.0625, EnglishCross), Members::new(0.01, 0.2, "mortar"), Panels::new("brick", 0.21)) },
+        SystemType { lintel: Some(Lintel::BRICKWORK), ..upright("system.masonry-waal-flemish", Masonry, Grid::new(0.22, 0.0625, Flemish), Members::new(0.01, 0.2, "mortar"), Panels::new("brick", 0.21)) },
         upright("system.sand-lime-elements-100", Masonry, Grid::new(0.9, 0.6465, RunningBond), Members::new(0.003, 0.1, "glue"), Panels::new("sand-lime", 0.1)),
         upright("system.cladding-zinc-standing-seam-430", Cladding, Grid::new(0.43, 6.0, Stack), Members::new(0.006, 0.04, "zinc"), Panels::new("zinc", 0.0008)),
         upright("system.cladding-timber-boards-140", Cladding, Grid::new(4.0, 0.14, RunningBond), Members::new(0.004, 0.012, "timber"), Panels::new("timber-cladding", 0.018)),
