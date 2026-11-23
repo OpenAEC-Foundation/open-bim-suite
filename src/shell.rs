@@ -2617,7 +2617,7 @@ impl Studio {
                 (l.text("Puntvormig", "Point"), vec![large("model.point")]),
                 (l.text("Openingen", "Openings"), vec![large("model.door"), large("model.window")]),
                 (l.text("Verbinding", "Connection"), vec![smalls(&["model.butt", "model.mitre", "model.cut"]), smalls(&["model.end-plate", "model.apart"])]),
-                (l.text("Wijzigen", "Modify"), vec![large("model.edit"), smalls(&["model.move", "model.copy"]), smalls(&["model.rotate", "model.mirror"]), smalls(&["model.align"]), large("model.delete")]),
+                (l.text("Wijzigen", "Modify"), vec![large("model.edit"), smalls(&["model.move", "model.copy"]), smalls(&["model.rotate", "model.mirror"]), smalls(&["model.align", "model.delete"])]),
             ],
             // building services, by discipline as other BIM modellers have them: air, water and
             // power. Where two runs of one kind meet, their fitting (a bend, a tee) is a connection
@@ -2629,7 +2629,7 @@ impl Studio {
                 (l.text("Elektra", "Electrical"), vec![large("mep.cable-tray")]),
                 (l.text("Toestellen", "Equipment"), vec![large("mep.appliance")]),
                 (l.text("Verbinding", "Connection"), vec![smalls(&["model.cut", "model.apart"])]),
-                (l.text("Wijzigen", "Modify"), vec![large("model.edit"), smalls(&["model.move", "model.copy"]), smalls(&["model.rotate", "model.mirror"]), smalls(&["model.align"]), large("model.delete")]),
+                (l.text("Wijzigen", "Modify"), vec![large("model.edit"), smalls(&["model.move", "model.copy"]), smalls(&["model.rotate", "model.mirror"]), smalls(&["model.align", "model.delete"])]),
             ],
             // the project as its IFCX file has it: the ways to look at it, and saving it
             RibbonPage::Ifcx => vec![

@@ -4249,14 +4249,14 @@ impl App {
         if let Some(rows) = self.ifc_properties(p, l) {
             content = content.push(section("IFCX")).push(rows).push(rule::horizontal(1));
         }
+        // the sketch of a floor: its tools, first, so Finish and Cancel are in sight
+        if let Some(rows) = self.sketch_bar(p, l) {
+            content = content.push(section(l.text("Schets", "Sketch"))).push(rows).push(rule::horizontal(1));
+        }
         // a tool on: its type and sizes
         if let Some(rows) = self.placement_bar(p, l) {
             let name = self.modeller.tool.map_or("", |(t, _)| t.label(l));
             content = content.push(section(name)).push(rows).push(rule::horizontal(1));
-        }
-        // the sketch of a floor: its tools
-        if let Some(rows) = self.sketch_bar(p, l) {
-            content = content.push(section(l.text("Schets", "Sketch"))).push(rows).push(rule::horizontal(1));
         }
         // a sheet of the file: its export
         if self.active_sheet.is_some() && self.active_doc_sheet.is_none() {
