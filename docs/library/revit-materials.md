@@ -63,6 +63,30 @@ Each has a name in Dutch, English, German and French by the suite's own rule, a 
 where the hatch catalogue has one for its kind, that hatch (natural stone, softwood and hardwood,
 boards, insulation, lead, plastic, sealant, ground, sand, gravel, water, glass).
 
+## An office's own Revit library
+
+After the template, the Revit library of a Dutch office was read the same way (its library
+template, its model template and its details file; the files are not in the repository): 747
+distinct materials. About 260 are written to the Dutch convention of a material code and a
+description (`f2_beton_...`, `g2_baksteen_...`, `i2_hout_...`), many of them variants of one
+kind (brick by format, colour and bond; timber by species and finish); about 90 are Revit's
+working materials; the rest come with the families of makers, or are single colours.
+
+That gave two things more:
+
+- **Sixteen kinds more** (the general library now has 93 materials): roof tiles, reed, sedum,
+  roof garden substrate, drainage layer; anhydrite screed, concrete pavers, gypsum blocks,
+  polyester; clay, peat, planting; toughened and frosted glass, anodised aluminium, bamboo.
+- **The material code and the match by name** (`bim_library::kind`): a material of the suite has
+  its NL-SfB material code by its key (`f2` concrete, `g2` fired clay, `i2` softwood), written
+  to its node as `nlsfb::material`; and `Library::material_like` says which material of the
+  suite a name of another program is a kind of, by the words in it, else by the code it is
+  written with. Of the 747 names it places 466; what it leaves are working materials, makers'
+  materials and colours.
+
+The codes are as files written to that convention use them. They are not checked against table
+3 of NL-SfB itself.
+
 ## What is mirrored and what is not
 
 - **The kinds are mirrored, not the content.** No name, colour, hatch or appearance asset of
@@ -76,7 +100,8 @@ boards, insulation, lead, plastic, sealant, ground, sand, gravel, water, glass).
 
 ## Not yet
 
-- A table that maps the name of a material in a Revit file to the suite's material of its kind
-  when a model is taken over. Now a material taken over keeps its own name and colour.
+- The readers do not use the match yet: a material taken over keeps its own name and colour.
+- The variants of one kind (a brick's format, colour and bond; a timber's finish) are one
+  material of the suite.
 - The colours are chosen to tell materials apart in a section and in 3D; they are not checked
   against a colour standard.
