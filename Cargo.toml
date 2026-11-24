@@ -1,18 +1,21 @@
 [package]
 name = "open-3d-viewer"
 # OpenAEC calendar versioning: year.ISO week.patch (as openaec-ui and Open Pointcloud Studio)
-version = "2026.45.10"
-description = "Open 3D Viewer Studio: 3D model viewer for AEC files, desktop and web (iced + wgpu)"
-authors = ["Open 3D Viewer Studio Contributors"]
+version = "2026.47.5"
+description = "Open BIM Suite: 3D model viewer for AEC files, desktop and web (iced + wgpu)"
+authors = ["Open BIM Suite Contributors"]
 license = "LGPL-3.0-or-later"
 edition = "2021"
-rust-version = "1.89"
+# openusd (USD import) needs Rust 1.96
+rust-version = "1.96"
 
-repository = "https://github.com/OpenAEC-Foundation/open-3d-viewer"
+repository = "https://github.com/OpenAEC-Foundation/open-bim-suite"
 default-run = "open-3d-viewer"
 
-# The desktop app includes Revit support; the web target uses byte-oriented readers.
+# The desktop app includes Revit, Vertex BD and BTL support; the web target uses byte-oriented readers.
+# Headless crates live under crates/; `cargo test` in the root still tests only the app.
 [workspace]
+members = ["crates/bim-structural", "crates/bim-core", "crates/bim-library", "crates/bim-validator-core", "crates/bim-bcf", "crates/bim-docs", "crates/bim-gis", "crates/bim-civil", "crates/dcm-read", "crates/xodr-read", "crates/urdf-read", "crates/vox-read"]
 
 [lib]
 name = "open_3d_viewer"
@@ -26,54 +29,178 @@ path = "src/main.rs"
 name = "open-3d-viewer-mcp"
 path = "src/bin/open-3d-viewer-mcp.rs"
 
+# One product alone (docs/architecture/products.md); a slim build of one is an invocation of its own:
+# `cargo build --release --no-default-features --features modeller --bin open-bim-modeller`
+[[bin]]
+name = "open-bim-modeller"
+path = "src/bin/open-bim-modeller.rs"
+required-features = ["modeller"]
+
+[[bin]]
+name = "open-bim-validator"
+path = "src/bin/open-bim-validator.rs"
+required-features = ["validator"]
+
+[[bin]]
+name = "open-bim-pointcloud"
+path = "src/bin/open-bim-pointcloud.rs"
+required-features = ["pointcloud"]
+
+# The products a build holds: all four by default, with the switch at the top right of the window.
+# Code that serves one product moves behind its feature module by module.
+[features]
+default = ["viewer", "modeller", "validator", "pointcloud", "planner"]
+viewer = []
+modeller = []
+validator = []
+# Its meshing comes from the library of Open Pointcloud Studio, on the desktop.
+pointcloud = ["dep:pointcloud-core"]
+# A trial: the web version of Open Planner Studio in a web frame inside the window, on Windows.
+planner = ["dep:wry"]
+
 [dependencies]
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 # GUI: iced (MIT) with the wgpu renderer (MIT OR Apache-2.0); `advanced` gives the custom shader widget.
-iced = { version = "0.14", default-features = false, features = ["wgpu", "tiny-skia", "crisp", "web-colors", "advanced", "svg", "canvas"] }
+iced = { version = "0.14", default-features = false, features = ["wgpu", "tiny-skia", "crisp", "web-colors", "advanced", "svg", "canvas", "image"] }
 # Shared OpenAEC window shell, tokens, widgets and icons (LGPL-3.0-only; fonts OFL, icons CC BY-SA,
 # see vendor/openaec-ui/NOTICE.md): snapshot of the OpenAEC Style Repo, see vendor/UPSTREAM.md
 openaec-ui = { path = "vendor/openaec-ui", features = ["gpu-renderer"] }
 glam = { version = "0.30", features = ["bytemuck"] }
+# The structural analysis model (nodes, members, supports, sections, loads, results) and its
+# sam-json exchange format; headless, in this workspace
+bim-structural = { path = "crates/bim-structural" }
+# The BIM kernel: f64 geometry in tile frames and the five base elements; headless, in this workspace
+bim-core = { path = "crates/bim-core" }
+# The modeller's libraries: materials, layered build-ups, profiles and linear types; headless, in this workspace
+bim-library = { path = "crates/bim-library" }
+# Docs: the documents of a project in a folder a sync tool keeps the same for everyone; headless, in this workspace
+bim-docs = { path = "crates/bim-docs" }
+# GIS: the Dutch national grid and the open services for a place and its surroundings; headless, in this workspace
+bim-gis = { path = "crates/bim-gis" }
+# Civil and site design: survey points, terrain surfaces with breaklines, contours and volumes; headless, in this workspace
+bim-civil = { path = "crates/bim-civil" }
+# DICOM (.dcm) files that carry a 3D model (Encapsulated STL, OBJ, MTL); headless, in this workspace
+dcm-read = { path = "crates/dcm-read" }
+# ASAM OpenDRIVE (.xodr): road reference lines and lanes as 3D surfaces; headless, in this workspace
+xodr-read = { path = "crates/xodr-read" }
+# URDF (.urdf): the links' visual geometry placed by the joints; headless, in this workspace
+urdf-read = { path = "crates/urdf-read" }
+# MagicaVoxel (.vox): the voxels merged into faces and placed by the scene; headless, in this workspace
+vox-read = { path = "crates/vox-read" }
 bytemuck = { version = "1", features = ["derive"] }
 # Element properties (flat JSON objects from the BIM loaders)
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# the IFCX parser and document model shared with IFCX Explorer (ifcx-rs, MIT OR LGPL-3.0-or-later)
+ifcx-core = { git = "https://github.com/OpenAEC-Foundation/ifcx-rs", rev = "46a594360cbe8dde181f9663e4b0ece5dc6cd625" }
 # File dialogs: native dialogs on the desktop, the browser's file picker on the web (MIT)
 rfd = "0.17"
 # std::time::Instant / SystemTime that also work in the browser (MIT OR Apache-2.0)
 web-time = "1"
 # PNG for the window icon and window screenshots (MIT OR Apache-2.0)
 png = "0.18"
-# The gzip-compressed B2 icon masters in assets/b2 (MIT OR Apache-2.0)
+# The widths of the house font's letters, for reports set in it (MIT OR Apache-2.0; already built for the fonts of iced)
+ttf-parser = "0.25"
+# Drawings exported as PNG: their SVG rendered with the app's fonts (Apache-2.0 OR MIT; already built for iced's svg)
+resvg = { version = "0.45", default-features = false, features = ["text"] }
+# PDF drawings laid on a level as underlays: their pages' paths (MIT; without its clock and threads)
+lopdf = { version = "0.47", default-features = false }
+# The gzip-compressed B2 icon masters in assets/b2, and the zlib-compressed arrays of FBX and Rhino
+# .3dm meshes (MIT OR Apache-2.0). Rhino .3dm needs no other dependency: src/loaders/rhino.rs is
+# written from McNeel's openNURBS source (published for reading 3dm files); no openNURBS code is built.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 # Mesh formats
-gltf = { version = "1.4", default-features = false, features = ["import", "names", "utils"] }
+gltf = { version = "1.4", default-features = false, features = ["import", "names", "utils", "extras"] }
 tobj = { version = "4", default-features = false }
 stl_io = "0.11"
 # Polygon triangulation, LandXML surfaces and native CAD mesh import.
 earcutr = "0.5"
+# Zstandard, as Blender compresses its files from 3.0 on (MIT)
+ruzstd = "0.9"
 roxmltree = "0.20"
-acadrust = { git = "https://github.com/hakanaktt/acadrust", rev = "299dc758f958b08accc35a10d98b83e228fafc89", default-features = false }
+# The shared OpenCAD drawing model (MPL-2.0): DWG and DXF through its acadrust codec (also the DWG/DXF
+# reader of src/loaders/cad.rs), IFCCAD (the open 2D drawing profile on IFCX) through ifccad (MPL-2.0).
+opencaddocument = { git = "https://github.com/HakanSeven12/opencaddocument", rev = "b9e1762969f3897e67e1801a2199445b6cf83b5d", features = ["ifcx"] }
 # Independent OpenAEC libraries, pinned to immutable upstream commits.
-skp-reader = { git = "https://github.com/OpenAEC-Foundation/skp-reader", rev = "31f8ef5bb9a8822771fbf008aa88e0f36444e01a" }
-tekla-reader = { git = "https://github.com/OpenAEC-Foundation/tekla-reader", rev = "a17caa4f66a171bb4765f6f546b4eec24c0acace" }
-ply-reader = { git = "https://github.com/OpenAEC-Foundation/ply-reader", rev = "028c51906cd7d8a0e72d6103afe80ad668d2543d" }
+skp-reader = { git = "https://github.com/OpenAEC-Foundation/sketchup-dll", rev = "31f8ef5bb9a8822771fbf008aa88e0f36444e01a" }
+tekla-read = { git = "https://github.com/OpenAEC-Foundation/tekla-dll", rev = "904769e76df0688b6f81391cabc2cc43854fbc11" }
+ply-reader = { git = "https://github.com/OpenAEC-Foundation/ply-dll", rev = "028c51906cd7d8a0e72d6103afe80ad668d2543d" }
+# Compressed glTF (Draco, meshopt, quantization, KTX2) made plain, through the 3d-tiles-dll library; pure Rust
+tiles-gltf = { git = "https://github.com/OpenAEC-Foundation/3d-tiles-dll", rev = "7a4642f2aeb5f06caf0058a1588622a66a96212a" }
+# 3D Tiles (tileset.json, b3dm, i3dm, pnts, cmpt, implicit tiling) and quantized-mesh terrain, through the 3d-tiles-dll library; pure Rust
+tiles-read = { git = "https://github.com/OpenAEC-Foundation/3d-tiles-dll", rev = "7a4642f2aeb5f06caf0058a1588622a66a96212a" }
+tiles-model = { git = "https://github.com/OpenAEC-Foundation/3d-tiles-dll", rev = "7a4642f2aeb5f06caf0058a1588622a66a96212a" }
+# Smithsonian Voyager scenes (.svx.json) through the svx-dll library; pure Rust
+svx-read = { git = "https://github.com/OpenAEC-Foundation/svx-dll", rev = "abaee1cd04290029e158ca4e9bd6ced6f1df2a5c" }
+svx-model = { git = "https://github.com/OpenAEC-Foundation/svx-dll", rev = "abaee1cd04290029e158ca4e9bd6ced6f1df2a5c" }
+# Finite element meshes, simulation results (VTK, through vtkio) and analysis text models through
+# the public fem-dll library; pure Rust on bytes, so also in the browser
+fem-read = { git = "https://github.com/OpenAEC-Foundation/fem-dll", rev = "a511ec287e8f0005febdb9276ba9742ad7f58218" }
+# SAF, the open Structural Analysis Format (.xlsx), through the public saf-dll library; it shares
+# fem-model with fem-read, so both pin the same fem-dll revision
+saf-read = { git = "https://github.com/OpenAEC-Foundation/saf-dll", rev = "7578aaad7346f861656a555aa7517e39d7110286" }
+# 3MF (.3mf) with its extensions and slicer project files, through the 3mf-dll library; pure Rust on bytes
+threemf-read = { git = "https://github.com/OpenAEC-Foundation/3mf-dll", rev = "d2cbf02a606aa3f7d4956d5fcd2cc5e79a649c27" }
+# 3D Gaussian splat scenes: splat PLY, SPZ and glTF with KHR_gaussian_splatting (LGPL-3.0-or-later, public)
+splat-read = { git = "https://github.com/OpenAEC-Foundation/splat-dll", rev = "34dbe7c7fc0f842dd729cc3421075a56085f9123" }
+# Vectorworks (.vwx) through the private vwx-dll library; pure Rust on bytes, so also in the browser
+vwx-read = { git = "https://github.com/OpenAEC-Foundation/vwx-dll", rev = "f99bada6cd4b2e2e6076a8f9f3937a5a8b370e0b" }
+# SolidWorks parts and assemblies (.sldprt, .sldasm) through the private solidworks-dll library; pure Rust on bytes
+sldw-read = { git = "https://github.com/OpenAEC-Foundation/solidworks-dll", rev = "a001b0141fcf54f63de1107e2d75e7fdc9e177f1" }
+# Solid Edge (.par, .psm, .asm) through the private solidedge-dll library; pure Rust on bytes, so also in the browser
+sedge-read = { git = "https://github.com/OpenAEC-Foundation/solidedge-dll", rev = "04a068e6a06409b8396d0e05a2613d86c3af50c4" }
+# Rhino .3dm files (texts are set in the viewer's own Inter, so without the crate's copy)
+threedm-read = { git = "https://github.com/OpenAEC-Foundation/rhino-dll", rev = "104d9f9fb4cec48633e6e2e2c54893c4c2ac70aa", default-features = false }
+# Private standalone Inventor library (parts and assemblies, clean-room); reads in the browser too.
+inventor-read = { git = "https://github.com/OpenAEC-Foundation/inventor-dll", rev = "c496ca45a1419f2620a60c703c0996efd56b0fd3" }
 # Private standalone MicroStation DGN library (V7 and V8, clean-room); reads in the browser too.
 dgn-read = { git = "https://github.com/OpenAEC-Foundation/microstation-dll", rev = "4740c4fb140917699e8cf52e893f922410693542" }
 dgn-export = { git = "https://github.com/OpenAEC-Foundation/microstation-dll", rev = "4740c4fb140917699e8cf52e893f922410693542" }
 # QuickLZ 1.5 decompression for Archicad projects (MIT OR Apache-2.0)
 quicklz = "0.3.1"
-
-[dev-dependencies]
-# DGN files written in the tests from the specification
-dgn-read = { git = "https://github.com/OpenAEC-Foundation/microstation-dll", rev = "4740c4fb140917699e8cf52e893f922410693542", features = ["synth"] }
+# ZIP containers: 3MF packages and zipped IFC (.ifczip) (MIT); deflate through the flate2 above
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
+# USD stages (.usda, .usdc, .usdz) with composition, pure Rust (MIT)
+openusd = { version = "0.8", default-features = false }
+# Point clouds: LAS and LAZ (las MIT, laz Apache-2.0) and E57 (MIT), all pure Rust
+las = { version = "0.11", features = ["laz"] }
+e57 = "0.11"
+# Shapefiles with their .dbf attributes (shapefile and dbase, MIT, pure Rust); code pages through encoding_rs
+shapefile = { version = "0.9", features = ["encoding_rs"] }
+# STEP (AP203, AP214, AP242): Part 21 reader to a B-rep model and its face tessellator, pure Rust
+# (Apache-2.0); cadmpeg-ir is large and takes long to compile
+cadmpeg-codec-step = "0.6.8"
+cadmpeg-ir = "0.6.8"
+cadmpeg-tessellate = "0.6.8"
+# IFC parsing, units, placements, openings and tessellation from the IFClite library (MPL-2.0):
+# on the desktop on a large-stack worker pool, in the browser on the page's own thread.
+ifc-lite-processing = "=25.0.1"
+# its entity scanner and decoder (MPL-2.0, already built for the above): the building storeys
+ifc-lite-core = "=25.0.1"
+# its placement chains (MPL-2.0, already built for the above): where the grids are
+ifc-lite-geometry = "=25.0.1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-# IFC parsing, units, placements, openings and tessellation from the existing IFClite library.
-ifc-lite-processing = "=25.0.1"
+# The library of Open Pointcloud Studio: reads a cloud from its file and meshes it (LGPL-3.0-or-later)
+pointcloud-core = { git = "https://github.com/OpenAEC-Foundation/open-pointcloud-studio", tag = "v2026.45.1", default-features = false, optional = true }
+# decodes the images of Revit title blocks
+image = "0.25"
+# fetches the map tiles of a georeferenced model (MIT OR Apache-2.0)
+ureq = { version = "2.12", default-features = false, features = ["tls"] }
+# Loads the Vertex BD / BTL reader (vertex.dll, shipped in vendor/vertex) at run time (ISC)
+libloading = "0.8"
 # Private standalone Revit library; compiled into the normal desktop application.
-rvt-read = { git = "https://github.com/OpenAEC-Foundation/rvt-dll", rev = "f9fcc76dcc841aab44b215455f981ebf798b7015" }
-rvt-export = { git = "https://github.com/OpenAEC-Foundation/rvt-dll", rev = "f9fcc76dcc841aab44b215455f981ebf798b7015", default-features = false }
-rvt-model = { git = "https://github.com/OpenAEC-Foundation/rvt-dll", rev = "f9fcc76dcc841aab44b215455f981ebf798b7015" }
+rvt-read = { git = "https://github.com/OpenAEC-Foundation/revit-dll", rev = "8b6b508055d733c899400c7bf679f298d6ccbac9" }
+rvt-export = { git = "https://github.com/OpenAEC-Foundation/revit-dll", rev = "8b6b508055d733c899400c7bf679f298d6ccbac9", default-features = false }
+rvt-model = { git = "https://github.com/OpenAEC-Foundation/revit-dll", rev = "8b6b508055d733c899400c7bf679f298d6ccbac9" }
+# The saved graphics of a tag type are read with the library's own graph decoder.
+rvt-core = { git = "https://github.com/OpenAEC-Foundation/revit-dll", rev = "8b6b508055d733c899400c7bf679f298d6ccbac9" }
+# Docs shows when a file was changed in the time of this computer (MIT OR Apache-2.0; already built for bim-bcf)
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+# The BIM Validator: issues (BCF) and information checks (IDS, model checks, ILS), in this workspace
+bim-bcf = { path = "crates/bim-bcf" }
+bim-validator-core = { path = "crates/bim-validator-core" }
 iced = { version = "0.14", default-features = false, features = ["thread-pool"] }
 # `gpu.log`: what iced and wgpu report about the graphics card (MIT OR Apache-2.0)
 log = "0.4"
@@ -92,9 +219,24 @@ js-sys = "0.3"
 web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlAnchorElement", "Location", "Url", "UrlSearchParams", "Blob", "BlobPropertyBag", "Response", "DragEvent", "DataTransfer", "FileList", "File", "console"] }
 console_error_panic_hook = "0.1"
 
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+# folders of their own for the tests of the scan project reader; the library of the point clouds already brings it in
+tempfile = "3"
+# Validates the WGSL shaders and translates them to WebGL2's GLSL in tests, without a GPU; the
+# version wgpu uses (MIT OR Apache-2.0)
+naga = { version = "27.0.3", features = ["wgsl-in", "glsl-out"] }
+
+[target.'cfg(unix)'.dependencies]
+# Stops cleanly on SIGTERM, after a save under way (MIT OR Apache-2.0)
+signal-hook = "0.3"
+
 [target.'cfg(windows)'.dependencies]
-# Which GPU the window gets, before wgpu starts (`gpu`); the version wgpu-hal uses (MIT OR Apache-2.0)
-windows = { version = "0.58", features = ["Win32_Graphics_Dxgi"] }
+# Which GPU the window gets, before wgpu starts (`gpu`), and the window's rectangle when its
+# display scale changes (`dpi_drag`); the version wgpu-hal uses (MIT OR Apache-2.0)
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Graphics_Dxgi", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+# The web frame of the Planner: the system's web view (WebView2) as a child of the app's window
+# (MIT OR Apache-2.0). On Windows only for now: elsewhere it needs system libraries the builds lack.
+wry = { version = "0.57", default-features = false, optional = true }
 
 [target.'cfg(windows)'.build-dependencies]
 # The app icon and version info in the .exe (MIT)
@@ -106,6 +248,23 @@ lto = "thin"
 opt-level = 3
 strip = true
 
+# Quick rebuilds while working on the app (scripts/dev.ps1): debug info without types and
+# variables; with full debug info a change took a minute to compile and link, with this 10 s.
+[profile.dev]
+debug = "limited"
+
 # Mesh import is slow in debug builds; optimise dependencies even in dev.
 [profile.dev.package."*"]
 opt-level = 2
+
+# Interactive editing rebuilds solids and display meshes on each committed change.
+[profile.dev.package.bim-core]
+opt-level = 2
+
+[dev-dependencies]
+# DGN files written in the tests from the specification
+dgn-read = { git = "https://github.com/OpenAEC-Foundation/microstation-dll", rev = "4740c4fb140917699e8cf52e893f922410693542", features = ["synth"] }
+# Inventor files written in the tests from the specification
+inventor-read = { git = "https://github.com/OpenAEC-Foundation/inventor-dll", rev = "c496ca45a1419f2620a60c703c0996efd56b0fd3", features = ["synth"] }
+# The 3dm writer of the Rhino tests
+threedm-core = { git = "https://github.com/OpenAEC-Foundation/rhino-dll", rev = "104d9f9fb4cec48633e6e2e2c54893c4c2ac70aa" }

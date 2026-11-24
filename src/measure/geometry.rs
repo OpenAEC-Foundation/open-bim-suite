@@ -600,6 +600,11 @@ mod tests {
             elements: Vec::new(),
             props: Vec::new(),
             hidden: false,
+            points: false,
+            lines: Vec::new(),
+            line_elements: Vec::new(),
+            texturing: None,
+            splats: None,
         }
     }
 

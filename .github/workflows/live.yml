@@ -24,11 +24,27 @@ jobs:
       DEPLOY_PATH: /var/www/open-3d-viewer.open-aec.com
     steps:
       - uses: actions/checkout@v5
-      - name: Read-only access to standalone libraries
-        uses: webfactory/ssh-agent@e83874834305fe9a4a2997156cb26c5de65a8555
+      # The deploy keys of the private readers, each by its name: the action gets these and no
+      # other secret. A new reader's secret is named here and in the same step of build.yml,
+      # format-crates.yml and release.yml.
+      - &reader-keys
+        name: Read-only access to standalone libraries
+        uses: ./.github/actions/reader-keys
         with:
-          ssh-private-key: ${{ secrets.FORMAT_CRATES_SSH_KEYS }}
-          log-public-key: false
+          keys: |
+            ${{ secrets.SSH_KEY_3DM_DLL }}
+            ${{ secrets.SSH_KEY_PLY_DLL }}
+            ${{ secrets.SSH_KEY_PLY_READER }}
+            ${{ secrets.SSH_KEY_REVIT_DLL }}
+            ${{ secrets.SSH_KEY_RHINO_DLL }}
+            ${{ secrets.SSH_KEY_RVT_DLL }}
+            ${{ secrets.SSH_KEY_SKETCHUP_DLL }}
+            ${{ secrets.SSH_KEY_SKP_READER }}
+            ${{ secrets.SSH_KEY_SOLIDWORKS_DLL }}
+            ${{ secrets.SSH_KEY_SOLIDEDGE_DLL }}
+            ${{ secrets.SSH_KEY_TEKLA_DLL }}
+            ${{ secrets.SSH_KEY_TEKLA_READER }}
+            ${{ secrets.SSH_KEY_VWX_DLL }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown

@@ -1,0 +1,148 @@
+# Every file format's reader in its own repository
+
+**Status:** rule of 2026-11-18, with the inventory of that day (main at `bed42e6`). The moves are
+made one format at a time; the table says how far each is.
+
+## Intent
+
+Open BIM Suite opens files through 44 readers. The knowledge of a format (how its container is
+laid out, what its records mean, how its drawings, tags and schedules are put together) is not
+the app's business. The owner wants it kept apart, cleanly:
+
+- **one format, one library, one repository**, named after the software that writes the format:
+  `<software>-dll` (`revit-dll`, `rhino-dll`, `tekla-dll`);
+- **the Revit reader's repository is the model** for how such a repository is built;
+- **the app keeps an adapter** per format and nothing else.
+
+Over time format knowledge has leaked into the app, from the Revit reader most of all and from
+other formats too. This note says what belongs where, what there is today, and in what order it
+moves out.
+
+## The rule
+
+1. A reader lives in its own repository `<software>-dll` of the OpenAEC Foundation. For a format
+   that no one program owns, the repository is named after the format (`ply-dll`).
+2. The repository is a Cargo workspace laid out as `revit-dll` is, with the format's short name
+   as the prefix of its crates:
+
+   | Crate | What it holds |
+   |---|---|
+   | `<x>-core` | The container: the file's parts, streams, tables and compression. |
+   | `<x>-read` | The readers: what the file's records mean, read into the neutral model. |
+   | `<x>-model` | The neutral model the reader returns: plain types that know nothing of the app. |
+   | `<x>-export` | Writers from the neutral model (meshes, IFC, DXF), where the format has them. |
+   | `<x>-ffi` | The C interface, built as `<x>.dll`, for programs not written in Rust. |
+   | `<x>-cli` | A command line tool to look into a file. |
+
+   A small format may leave out the crates it has nothing for; it does not merge them.
+3. The reader depends on nothing of the app. It returns its own plain types: meshes with their
+   names, colours and properties, and where the format has them views, sheets, drawings, texts,
+   dimensions, tags, schedules, levels and grids.
+4. The app holds one adapter per format in `src/loaders/`: it reads the file's bytes, calls the
+   reader, and copies the reader's types into the app's model (`Layer`, views, sheets, drafts).
+   An adapter names no record, field or class of the format, does no decoding and makes no
+   decisions about the format. `src/loaders/skp.rs` is the example: 26 lines.
+5. A fix or an addition to how a format is read is made in the reader's repository, released
+   there, and reaches the app by moving the pinned revision in `Cargo.toml`. It is never made in
+   the adapter.
+6. A reader that others have published as a crate (glTF, OBJ, STL, LAS, E57, Shapefile, USD,
+   STEP, IFC) is already apart; its adapter follows rule 4.
+
+## What there is today
+
+Lines of Rust in `src/loaders/` per format, tests included.
+
+### Formats of one program
+
+| Format | In the app | Its repository | Laid out as the model | To do |
+|---|---:|---|---|---|
+| Revit (`.rvt`, `.rfa`) | 6,346 in 7 files | `revit-dll` | yes | Move what the app knows of Revit's drawings, tags, schedules, filters, phases, fonts, images and browser into the reader; the adapter only maps. |
+| Archicad (`.pln`, `.pla`) | 5,995 | none | | New repository; the whole reader moves. |
+| Allplan (`.ndw`) | 4,006 | none | | New repository; the whole reader moves. |
+| Coordination model (`.smc`) | 2,674 in 3 files | none | | New repository; the whole reader moves. |
+| MicroStation (`.dgn`) | 613 (the adapter, its tests included) | `microstation-dll` | no `dgn-core` | Switched to the library (pull request #85). Left: the container (`cfb.rs`, `zlib.rs`) into a crate `dgn-core` of its own. |
+| Rhino (`.3dm`) | 1,600 | `rhino-dll` | yes | The adapter still decides and converts too much: move that into the reader. |
+| FreeCAD (`.FCStd`) | 1,088 in 2 files | none | | New repository. |
+| FBX (`.fbx`) | 949 | none | | New repository. |
+| Blender (`.blend`) | 749 | none | | New repository. |
+| Analysis text format (`.e2k`) | 645 | none | | Move into `fem-dll` beside `.s2k`, read into `fem-model`; the adapter `fem.rs` then opens it. |
+| Tekla Structures (`.db1`) | 520 | `tekla-dll` | yes | Slim the adapter. |
+| Vectorworks (`.vwx`) | 493 | `vectorworks-dll` | yes | Slim the adapter. |
+| Vertex BD and BTL (`.vxz`, `.vxm`, `.btl`) | 339 | `vertex.dll` | one crate, loaded at run time | Lay the repository out as the model and name it `vertex-dll`. |
+| Project packages (`.tbp`) | 322 | none | | New repository. |
+| 3DS (`.3ds`) | 239 | none | | New repository. |
+| SketchUp (`.skp`) | 26 | `sketchup-dll` | one crate | Lay the repository out as the model. The adapter is as it should be. |
+
+Together this is some 30,000 lines of format knowledge in the app.
+
+### Formats that no one program owns
+
+| Format | In the app | Reader | To do |
+|---|---:|---|---|
+| VRML and X3D (`.wrl`, `.x3d`) | 1,024 | in the app | New repository. |
+| PLY (`.ply`) | 299 | `ply-dll` (one crate) | Slim the adapter; lay the repository out as the model. |
+| Gaussian splats (splat `.ply`, `.spz`, glTF with `KHR_gaussian_splatting`) | 85 (`splat.rs`, tests besides) | `splat-dll` (one crate, `splat-read`, public) | Apart from the start (2026-11-18): the PLY and glTF loaders hand a splat file to it, the adapter only copies its splats into a point layer with `SplatData`. |
+| PCD, PTX, XYZ, ASC grid, OFF, AMF, COLLADA, LandXML, CityGML, CityJSON, GeoJSON | 145 to 570 each | in the app | Each a small reader: a repository of its own when it is next worked on. |
+| 3D Tiles (`tileset.json`, `.b3dm`, `.i3dm`, `.pnts`, `.cmpt`) and quantized-mesh terrain (`.terrain`) | 72 (`tiles.rs`) | `3d-tiles-dll`: `tiles-core`, `tiles-model`, `tiles-read` | Laid out as the model from the start (2026-11-18). |
+| Compressed glTF (Draco, meshopt, mesh quantization, KTX2/Basis) | glue in `gltf.rs` | `3d-tiles-dll`: `tiles-gltf` | Decodes into plain glTF before the published glTF crate reads it; 3D Tiles content uses it too. |
+| Smithsonian Voyager scene (`.svx.json`) | 114 (`svx.rs`) | `svx-dll`: `svx-model`, `svx-read` | Laid out as the model from the start (2026-11-18). Both adapters place the glTF the readers hand over through `placed.rs` and the glTF adapter. |
+| IFC, IFCX, STEP, glTF, OBJ, STL, USD, LAS and LAZ, E57, Shapefile, DWG and DXF | 125 to 936 each | published crates and `ifcx-rs` | Adapters; check each against rule 4 when it is next worked on. |
+| DICOM with an embedded model (`.dcm`) | 73 | `crates/dcm-read`, on the published `dicom-object` (MIT OR Apache-2.0): it takes the STL, OBJ or MTL document out of the file and says what other files hold | A crate in the suite for now, as the other new readers of 2026-11-18; it uses nothing of the app and moves one to one into a repository of its own (`dicom-dll`) later. The adapter reads the document with the app's STL and OBJ readers. |
+| VTK (`.vtk`, `.vtu`, `.vtp`, `.vts`, `.vtr`, `.vti`, the parallel files, `.vtm`, `.pvd`) | adapter `fem.rs` | `fem-dll` (`fem-model`, `fem-read`), which parses through the published `vtkio` crate | Done: the reader turns cells into outer faces and fields; the adapter copies them into layers and the app's fields. |
+| FEM input deck (`.inp`), FEM bulk data (`.bdf`, `.nas`, `.dat`), finite element mesh (`.msh`), structural analysis text model (`.s2k`, `.$2k`) | adapter `fem.rs` | `fem-dll` (`fem-model`, `fem-read`) | Done: the reader returns a mesh and an analysis model of its own; the adapter copies the analysis model into `bim-structural`'s. |
+| SAF (`.xlsx`) | adapter `fem.rs` | `saf-dll` (`saf-read`), into `fem-model`'s analysis model | Done. `saf-read` pins the same `fem-dll` revision as the app, so both share one model crate. |
+| COPC (`.copc.laz`) | in `las.rs` | the `las` crate's COPC reader (MIT) | Adapter: the app picks which octree levels to read for its point limit, the crate reads them. Added 2026-11-18. |
+| 3MF (`.3mf`) | 30 | `3mf-dll` (`threemf-model`, `threemf-read`) | Moved; the adapter only maps. |
+| ASAM OpenDRIVE (`.xodr`) | 48 | `crates/xodr-read`, on the published `opendrive` (MIT): it follows the reference lines and lays the lanes beside them | A crate in the suite for now, by the owner's choice: it uses nothing of the app and returns its own plain `Surface`, so it moves one to one into a repository of its own (`opendrive-dll`) later. |
+| URDF (`.urdf`) | 112 | `crates/urdf-read`, on the published `urdf-rs` (Apache-2.0): it places the links by their joints, meshes the solids and finds the mesh files | A crate in the suite for now, by the owner's choice: it uses nothing of the app, so it moves one to one into a repository of its own (`urdf-dll`) later. The adapter reads the mesh files with the app's own readers. |
+| MagicaVoxel (`.vox`) | 17 | `crates/vox-read`, on the published `dot_vox` (MIT): it merges the voxels into faces and places the scene | A crate in the suite for now, by the owner's choice: it uses nothing of the app and returns its own plain `Mesh`, so it moves one to one into a repository of its own (`vox-dll`) later. |
+
+## Moved so far
+
+- 2026-11-24, MicroStation: the whole reader (`dgn_read::read`, drawn by `dgn_export::draw`;
+  2,031 lines left the app). The library already held every test of the app's reader; on six
+  V7 sample files both gave the same layers, elements, geometry bounds, properties and project
+  information.
+- 2026-11-18, Revit: which elements are joined with which (`rvt_read::joins`; 48 lines and one
+  test left the app).
+- 2026-11-18, Revit: the images of a family and the image a parameter names (`rvt_read::images`),
+  and whether a wall or floor carries load (`rvt_read::structure`; 152 lines and two tests left
+  the app, which keeps how it adds `LoadBearing` to its own properties).
+- 2026-11-18, Revit: the cut patterns of the materials (`rvt_read::materials`) and the phasing
+  of the project and its views (`rvt_read::phases`; 205 lines and three tests left the app). The
+  reader returns plain types of its own here, and the app copies them into its `Pattern`, `Grid`
+  and `Phasing`.
+- 2026-11-18, Revit: how the browser orders the views (`rvt_export::browser`) and the typefaces
+  of the texts (`rvt_read::fonts`; 429 lines and three tests left the app, which copies the
+  reader's `Organization` and `FontFace` into its `ViewOrder` and `Face`).
+
+- 2026-11-18, 3MF: the whole reader (`src/loaders/threemf.rs`, 347 lines and three tests) moved
+  unchanged into `3mf-dll`, which then gained the materials, beam lattice and slice extensions and
+  the project files of slicers.
+
+## Order
+
+1. **Revit**, in slices: its repository is the model and its leak is the largest. Each slice is
+   a pull request in `revit-dll` and one here that moves the pinned revision and deletes the
+   moved code.
+2. **Archicad** and **Allplan**: whole readers that only need a neutral model to return.
+3. **MicroStation**: done on 2026-11-24 (see below); only `dgn-core` is left.
+4. **Rhino**, **Tekla Structures**, **Vectorworks**: slim the adapters.
+5. The coordination model, FreeCAD, FBX, Blender and the smaller ones.
+6. `sketchup-dll`, `ply-dll` and `vertex.dll`: lay them out as the model.
+
+A new private repository needs a deploy key and a secret before the builds on GitHub can fetch
+it; the owner sets those.
+
+## While the moves are under way
+
+- No new format knowledge goes into `src/loaders/`. A change to how a format is read goes to its
+  repository, or waits until it has one.
+- A file that is being moved is not changed here in the same days: say in the pull request which
+  files a slice takes.
+- The readers' tests and sample files move with them; what stays here tests the adapter with a
+  small file.
+- The readers of MagicaVoxel, URDF, OpenDRIVE and DICOM models (2026-11-18) are crates in this
+  repository's `crates/` for now, by the owner's choice, not repositories of their own. Each uses
+  nothing of the app and has the name it will keep (`vox-read`, `urdf-read`, `xodr-read`,
+  `dcm-read`), so it moves one to one into its own `-dll` repository later.

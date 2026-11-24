@@ -1,0 +1,831 @@
+//! A library: materials and the types made of them. A project has one (its types); a library file
+//! holds one; importing one adds what the project lacks ([`Library::merge`]).
+
+use crate::annotate::{self, DrawingSet};
+use crate::buildup::{self, BuildUp, Role};
+use crate::material::{self, Material};
+use crate::nlsfb::{self, Code};
+use crate::connection::{self, ConnectionType, Family};
+use crate::object::{self, ObjectGroup, ObjectType};
+use crate::profile::{self, LinearRole, LinearType};
+use crate::service::{self, Carrier, CoverType, ServiceType};
+use crate::standard::{self, HatchStandard, MaterialHatch};
+use crate::system::{self, SystemGroup, SystemType};
+use crate::template::{self, ViewTemplate};
+use crate::{Lang, LibraryError};
+use serde::{Deserialize, Serialize};
+
+/// Two layers of one material are the same when their thicknesses differ by no more than this
+/// (metres): 0.01 mm.
+pub const SAME_THICKNESS: f64 = 1e-5;
+
+/// Materials, build-ups, linear types and system types, in the order they were added.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Library {
+    #[serde(default)]
+    pub materials: Vec<Material>,
+    #[serde(default)]
+    pub buildups: Vec<BuildUp>,
+    #[serde(default)]
+    pub linear_types: Vec<LinearType>,
+    #[serde(default)]
+    pub system_types: Vec<SystemType>,
+    /// Its NL-SfB codes, each once: the groups of the table and the codes added to them.
+    #[serde(default)]
+    pub codes: Vec<Code>,
+    /// Its drawing sets: the rules by which a drawing of a kind is annotated ([`crate::annotate`]).
+    #[serde(default)]
+    pub drawing_sets: Vec<DrawingSet>,
+    /// Its view templates: what a drawing of a kind shows in a phase ([`crate::template`]).
+    #[serde(default)]
+    pub view_templates: Vec<ViewTemplate>,
+    /// Its object types: doors, windows, fittings and the terminals of the services
+    /// ([`crate::object`]).
+    #[serde(default)]
+    pub object_types: Vec<ObjectType>,
+    /// Its connection types: how elements are joined where they meet ([`crate::connection`]).
+    #[serde(default)]
+    pub connection_types: Vec<ConnectionType>,
+    /// Its service types: ducts, pipes, cable trays, ladders and conduits with their sizes
+    /// and fittings ([`crate::service`]).
+    #[serde(default)]
+    pub service_types: Vec<ServiceType>,
+    /// Its cover types: the insulation round a run and the lining inside it.
+    #[serde(default)]
+    pub cover_types: Vec<CoverType>,
+    /// Its hatch standards, one of them chosen: how its materials are hatched
+    /// ([`crate::standard`]).
+    #[serde(default)]
+    pub hatch_standards: Vec<HatchStandard>,
+    /// What else is known of its items: costs, the maker's data and the like, each with a
+    /// source and a date ([`crate::aspect`]). In a file they are attributes on the items' nodes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aspects: Vec<crate::aspect::Aspect>,
+    /// The level of detail its drawings show its materials at ([`crate::detail`]); none: 350,
+    /// their hatches. At 200 what is cut is an outline alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<crate::detail::Detail>,
+}
+
+/// Names made unique: " (2)", " (3)" after a name given before, in order.
+fn numbered(names: impl Iterator<Item = String>) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    names
+        .map(|name| {
+            let same = seen.iter().filter(|n| **n == name).count();
+            seen.push(name.clone());
+            if same == 0 {
+                name
+            } else {
+                format!("{name} ({})", same + 1)
+            }
+        })
+        .collect()
+}
+
+/// A name as part of an id: lower case, letters, digits and points, hyphens between.
+pub(crate) fn slug(name: &str) -> String {
+    let mut out = String::new();
+    for c in name.chars().flat_map(char::to_lowercase) {
+        if c.is_alphanumeric() || c == '.' || c == '_' {
+            out.push(c);
+        } else if !out.ends_with('-') && !out.is_empty() {
+            out.push('-');
+        }
+    }
+    out.trim_end_matches('-').to_string()
+}
+
+/// `id`, or the first of `id-2`, `id-3`, ... that `taken` says is free.
+fn free_id(id: &str, taken: impl Fn(&str) -> bool) -> String {
+    let mut fresh = id.to_string();
+    let mut n = 1;
+    while taken(&fresh) {
+        n += 1;
+        fresh = format!("{id}-{n}");
+    }
+    fresh
+}
+
+impl Library {
+    /// The library a new project starts with: Open BIM Studio's starter materials, planar types,
+    /// linear types and system types. The steel profiles are a catalogue
+    /// ([`profile::steel_profiles`]) a project takes types from, not starter types.
+    pub fn starter() -> Self {
+        Self { materials: [material::starter(), material::common()].concat(), buildups: buildup::starter(), linear_types: profile::starter(), system_types: system::starter(), codes: nlsfb::starter(), object_types: object::starter(), connection_types: connection::starter(), service_types: service::starter(), cover_types: service::covers(), hatch_standards: standard::starter(), drawing_sets: annotate::starter(), view_templates: template::starter(), aspects: Vec::new(), detail: None }
+    }
+
+    pub fn material(&self, key: &str) -> Option<&Material> {
+        self.materials.iter().find(|m| m.key == key)
+    }
+
+    pub fn buildup(&self, id: &str) -> Option<&BuildUp> {
+        self.buildups.iter().find(|b| b.id == id)
+    }
+
+    /// The build-ups of `role`, in library order.
+    pub fn buildups_of(&self, role: Role) -> impl Iterator<Item = &BuildUp> {
+        self.buildups.iter().filter(move |b| b.role == role)
+    }
+
+    /// Adds a material under a key of its own.
+    pub fn add_material(&mut self, material: Material) -> Result<(), LibraryError> {
+        if material.key.trim().is_empty() {
+            return Err(LibraryError::NoKey);
+        }
+        if self.material(&material.key).is_some() {
+            return Err(LibraryError::Duplicate(material.key));
+        }
+        self.materials.push(material);
+        Ok(())
+    }
+
+    /// Adds a build-up under an id of its own, once it checks against the library's materials.
+    pub fn add_buildup(&mut self, buildup: BuildUp) -> Result<(), LibraryError> {
+        buildup.check(&self.materials)?;
+        if self.buildup(&buildup.id).is_some() {
+            return Err(LibraryError::Duplicate(buildup.id));
+        }
+        self.buildups.push(buildup);
+        Ok(())
+    }
+
+    /// The name of build-up `id` in `lang`: its rule name, with " (2)", " (3)" when build-ups of
+    /// its role before it have the same rule name.
+    pub fn name(&self, id: &str, lang: Lang) -> Option<String> {
+        let role = self.buildup(id)?.role;
+        self.names(role, lang).into_iter().find(|(i, _)| *i == id).map(|(_, name)| name)
+    }
+
+    /// The build-ups of `role` with their names in `lang`, in library order.
+    pub fn names(&self, role: Role, lang: Lang) -> Vec<(&str, String)> {
+        let names = numbered(self.buildups_of(role).map(|b| b.rule_name(&self.materials, lang)));
+        self.buildups_of(role).map(|b| b.id.as_str()).zip(names).collect()
+    }
+
+    pub fn linear_type(&self, id: &str) -> Option<&LinearType> {
+        self.linear_types.iter().find(|t| t.id == id)
+    }
+
+    /// The linear types of `role`, in library order.
+    pub fn linear_types_of(&self, role: LinearRole) -> impl Iterator<Item = &LinearType> {
+        self.linear_types.iter().filter(move |t| t.role == role)
+    }
+
+    /// Adds a linear type under an id of its own, once it checks against the library's materials.
+    pub fn add_linear_type(&mut self, linear: LinearType) -> Result<(), LibraryError> {
+        linear.check(&self.materials)?;
+        if self.linear_type(&linear.id).is_some() {
+            return Err(LibraryError::Duplicate(linear.id));
+        }
+        self.linear_types.push(linear);
+        Ok(())
+    }
+
+    /// The name of linear type `id` in `lang`, made unique within its role as a build-up's.
+    pub fn linear_name(&self, id: &str, lang: Lang) -> Option<String> {
+        let role = self.linear_type(id)?.role;
+        self.linear_names(role, lang).into_iter().find(|(i, _)| *i == id).map(|(_, name)| name)
+    }
+
+    /// The linear types of `role` with their names in `lang`, in library order.
+    pub fn linear_names(&self, role: LinearRole, lang: Lang) -> Vec<(&str, String)> {
+        let names = numbered(self.linear_types_of(role).map(|t| t.rule_name(&self.materials, lang)));
+        self.linear_types_of(role).map(|t| t.id.as_str()).zip(names).collect()
+    }
+
+    /// The linear type this library already has with the role, material, profile and designation
+    /// of `linear` (the profile within 0.01 mm).
+    pub fn matching_linear(&self, linear: &LinearType) -> Option<&LinearType> {
+        self.linear_types_of(linear.role).find(|t| t.name == linear.name && t.material == linear.material && t.designation == linear.designation && t.profile.same(&linear.profile))
+    }
+
+    pub fn system_type(&self, id: &str) -> Option<&SystemType> {
+        self.system_types.iter().find(|t| t.id == id)
+    }
+
+    /// The system types of `group`, in library order.
+    pub fn system_types_of(&self, group: SystemGroup) -> impl Iterator<Item = &SystemType> {
+        self.system_types.iter().filter(move |t| t.group == group)
+    }
+
+    /// Adds a system type under an id of its own, once it checks against the library's materials.
+    pub fn add_system_type(&mut self, system: SystemType) -> Result<(), LibraryError> {
+        system.check(&self.materials)?;
+        if self.system_type(&system.id).is_some() {
+            return Err(LibraryError::Duplicate(system.id));
+        }
+        self.system_types.push(system);
+        Ok(())
+    }
+
+    /// The name of system type `id` in `lang`, made unique within its group as a build-up's.
+    pub fn system_name(&self, id: &str, lang: Lang) -> Option<String> {
+        let group = self.system_type(id)?.group;
+        self.system_names(group, lang).into_iter().find(|(i, _)| *i == id).map(|(_, name)| name)
+    }
+
+    /// The system types of `group` with their names in `lang`, in library order.
+    pub fn system_names(&self, group: SystemGroup, lang: Lang) -> Vec<(&str, String)> {
+        let names = numbered(self.system_types_of(group).map(|t| t.rule_name(&self.materials, lang)));
+        self.system_types_of(group).map(|t| t.id.as_str()).zip(names).collect()
+    }
+
+    /// The system type this library already has that makes the same system as `system`: the
+    /// same group, grids, members (and their framing), panels, layers, corners and level, lengths
+    /// within 0.01 mm.
+    pub fn matching_system(&self, system: &SystemType) -> Option<&SystemType> {
+        let near = |a: f64, b: f64| (a - b).abs() <= SAME_THICKNESS;
+        let same_grid = |a: &system::Grid, b: &system::Grid| a.pattern == b.pattern && near(a.bay, b.bay) && near(a.row, b.row);
+        let same_members = |a: Option<&system::Members>, b: Option<&system::Members>| match (a, b) {
+            (Some(a), Some(b)) => a.material == b.material && a.framing == b.framing && near(a.width, b.width) && near(a.depth, b.depth),
+            (None, None) => true,
+            _ => false,
+        };
+        let same = |t: &SystemType| {
+            t.corners == system.corners
+                && t.lying.is_some() == system.lying.is_some()
+                && near(t.lying.unwrap_or(0.0), system.lying.unwrap_or(0.0))
+                && t.faces().count() == system.faces().count()
+                && t.faces().zip(system.faces()).all(|((oa, ga, ma, pa), (ob, gb, mb, pb))| {
+                    near(oa, ob) && same_grid(ga, gb) && same_members(ma, mb) && pa.material == pb.material && near(pa.thickness, pb.thickness)
+                })
+        };
+        self.system_types_of(system.group).find(|t| same(t))
+    }
+
+    /// The build-up this library already has with the role and the layers of `buildup`: the same
+    /// materials in the same order, each as thick within 0.01 mm. A name says less than the layers
+    /// (two layers of brick are named as one), so the layers decide.
+    pub fn matching(&self, buildup: &BuildUp) -> Option<&BuildUp> {
+        let same = |a: &BuildUp| {
+            a.layers.len() == buildup.layers.len()
+                && a.layers.iter().zip(&buildup.layers).all(|(x, y)| x.material == y.material && (x.thickness - y.thickness).abs() <= SAME_THICKNESS)
+        };
+        self.buildups_of(buildup.role).find(|b| same(b))
+    }
+
+    /// As [`Library::matching`], and of the same name of its own (or both without one): what a
+    /// library taken in whole must not add twice. A named type of a catalogue is a type of its
+    /// own beside an unnamed one of the same layers.
+    pub fn matching_named(&self, buildup: &BuildUp) -> Option<&BuildUp> {
+        let same = |a: &BuildUp| {
+            a.name == buildup.name
+                && a.layers.len() == buildup.layers.len()
+                && a.layers.iter().zip(&buildup.layers).all(|(x, y)| x.material == y.material && (x.thickness - y.thickness).abs() <= SAME_THICKNESS)
+        };
+        self.buildups_of(buildup.role).find(|b| same(b))
+    }
+
+    /// The object type `id` of the library.
+    pub fn object_type(&self, id: &str) -> Option<&ObjectType> {
+        self.object_types.iter().find(|o| o.id == id)
+    }
+
+    /// The connection type with key `id`.
+    pub fn connection_type(&self, id: &str) -> Option<&ConnectionType> {
+        self.connection_types.iter().find(|c| c.id == id)
+    }
+
+    /// The connection types of `family`, in the order they were added.
+    pub fn connection_types_of(&self, family: Family) -> impl Iterator<Item = &ConnectionType> {
+        self.connection_types.iter().filter(move |c| c.family == family)
+    }
+
+    /// Adds a connection type. Refused when it does not hold together, its key is taken, or
+    /// its parts are of a material the library lacks.
+    pub fn add_connection_type(&mut self, connection: ConnectionType) -> Result<(), LibraryError> {
+        connection.check()?;
+        if self.connection_type(&connection.id).is_some() {
+            return Err(LibraryError::Duplicate(connection.id));
+        }
+        if let Some(material) = connection.material.as_ref().filter(|key| self.material(key).is_none()) {
+            return Err(LibraryError::UnknownMaterial(material.clone()));
+        }
+        self.connection_types.push(connection);
+        Ok(())
+    }
+
+    /// The service type with key `id`.
+    pub fn service_type(&self, id: &str) -> Option<&ServiceType> {
+        self.service_types.iter().find(|s| s.id == id)
+    }
+
+    /// The service types of `carrier`, in the order they were added.
+    pub fn service_types_of(&self, carrier: Carrier) -> impl Iterator<Item = &ServiceType> {
+        self.service_types.iter().filter(move |s| s.carrier == carrier)
+    }
+
+    /// Adds a service type. Refused when it does not hold together, its key is taken, or it
+    /// is of a material the library lacks.
+    pub fn add_service_type(&mut self, service: ServiceType) -> Result<(), LibraryError> {
+        service.check(&self.materials)?;
+        if self.service_type(&service.id).is_some() {
+            return Err(LibraryError::Duplicate(service.id));
+        }
+        self.service_types.push(service);
+        Ok(())
+    }
+
+    /// The cover type with key `id`.
+    pub fn cover_type(&self, id: &str) -> Option<&CoverType> {
+        self.cover_types.iter().find(|c| c.id == id)
+    }
+
+    /// Adds a cover type, refused as a service type is.
+    pub fn add_cover_type(&mut self, cover: CoverType) -> Result<(), LibraryError> {
+        cover.check(&self.materials)?;
+        if self.cover_type(&cover.id).is_some() {
+            return Err(LibraryError::Duplicate(cover.id));
+        }
+        self.cover_types.push(cover);
+        Ok(())
+    }
+
+    /// The hatch standard a drawing hatches by: the chosen one, else the first.
+    pub fn hatch_standard(&self) -> Option<&HatchStandard> {
+        self.hatch_standards.iter().find(|s| s.chosen).or_else(|| self.hatch_standards.first())
+    }
+
+    /// Chooses the standard with `key`; false when the library has none such.
+    pub fn choose_hatch_standard(&mut self, key: &str) -> bool {
+        if !self.hatch_standards.iter().any(|s| s.key == key) {
+            return false;
+        }
+        for s in &mut self.hatch_standards {
+            s.chosen = s.key == key;
+        }
+        true
+    }
+
+    /// Adds a hatch standard. Refused without a key or a name, or when its key is taken; where
+    /// the library has a chosen one already, it comes unchosen.
+    pub fn add_hatch_standard(&mut self, mut standard: HatchStandard) -> Result<(), LibraryError> {
+        standard.check()?;
+        if self.hatch_standards.iter().any(|s| s.key == standard.key) {
+            return Err(LibraryError::Duplicate(standard.key));
+        }
+        standard.chosen &= !self.hatch_standards.iter().any(|s| s.chosen);
+        self.hatch_standards.push(standard);
+        Ok(())
+    }
+
+    /// Adds a standard named `names` as a copy of the one with key `from`: the same set, and
+    /// what the materials name under `from` they name under the copy too. Its key is made of
+    /// its English name, numbered where that is taken; it is returned.
+    pub fn copy_hatch_standard(&mut self, from: &str, names: crate::material::Names) -> Result<String, LibraryError> {
+        let set = self.hatch_standards.iter().find(|s| s.key == from).ok_or_else(|| LibraryError::BadHatch(format!("a standard of the library, not \"{from}\"")))?.set;
+        let slug: String = names.en.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+        let slug = slug.split('-').filter(|part| !part.is_empty()).collect::<Vec<_>>().join("-");
+        let slug = if slug.is_empty() { "standard".to_string() } else { slug };
+        let key = std::iter::once(slug.clone()).chain((2..).map(|n| format!("{slug}-{n}"))).find(|key| !self.hatch_standards.iter().any(|s| &s.key == key)).expect("a free key");
+        self.add_hatch_standard(HatchStandard::new(&key, names, set))?;
+        for m in &mut self.materials {
+            if let Some(own) = m.hatches.get(from).cloned() {
+                m.hatches.insert(key.clone(), own);
+            }
+        }
+        Ok(key)
+    }
+
+    /// The hatch of the material with `key` under the chosen standard; a library without
+    /// standards gives the material's own sign.
+    pub fn material_hatch(&self, key: &str) -> Option<MaterialHatch> {
+        let material = self.material(key)?;
+        Some(match self.hatch_standard() {
+            Some(standard) => standard.of(material),
+            None => MaterialHatch { cut: material.catalogue_hatch().map(|h| h.key.clone()), ..MaterialHatch::default() },
+        })
+    }
+
+    /// Gives the material with key `material` its own hatch under the standard with key
+    /// `standard`, or takes it away (`None`: its sign gives it again). Refused when the
+    /// library lacks either, or the hatch does not hold together.
+    pub fn set_material_hatch(&mut self, material: &str, standard: &str, hatch: Option<MaterialHatch>) -> Result<(), LibraryError> {
+        if !self.hatch_standards.iter().any(|s| s.key == standard) {
+            return Err(LibraryError::BadHatch(format!("a standard of the library, not \"{standard}\"")));
+        }
+        if let Some(hatch) = &hatch {
+            hatch.check()?;
+        }
+        let m = self.materials.iter_mut().find(|m| m.key == material).ok_or_else(|| LibraryError::UnknownMaterial(material.into()))?;
+        match hatch {
+            Some(hatch) => m.hatches.insert(standard.into(), hatch),
+            None => m.hatches.remove(standard),
+        };
+        Ok(())
+    }
+
+    /// The object types of `group`, in the order they were added.
+    pub fn object_types_of(&self, group: ObjectGroup) -> impl Iterator<Item = &ObjectType> {
+        self.object_types.iter().filter(move |o| o.group == group)
+    }
+
+    /// Adds an object type. Refused when it does not hold together, its id is taken, or it is
+    /// of a material the library lacks.
+    pub fn add_object_type(&mut self, object: ObjectType) -> Result<(), LibraryError> {
+        object.check()?;
+        if self.object_type(&object.id).is_some() {
+            return Err(LibraryError::Duplicate(object.id));
+        }
+        if let Some(material) = object.material.as_ref().filter(|key| self.material(key).is_none()) {
+            return Err(LibraryError::UnknownMaterial(material.clone()));
+        }
+        self.object_types.push(object);
+        Ok(())
+    }
+
+    /// The drawing set `key` of the library.
+    pub fn drawing_set(&self, key: &str) -> Option<&DrawingSet> {
+        self.drawing_sets.iter().find(|s| s.key == key)
+    }
+
+    /// Adds a drawing set. Refused when it does not hold together or the library has its key.
+    pub fn add_drawing_set(&mut self, set: DrawingSet) -> Result<(), LibraryError> {
+        set.check()?;
+        if self.drawing_set(&set.key).is_some() {
+            return Err(LibraryError::Duplicate(set.key));
+        }
+        self.drawing_sets.push(set);
+        Ok(())
+    }
+
+    /// The drawing set `key` of the library, to change.
+    pub fn drawing_set_mut(&mut self, key: &str) -> Option<&mut DrawingSet> {
+        self.drawing_sets.iter_mut().find(|s| s.key == key)
+    }
+
+    /// Takes a drawing set as a copy under a key of its own ("-2", "-3" after one it has); its
+    /// key.
+    pub fn copy_drawing_set(&mut self, from: &DrawingSet) -> String {
+        let key = std::iter::once(from.key.clone()).chain((2..).map(|n| format!("{}-{n}", from.key))).find(|key| self.drawing_set(key).is_none()).unwrap_or_default();
+        self.drawing_sets.push(DrawingSet { key: key.clone(), ..from.clone() });
+        key
+    }
+
+    /// Takes drawing set `key` away; whether the library had it.
+    pub fn remove_drawing_set(&mut self, key: &str) -> bool {
+        let before = self.drawing_sets.len();
+        self.drawing_sets.retain(|s| s.key != key);
+        self.drawing_sets.len() != before
+    }
+
+    /// The view template `key` of the library.
+    pub fn view_template(&self, key: &str) -> Option<&ViewTemplate> {
+        self.view_templates.iter().find(|t| t.key == key)
+    }
+
+    /// The view template `key` of the library, to change.
+    pub fn view_template_mut(&mut self, key: &str) -> Option<&mut ViewTemplate> {
+        self.view_templates.iter_mut().find(|t| t.key == key)
+    }
+
+    /// Takes a view template as a copy under a key of its own ("-2", "-3" after one it has);
+    /// its key.
+    pub fn copy_view_template(&mut self, from: &ViewTemplate) -> String {
+        let key = std::iter::once(from.key.clone()).chain((2..).map(|n| format!("{}-{n}", from.key))).find(|key| self.view_template(key).is_none()).unwrap_or_default();
+        self.view_templates.push(ViewTemplate { key: key.clone(), ..from.clone() });
+        key
+    }
+
+    /// Takes view template `key` away; whether the library had it.
+    pub fn remove_view_template(&mut self, key: &str) -> bool {
+        let before = self.view_templates.len();
+        self.view_templates.retain(|t| t.key != key);
+        self.view_templates.len() != before
+    }
+
+    /// Adds a view template. Refused when it does not hold together or the library has its key.
+    pub fn add_view_template(&mut self, template: ViewTemplate) -> Result<(), LibraryError> {
+        template.check()?;
+        if self.view_template(&template.key).is_some() {
+            return Err(LibraryError::Duplicate(template.key));
+        }
+        self.view_templates.push(template);
+        Ok(())
+    }
+
+    /// The code `code` of the library.
+    pub fn code(&self, code: &str) -> Option<&Code> {
+        self.codes.iter().find(|c| c.code == code)
+    }
+
+    /// Adds a code, in the order of the codes. Refused when it is no NL-SfB code or the library
+    /// has it.
+    pub fn add_code(&mut self, code: Code) -> Result<(), LibraryError> {
+        if !nlsfb::valid(&code.code) {
+            return Err(LibraryError::BadCode(code.code));
+        }
+        if self.code(&code.code).is_some() {
+            return Err(LibraryError::Duplicate(code.code));
+        }
+        let at = self.codes.iter().position(|c| c.code > code.code).unwrap_or(self.codes.len());
+        self.codes.insert(at, code);
+        Ok(())
+    }
+
+    /// What `code` is called: its name in the library, else the name of its group in the table.
+    pub fn code_name(&self, code: &str, lang: Lang) -> Option<String> {
+        self.code(code).map(|c| c.name(lang).to_string()).or_else(|| nlsfb::group_name(code, lang).map(str::to_string))
+    }
+
+    /// The types that have `code`, by their ids: build-ups, linear types, system types,
+    /// object types, connection types and service types. With
+    /// `deeper`, also those of a code under it ("21" has the types of "21.22").
+    pub fn coded(&self, code: &str, deeper: bool) -> Vec<&str> {
+        let has = |of: String| of == code || deeper && of.strip_prefix(code).is_some_and(|rest| rest.starts_with('.') || code.contains('.'));
+        let buildups = self.buildups.iter().filter(|b| has(b.nlsfb(&self.materials))).map(|b| b.id.as_str());
+        let linear = self.linear_types.iter().filter(|t| has(t.nlsfb())).map(|t| t.id.as_str());
+        let systems = self.system_types.iter().filter(|t| has(t.nlsfb())).map(|t| t.id.as_str());
+        let objects = self.object_types.iter().filter(|o| has(o.nlsfb())).map(|o| o.id.as_str());
+        let connections = self.connection_types.iter().filter(|c| c.nlsfb().is_some_and(&has)).map(|c| c.id.as_str());
+        let services = self.service_types.iter().filter(|s| has(s.nlsfb())).map(|s| s.id.as_str());
+        buildups.chain(linear).chain(systems).chain(objects).chain(connections).chain(services).collect()
+    }
+
+    /// Adds what `other` has and this library lacks, as Open BIM Studio imports a library:
+    /// materials by key, build-ups by role and layers ([`Library::matching`]), linear types by
+    /// role, material and profile ([`Library::matching_linear`]), system types by what they make
+    /// ([`Library::matching_system`]). Nothing this library has is
+    /// changed. A type whose id is taken gets a new one; one that does not check is left out.
+    /// Returns how many materials and types were added.
+    pub fn merge(&mut self, other: &Library) -> usize {
+        let mut added = 0;
+        for t in &other.view_templates {
+            if self.add_view_template(t.clone()).is_ok() {
+                added += 1;
+            }
+        }
+        for s in &other.drawing_sets {
+            if self.add_drawing_set(s.clone()).is_ok() {
+                added += 1;
+            }
+        }
+        // codes are not counted: they come with the types that have them
+        for c in &other.codes {
+            let _ = self.add_code(c.clone());
+        }
+        for m in &other.materials {
+            if self.material(&m.key).is_none() && self.add_material(m.clone()).is_ok() {
+                added += 1;
+            }
+        }
+        for b in &other.buildups {
+            if self.matching_named(b).is_some() {
+                continue;
+            }
+            let mut fresh = b.clone();
+            fresh.id = free_id(&b.id, |id| self.buildup(id).is_some());
+            if self.add_buildup(fresh).is_ok() {
+                added += 1;
+            }
+        }
+        for t in &other.linear_types {
+            if self.matching_linear(t).is_some() {
+                continue;
+            }
+            let mut fresh = t.clone();
+            fresh.id = free_id(&t.id, |id| self.linear_type(id).is_some());
+            if self.add_linear_type(fresh).is_ok() {
+                added += 1;
+            }
+        }
+        for t in &other.system_types {
+            if self.matching_system(t).is_some() {
+                continue;
+            }
+            let mut fresh = t.clone();
+            fresh.id = free_id(&t.id, |id| self.system_type(id).is_some());
+            if self.add_system_type(fresh).is_ok() {
+                added += 1;
+            }
+        }
+        // (after the materials: an object names what it is made of)
+        for o in &other.object_types {
+            if self.add_object_type(o.clone()).is_ok() {
+                added += 1;
+            }
+        }
+        // (by their keys: a connection the library has is not taken again)
+        for c in &other.connection_types {
+            if self.add_connection_type(c.clone()).is_ok() {
+                added += 1;
+            }
+        }
+        // (service and cover types by their keys too, each once its material is there)
+        for s in &other.service_types {
+            if self.add_service_type(s.clone()).is_ok() {
+                added += 1;
+            }
+        }
+        for c in &other.cover_types {
+            if self.add_cover_type(c.clone()).is_ok() {
+                added += 1;
+            }
+        }
+        for s in &other.hatch_standards {
+            if self.add_hatch_standard(s.clone()).is_ok() {
+                added += 1;
+            }
+        }
+        // an aspect comes with the item it is of, where this library has none of its kind (not
+        // counted; one of a type that got another id in the merge stays behind)
+        for a in &other.aspects {
+            if self.aspect(&a.item, a.kind).is_none() {
+                let _ = self.set_aspect(a.clone());
+            }
+        }
+        added
+    }
+
+    /// The level of detail its drawings show at: what it says, else 350.
+    pub fn shown_detail(&self) -> crate::detail::Detail {
+        self.detail.unwrap_or_default()
+    }
+
+    /// Whether a drawing hatches what it cuts: not at a level of detail of 200.
+    pub fn hatches_cuts(&self) -> bool {
+        self.shown_detail().material() == crate::detail::Shown::Hatch
+    }
+
+    /// The paths of the nodes of its items: what an aspect can be of.
+    pub fn item_paths(&self) -> std::collections::BTreeSet<String> {
+        let mut paths: std::collections::BTreeSet<String> = self.materials.iter().map(|m| crate::ifcx::material_path(&m.key)).collect();
+        paths.extend(self.buildups.iter().map(|b| crate::ifcx::buildup_path(&b.id)));
+        paths.extend(self.linear_types.iter().map(|t| crate::ifcx::linear_type_path(&t.id)));
+        paths.extend(self.system_types.iter().map(|t| crate::ifcx::system_type_path(&t.id)));
+        paths.extend(self.object_types.iter().map(|t| crate::object::path(&t.id)));
+        paths.extend(self.connection_types.iter().map(|t| crate::connection::path(&t.id)));
+        paths.extend(self.service_types.iter().map(|t| crate::service::path(&t.id)));
+        paths.extend(self.cover_types.iter().map(|t| crate::service::cover_path(&t.id)));
+        paths
+    }
+
+    /// The aspect of `kind` of the item at `item`.
+    pub fn aspect(&self, item: &str, kind: crate::aspect::Kind) -> Option<&crate::aspect::Aspect> {
+        self.aspects.iter().find(|a| a.item == item && a.kind == kind)
+    }
+
+    /// The aspects of the item at `item`.
+    pub fn aspects_of<'a>(&'a self, item: &'a str) -> impl Iterator<Item = &'a crate::aspect::Aspect> {
+        self.aspects.iter().filter(move |a| a.item == item)
+    }
+
+    /// Gives an item an aspect, in the place of the one of its kind it had. Refused when the
+    /// aspect does not check or the library has no such item.
+    pub fn set_aspect(&mut self, aspect: crate::aspect::Aspect) -> Result<(), LibraryError> {
+        aspect.check()?;
+        if !self.item_paths().contains(&aspect.item) {
+            return Err(LibraryError::BadAspect("an item of the library".into()));
+        }
+        match self.aspects.iter_mut().find(|a| a.item == aspect.item && a.kind == aspect.kind) {
+            Some(had) => *had = aspect,
+            None => self.aspects.push(aspect),
+        }
+        Ok(())
+    }
+
+    /// Takes the aspect of `kind` from the item at `item`; whether it had one.
+    pub fn remove_aspect(&mut self, item: &str, kind: crate::aspect::Kind) -> bool {
+        let before = self.aspects.len();
+        self.aspects.retain(|a| !(a.item == item && a.kind == kind));
+        self.aspects.len() != before
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::buildup::Layer;
+    use crate::material::{HatchKind, Names};
+
+    #[test]
+    fn the_starter_library_checks() {
+        let lib = Library::starter();
+        let mut fresh = Library { materials: lib.materials.clone(), hatch_standards: lib.hatch_standards.clone(), codes: lib.codes.clone(), drawing_sets: lib.drawing_sets.clone(), view_templates: lib.view_templates.clone(), object_types: lib.object_types.clone(), connection_types: lib.connection_types.clone(), ..Library::default() };
+        for b in &lib.buildups {
+            fresh.add_buildup(b.clone()).unwrap_or_else(|e| panic!("{}: {e}", b.id));
+        }
+        for t in &lib.linear_types {
+            fresh.add_linear_type(t.clone()).unwrap_or_else(|e| panic!("{}: {e}", t.id));
+        }
+        for t in &lib.system_types {
+            fresh.add_system_type(t.clone()).unwrap_or_else(|e| panic!("{}: {e}", t.id));
+        }
+        for t in &lib.service_types {
+            fresh.add_service_type(t.clone()).unwrap_or_else(|e| panic!("{}: {e}", t.id));
+        }
+        for c in &lib.cover_types {
+            fresh.add_cover_type(c.clone()).unwrap_or_else(|e| panic!("{}: {e}", c.id));
+        }
+        assert_eq!(fresh, lib);
+        assert_eq!(lib.name("roof.flat-concrete-pir", Lang::Nl).unwrap(), "Isolatie PIR-beton 320");
+        assert_eq!(lib.name("floor.hollow-core-260", Lang::En).unwrap(), "Hollow-core slab 260");
+    }
+
+    #[test]
+    fn equal_names_of_one_role_are_told_apart() {
+        let mut lib = Library::starter();
+        // the same materials and total as the 360 cavity wall, but other thicknesses
+        let other = BuildUp::new("wall.cavity-pir-360-b", Role::Wall, vec![Layer::new("brick", 0.1), Layer::new("air", 0.05), Layer::new("insulation-pir", 0.09), Layer::new("sand-lime", 0.12)]);
+        lib.add_buildup(other).unwrap();
+        assert_eq!(lib.name("wall.cavity-pir-360", Lang::Nl).unwrap(), "Metselwerk-spouw-isolatie PIR-kalkzandsteen 360");
+        assert_eq!(lib.name("wall.cavity-pir-360-b", Lang::Nl).unwrap(), "Metselwerk-spouw-isolatie PIR-kalkzandsteen 360 (2)");
+        let names = lib.names(Role::Wall, Lang::Nl);
+        assert_eq!(names.last().unwrap().1, "Metselwerk-spouw-isolatie PIR-kalkzandsteen 360 (2)");
+        // a floor of the same name is another role: no number
+        let floor = lib.names(Role::Floor, Lang::Nl);
+        assert!(floor.iter().all(|(_, n)| !n.ends_with(')')), "{floor:?}");
+    }
+
+    #[test]
+    fn ids_and_keys_are_unique() {
+        let mut lib = Library::starter();
+        let copy = lib.buildups[0].clone();
+        assert_eq!(lib.add_buildup(copy.clone()), Err(LibraryError::Duplicate(copy.id)));
+        let concrete = lib.materials[0].clone();
+        assert_eq!(lib.add_material(concrete), Err(LibraryError::Duplicate("concrete".into())));
+        let nameless = Material::new("", Names::same("x"), HatchKind::Generic, [0, 0, 0]);
+        assert_eq!(lib.add_material(nameless), Err(LibraryError::NoKey));
+    }
+
+    #[test]
+    fn merging_adds_only_what_is_missing() {
+        let mut project = Library::starter();
+        let before = project.clone();
+        let mut other = Library::starter();
+        // a material and a build-up the project lacks, and one it has under another id
+        other.materials.push(Material::new("cork", Names::new("kurk", "cork", "Kork", "liège"), HatchKind::Insulation, [160, 120, 80]));
+        other.materials[0].colour = [1, 2, 3];
+        other.buildups.push(BuildUp::new("wall.cork-200", Role::Wall, vec![Layer::new("cork", 0.2)]));
+        other.buildups.push(BuildUp::new("wall.concrete-250-copy", Role::Wall, vec![Layer::new("concrete", 0.250001)]));
+        // a new one whose id the project already uses for something else
+        other.buildups.push(BuildUp::new("wall.concrete-150", Role::Wall, vec![Layer::new("concrete", 0.175)]));
+        // the name of the 360 cavity wall, other layers
+        other.buildups.push(BuildUp::new("wall.cavity-b", Role::Wall, vec![Layer::new("brick", 0.1), Layer::new("air", 0.06), Layer::new("insulation-pir", 0.08), Layer::new("sand-lime", 0.12)]));
+        assert_eq!(project.merge(&other), 4, "cork, the cork wall, the 175 wall and the other cavity wall");
+        assert_eq!(project.material("concrete"), before.material("concrete"), "the project's concrete stays as it was");
+        assert!(project.buildup("wall.concrete-250-copy").is_none(), "the 250 wall was there, within 0.01 mm");
+        assert_eq!(project.name("wall.cavity-b", Lang::Nl).unwrap(), "Metselwerk-spouw-isolatie PIR-kalkzandsteen 360 (2)");
+        assert_eq!(project.buildup("wall.concrete-150"), before.buildup("wall.concrete-150"));
+        assert_eq!(project.buildup("wall.concrete-150-2").unwrap().layers[0].thickness, 0.175);
+        assert_eq!(project.merge(&other), 0, "merging twice adds nothing");
+    }
+
+    #[test]
+    fn linear_types_merge_by_role_material_and_profile() {
+        let mut project = Library::starter();
+        let mut other = Library::starter();
+        other.linear_types.push(LinearType::steel("column.hea-200", LinearRole::Column, "HEA 200").unwrap());
+        other.linear_types.push(LinearType::steel("beam.hea-200", LinearRole::Beam, "HEA 200").unwrap());
+        // the project's 300x300 concrete column, under another id
+        let mut copy = project.linear_types[0].clone();
+        copy.id = "column.copy".into();
+        other.linear_types.push(copy);
+        assert_eq!(project.merge(&other), 2, "the HEA 200 as a column and as a beam");
+        assert_eq!(project.linear_name("column.hea-200", Lang::Nl).unwrap(), "HEA 200");
+        assert!(project.linear_type("column.copy").is_none());
+        // a second 200x200 steel column of another id gets a number in the list
+        project.add_linear_type(LinearType::new("column.steel-200x200-b", LinearRole::Column, "steel", crate::ProfileShape::Rectangle { width: 0.2, depth: 0.2 })).unwrap();
+        assert_eq!(project.linear_name("column.steel-200x200-b", Lang::Nl).unwrap(), "Staal 200x200 (2)");
+        assert_eq!(project.linear_names(LinearRole::Pipe, Lang::En), vec![("pipe.generic-110", "Generic round 110".to_string())]);
+    }
+
+    #[test]
+    fn system_types_merge_by_what_they_make() {
+        let mut project = Library::starter();
+        let mut other = Library::starter();
+        // the project's aluminium curtain wall under another id, 0.001 mm off
+        let mut copy = project.system_types[0].clone();
+        copy.id = "system.copy".into();
+        copy.grid.bay += 1e-6;
+        other.system_types.push(copy);
+        // a curtain wall at 1800 instead, under an id the project uses
+        let mut wider = project.system_types[0].clone();
+        wider.grid.bay = 1.8;
+        other.system_types.push(wider);
+        assert_eq!(project.merge(&other), 1, "only the curtain wall at 1800");
+        assert!(project.system_type("system.copy").is_none());
+        assert_eq!(project.system_name("system.curtain-wall-aluminium-1500-2", Lang::Nl).unwrap(), "Vliesgevel aluminium 50×150 h.o.h. 1800");
+        // the same name twice in a group gets a number
+        let mut twin = project.system_types[0].clone();
+        twin.id = "system.twin".into();
+        twin.grid.row = 2.0;
+        project.add_system_type(twin).unwrap();
+        assert_eq!(project.system_name("system.twin", Lang::Nl).unwrap(), "Vliesgevel aluminium 50×150 h.o.h. 1500 (2)");
+        let ceilings = project.system_names(SystemGroup::Ceiling, Lang::En);
+        assert_eq!(ceilings.len(), 7);
+        assert_eq!(ceilings[0], ("system.ceiling-600x600", "Mineral fibre 15 600×600".to_string()));
+        assert!(ceilings.contains(&("system.ceiling-gypsum-1", "Gypsum board 1×12.5 steel 60×27 c/c 500".to_string())), "{ceilings:?}");
+        let other = Library { system_types: vec![SystemType { id: "system.x".into(), ..project.system_types[0].clone() }], ..Library::default() };
+        let mut bare = Library::default();
+        assert_eq!(bare.merge(&other), 0, "a type of materials the library lacks is left out");
+    }
+
+    #[test]
+    fn a_build_up_of_an_unknown_material_is_left_out_of_a_merge() {
+        let mut project = Library::starter();
+        let other = Library { buildups: vec![BuildUp::new("wall.x", Role::Wall, vec![Layer::new("unknown", 0.1)])], ..Library::default() };
+        assert_eq!(project.merge(&other), 0);
+    }
+}

@@ -1,0 +1,148 @@
+[
+  {
+    "name": "Open 3D Viewer",
+    "source": "docs/branding/open-3d-viewer.png",
+    "sha256": "331204e28a97cced92c84a6778a6cc5a657d9441f73100e4b1f43cb0ad52eaa9",
+    "source_url": "https://dashboard.snapcraft.io/site_media/appmedia/2026/11/open-3d-viewer-logo-afgerond.png",
+    "outputs": [
+      {
+        "path": "assets/icons/icon.png",
+        "size": [
+          512,
+          512
+        ]
+      },
+      {
+        "path": "assets/icons/icon.ico"
+      },
+      {
+        "path": "assets/icons/icon.icns"
+      },
+      {
+        "path": "assets/icons/128x128.png",
+        "size": [
+          128,
+          128
+        ]
+      },
+      {
+        "path": "assets/logo.svg"
+      },
+      {
+        "path": "packaging/windows/icon.ico"
+      },
+      {
+        "path": "web/icons/icon-192.png",
+        "size": [
+          192,
+          192
+        ]
+      },
+      {
+        "path": "web/icons/icon-512.png",
+        "size": [
+          512,
+          512
+        ]
+      },
+      {
+        "path": "web/icons/maskable-192.png",
+        "size": [
+          192,
+          192
+        ],
+        "scale": 1.0,
+        "background": "#E78A08"
+      },
+      {
+        "path": "web/icons/maskable-512.png",
+        "size": [
+          512,
+          512
+        ],
+        "scale": 1.0,
+        "background": "#E78A08"
+      },
+      {
+        "path": "packaging/android/app/src/main/res/mipmap-mdpi/ic_launcher.png",
+        "size": [
+          48,
+          48
+        ]
+      },
+      {
+        "path": "packaging/android/app/src/main/res/mipmap-mdpi/ic_launcher_foreground.png",
+        "size": [
+          108,
+          108
+        ],
+        "scale": 0.7,
+        "background": "#E78A08"
+      },
+      {
+        "path": "packaging/android/app/src/main/res/mipmap-hdpi/ic_launcher.png",
+        "size": [
+          72,
+          72
+        ]
+      },
+      {
+        "path": "packaging/android/app/src/main/res/mipmap-hdpi/ic_launcher_foreground.png",
+        "size": [
+          162,
+          162
+        ],
+        "scale": 0.7,
+        "background": "#E78A08"
+      },
+      {
+        "path": "packaging/android/app/src/main/res/mipmap-xhdpi/ic_launcher.png",
+        "size": [
+          96,
+          96
+        ]
+      },
+      {
+        "path": "packaging/android/app/src/main/res/mipmap-xhdpi/ic_launcher_foreground.png",
+        "size": [
+          216,
+          216
+        ],
+        "scale": 0.7,
+        "background": "#E78A08"
+      },
+      {
+        "path": "packaging/android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png",
+        "size": [
+          144,
+          144
+        ]
+      },
+      {
+        "path": "packaging/android/app/src/main/res/mipmap-xxhdpi/ic_launcher_foreground.png",
+        "size": [
+          324,
+          324
+        ],
+        "scale": 0.7,
+        "background": "#E78A08"
+      },
+      {
+        "path": "packaging/android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png",
+        "size": [
+          192,
+          192
+        ]
+      },
+      {
+        "path": "packaging/android/app/src/main/res/mipmap-xxxhdpi/ic_launcher_foreground.png",
+        "size": [
+          432,
+          432
+        ],
+        "scale": 0.7,
+        "background": "#E78A08"
+      }
+    ]
+  }
+]

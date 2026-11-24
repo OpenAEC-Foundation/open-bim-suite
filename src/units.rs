@@ -1,0 +1,146 @@
+//! What the GPU knows per unit (an element, or the rest of a layer; see [`crate::explode`]): the
+//! offset of the exploded view in `xyz` and flags in `w`, one texel of the units texture per unit.
+//! Hiding or highlighting an element is one write of that texture; the geometry never changes.
+//! `scene.wgsl` reads the flags with the same values.
+
+use crate::model::ElementKey;
+use std::collections::HashSet;
+use std::hash::{BuildHasherDefault, Hasher};
+
+/// A unit that keeps its name when another model is added: an element by its key, or the
+/// triangles outside elements of a layer by its model and its index within that model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UnitKey {
+    Element(ElementKey),
+    LayerRest { model: u32, layer: u32 },
+}
+
+/// A set of unit keys. It hashes with [`KeyHasher`]: hiding or isolating 10^5 elements fills it
+/// and every redraw of the flags looks them all up, which the default hasher makes too slow for
+/// one frame.
+/// A set and a map hashed with [`KeyHasher`], for keys and ids that come by the 10^5.
+pub type FastHashSet<T> = HashSet<T, BuildHasherDefault<KeyHasher>>;
+pub type FastHashMap<K, V> = std::collections::HashMap<K, V, BuildHasherDefault<KeyHasher>>;
+
+pub type UnitKeySet = FastHashSet<UnitKey>;
+
+/// A fast hash for small integer keys (the multiply-rotate mix of rustc's FxHasher). The keys
+/// come from the model itself, not from outside, so it needs no protection against crafted
+/// collisions.
+#[derive(Default, Clone, Copy)]
+pub struct KeyHasher(u64);
+
+impl KeyHasher {
+    fn add(&mut self, word: u64) {
+        self.0 = (self.0.rotate_left(5) ^ word).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+}
+
+impl Hasher for KeyHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        for chunk in bytes.chunks(8) {
+            let mut word = [0u8; 8];
+            word[..chunk.len()].copy_from_slice(chunk);
+            self.add(u64::from_le_bytes(word));
+        }
+    }
+    fn write_u32(&mut self, n: u32) {
+        self.add(n as u64);
+    }
+    fn write_u64(&mut self, n: u64) {
+        self.add(n);
+    }
+    fn write_usize(&mut self, n: usize) {
+        self.add(n as u64);
+    }
+    fn write_isize(&mut self, n: isize) {
+        self.add(n as u64);
+    }
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+/// Not drawn: no faces, edges or cut fill.
+pub const UNIT_HIDDEN: u8 = 1;
+/// Drawn in the selection colour.
+pub const UNIT_SELECTED: u8 = 2;
+/// Units the texture can hold: 1024 per row and, with WebGL2, at most 2048 rows. Units beyond
+/// keep no offset and no flags.
+pub const MAX_UNITS: usize = 2048 * 1024;
+
+/// The state of every unit: the offset from `offsets` (zero where it has none) and the flags
+/// from `flags` as a number in `w`. Unit 0, the geometry outside any unit, never gets flags.
+pub fn unit_state(offsets: &[[f32; 4]], flags: &[u8]) -> Vec<[f32; 4]> {
+    let n = offsets.len().max(flags.len()).min(MAX_UNITS);
+    (0..n)
+        .map(|u| {
+            let [x, y, z, _] = offsets.get(u).copied().unwrap_or([0.0; 4]);
+            let f = if u == 0 { 0 } else { flags.get(u).copied().unwrap_or(0) };
+            [x, y, z, f as f32]
+        })
+        .collect()
+}
+
+/// Lowers the priority of the thread that calls it: for work done ahead (cutting the views of
+/// the drawings, finding the edges of a model), so the window and its drawing come first. On
+/// Windows the thread runs below normal; elsewhere it stays as it is.
+pub fn work_in_background() {
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetCurrentThread() -> *mut std::ffi::c_void;
+            fn SetThreadPriority(thread: *mut std::ffi::c_void, priority: i32) -> i32;
+        }
+        const THREAD_PRIORITY_BELOW_NORMAL: i32 = -1;
+        // SAFETY: the pseudo-handle of the calling thread is always valid, and the call only
+        // changes that thread's own priority.
+        unsafe {
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+        }
+    }
+}
+
+/// How the renderer draws a unit a view gives a look (`crate::hatching::Look`): the colour of its
+/// surfaces and of its lines as 0xRRGGBB + 1 (0: as its material), its transparency (0..1) and
+/// halftone (1).
+pub fn unit_look(look: &crate::hatching::Look) -> [f32; 4] {
+    let packed = |c: Option<[u8; 3]>| c.map_or(0.0, |[r, g, b]| ((u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b)) + 1) as f32);
+    [packed(look.surface), packed(look.seen_line.color), f32::from(look.transparency.min(100)) / 100.0, if look.halftone { 1.0 } else { 0.0 }]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_look_packs_its_colours_exactly() {
+        let look = crate::hatching::Look { surface: Some([255, 255, 255]), halftone: true, transparency: 20, ..Default::default() };
+        let [surface, line, transparency, halftone] = unit_look(&look);
+        // white is the largest colour; one more is still a whole number in an f32
+        assert_eq!(surface as u32, 0x00ff_ffff + 1);
+        assert_eq!(line, 0.0);
+        assert!((transparency - 0.2).abs() < 1e-6);
+        assert_eq!(halftone, 1.0);
+        assert_eq!(unit_look(&Default::default()), [0.0; 4]);
+    }
+
+    #[test]
+    fn unit_state_puts_flags_in_w() {
+        let s = unit_state(&[[0.0; 4], [1.0, 2.0, 3.0, 0.0]], &[0, UNIT_HIDDEN | UNIT_SELECTED, UNIT_SELECTED]);
+        assert_eq!(s.len(), 3);
+        assert_eq!(s[1], [1.0, 2.0, 3.0, 3.0]);
+        assert_eq!(s[2], [0.0, 0.0, 0.0, 2.0]);
+    }
+
+    #[test]
+    fn unit_zero_never_gets_flags() {
+        assert_eq!(unit_state(&[], &[UNIT_HIDDEN])[0][3], 0.0);
+    }
+
+    #[test]
+    fn unit_state_is_capped_to_texture_limit() {
+        assert_eq!(unit_state(&[], &vec![UNIT_HIDDEN; MAX_UNITS + 10]).len(), MAX_UNITS);
+    }
+}

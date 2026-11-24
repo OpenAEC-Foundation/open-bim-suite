@@ -1,0 +1,348 @@
+//! The View section of the right pane's Properties tab: the view whose layers the pane shows (the
+//! view in the viewport, or the view picked on a sheet), with its name, a floor plan's cut height
+//! and view depth and a section's depth typed in. A value is used as soon as it is valid: the
+//! view's drawing is cut again and its tab's section box follows. Until then the field keeps what
+//! was typed; Enter shows the value in use again.
+
+use super::layers::LayersOf;
+use super::{prop_row, App, Message};
+use crate::document::parse_elevation;
+use crate::theme::Palette;
+use iced::widget::text::Wrapping;
+use iced::widget::{button, column, pick_list, row, text, text_input};
+use iced::{Center, Element, Length};
+use openaec_ui::Language;
+
+/// A property of a view typed in the right pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewField {
+    Name,
+    /// A floor plan's cut above its level.
+    Cut,
+    /// How far a floor plan looks below its level, a section or elevation beyond its line.
+    Depth,
+}
+
+impl App {
+    /// The view of the document whose properties the right pane shows: the view in the viewport
+    /// or the view picked on a sheet; `None` for the 3D view (and where the pane shows no view).
+    pub(super) fn properties_view(&self) -> Option<String> {
+        match self.layers_of()? {
+            LayersOf::Viewport => self.active_plan.clone(),
+            LayersOf::Placed(path) => Some(path),
+        }
+    }
+
+    /// What a field of the View section shows: what is being typed in it, else the value in use.
+    pub(super) fn view_field_text(&self, path: &str, field: ViewField) -> String {
+        if let Some((p, f, typed)) = &self.view_typing {
+            if p == path && *f == field {
+                return typed.clone();
+            }
+        }
+        match field {
+            ViewField::Name => self.document.view_name(path).unwrap_or_default().to_string(),
+            ViewField::Cut => self.document.plan(path).map_or(String::new(), |p| format!("{:.3}", p.cut)),
+            ViewField::Depth => {
+                let depth = self.document.plan(path).map(|p| p.depth).or_else(|| self.document.section(path).map(|s| s.depth));
+                depth.map_or(String::new(), |d| format!("{d:.3}"))
+            }
+        }
+    }
+
+    /// Takes what is typed in a field of the View section, and uses it when it is valid.
+    pub(super) fn type_view_field(&mut self, field: ViewField, typed: String) {
+        let Some(path) = self.properties_view() else { return };
+        let drawn_again = match field {
+            ViewField::Name => {
+                self.document.set_view_name(&path, &typed);
+                false
+            }
+            ViewField::Cut => parse_elevation(&typed).is_some_and(|cut| {
+                self.document.plan(&path).is_some_and(|p| p.cut != cut) && self.document.set_cut(&path, cut)
+            }),
+            ViewField::Depth => parse_elevation(&typed).is_some_and(|depth| self.document.set_view_depth(&path, depth)),
+        };
+        if drawn_again {
+            self.view_changed(&path);
+        }
+        self.view_typing = Some((path, field, typed));
+    }
+
+    /// A view's heights or depth changed: its drawing is cut again where it was cut, its tab's
+    /// section box follows, and the sheet bar shows its cut height.
+    pub(super) fn view_changed(&mut self, path: &str) {
+        self.cut_again(path);
+        self.fit_plan_section(path);
+        if let Some((plan, typed)) = &mut self.cut_edit {
+            if let Some(view) = self.document.plan(path).filter(|_| plan.as_str() == path) {
+                *typed = format!("{:.3}", view.cut);
+            }
+        }
+    }
+
+    /// The properties of the view whose layers the right pane shows: its name and kind, a floor
+    /// plan's level, cut height and view depth, a section's length and depth, and how many
+    /// layers it shows otherwise than the model. The name, heights and depths can be typed.
+    pub(super) fn view_properties(&self, p: Palette, l: Language) -> Option<Element<'_, Message>> {
+        let of = self.layers_of()?;
+        let row = |k: &str, v: String| prop_row(p, k.to_string(), v);
+        let Some(path) = self.properties_view() else {
+            let rows = column![row(l.text("Naam", "Name"), self.layers_view_name(&of, l)), row(l.text("Soort", "Kind"), l.text("3D-weergave", "3D view").into())];
+            return Some(rows.spacing(5).into());
+        };
+        let field = |k: &str, f: ViewField| field_row(p, k, self.view_field_text(&path, f), f);
+        let mut rows = column![field(l.text("Naam", "Name"), ViewField::Name)].spacing(5);
+        if let Some(plan) = self.document.plan(&path) {
+            if plan.drawing.as_deref() == Some("pile-schedule") {
+                use crate::document::PileLegendField;
+                let legend = &plan.presentation["legend"];
+                let edit = |name: String, value: &str, field: PileLegendField| -> Element<'static, Message> {
+                    let key: std::sync::Arc<str> = path.as_str().into();
+                    iced::widget::row![
+                        text(name).size(12).color(p.text_secondary).width(Length::FillPortion(2)),
+                        text_input("", value).size(12).padding([2,6]).width(Length::FillPortion(3))
+                            .on_input(move |s| Message::PileLegendField(key.clone(), field.clone(), s))
+                    ].align_y(Center).spacing(8).into()
+                };
+                let office = self.house.key.eq_ignore_ascii_case("3bm") || legend["layout"] == "pile-renvooi";
+                if office {
+                    rows = rows.push(edit(l.text("Uitvoering", "Execution").into(), legend["execution"].as_str().unwrap_or(""), PileLegendField::Execution))
+                        .push(edit(l.text("Funderingsadvies", "Foundation advice").into(), legend["advice"].as_str().unwrap_or(""), PileLegendField::Advice));
+                }
+                rows = rows.push(edit(l.text("Sondeerrapport", "Sounding report").into(), legend["report"].as_str().unwrap_or(""), PileLegendField::Report))
+                    .push(edit(l.text("Peil t.o.v. NAP", "Datum relative to NAP").into(), legend["datum"].as_str().unwrap_or(""), PileLegendField::Datum));
+                for entry in legend["rows"].as_array().into_iter().flatten() {
+                    let Some(key) = entry["key"].as_str() else { continue };
+                    let kind = entry["type"].as_str().unwrap_or("");
+                    let toe = entry["toe"].as_f64().unwrap_or_default();
+                    if office {
+                        for (label, prop, field) in [
+                        (l.text("O.K. voet [mm t.o.v. peil]", "Foot underside [mm from datum]"), "foot", PileLegendField::Foot(key.into())),
+                        (l.text("B.K. ongesnelde paal [mm t.o.v. peil]", "Uncut pile head [mm from datum]"), "uncut", PileLegendField::Uncut(key.into())),
+                        ] { rows = rows.push(edit(format!("{label} · {kind}"), legend[prop][key].as_str().unwrap_or(""), field)); }
+                    }
+                    let cutoff = if legend["cutoffLabel"].as_str().is_some_and(|s| s.starts_with("AFHAKMAAT")) {
+                        l.text("Afhakmaat [mm]", "Cut-off dimension [mm]")
+                    } else { l.text("Afhakhoogte", "Cut-off level") };
+                    let caption = format!("{cutoff} · {kind} ({toe:+.2} m)");
+                    rows = rows.push(edit(caption, legend["cutoffs"][key].as_str().unwrap_or(""), PileLegendField::Cutoff(key.to_owned())));
+                }
+                return Some(rows.into());
+            }
+            let level = self.document.level(&plan.level).map(|lv| lv.name.clone()).unwrap_or_default();
+            let kind = match plan.kind {
+                crate::document::PlanKind::Floor => l.text("Plattegrond", "Floor plan"),
+                crate::document::PlanKind::Structural => l.text("Constructieve plattegrond", "Structural plan"),
+                crate::document::PlanKind::Ceiling => l.text("Plafondplan", "Ceiling plan"),
+                crate::document::PlanKind::StructuralUp => l.text("Constructieve plattegrond, omhoog gezien", "Structural plan, looking up"),
+            };
+            rows = rows
+                .push(row(l.text("Soort", "Kind"), kind.into()))
+                .push(row(l.text("Niveau", "Level"), level))
+                .push(field(l.text("Snijhoogte (m)", "Cut height (m)"), ViewField::Cut))
+                .push(field(l.text("Kijkdiepte (m)", "View depth (m)"), ViewField::Depth));
+        } else if let Some(s) = self.document.section(&path) {
+            let length = (s.to[0] - s.from[0]).hypot(s.to[1] - s.from[1]);
+            rows = rows
+                .push(row(l.text("Soort", "Kind"), if s.kind == crate::document::SectionKind::Elevation { l.text("Aanzicht", "Elevation view") } else { l.text("Doorsnede", "Section") }.into()))
+                .push(row(l.text("Lengte", "Length"), format!("{length:.3} m")))
+                .push(field(l.text("Diepte (m)", "Depth (m)"), ViewField::Depth));
+        } else if let Some(v) = self.document.view_3d(&path) {
+            // the projection shown now in its tab, else as it was left
+            let perspective = if self.active_plan.as_deref() == Some(path.as_str()) { !self.camera.ortho } else { v.camera.perspective };
+            rows = rows
+                .push(row(l.text("Soort", "Kind"), l.text("3D-weergave", "3D view").into()))
+                .push(row(l.text("Projectie", "Projection"), if perspective { l.text("Perspectief", "Perspective") } else { l.text("Parallel", "Parallel") }.into()));
+        }
+        // its kind of drawing: picked from those of the drawing standard that are its kind of
+        // view, with the scale it is drawn at and what the kind gives it
+        if let Some(kind) = self.view_kind(&path) {
+            let lang = super::library::lang(l);
+            let kinds: Vec<Choice> = self.view_kinds(&path).iter().map(|k| Choice { key: k.key.clone(), label: k.names.get(lang).to_string() }).collect();
+            let now = kinds.iter().find(|c| c.key == kind.key).cloned();
+            let picked = pick_list(kinds, now, |c: Choice| Message::ViewKind(c.key)).text_size(12).padding([2, 6]).width(Length::FillPortion(3));
+            rows = rows.push(pick_row(p, l.text("Tekeningsoort", "Kind of drawing"), picked.into()));
+            let scale = self.document.view_scale(&path).unwrap_or(crate::document::SHEET_SCALE).round() as u32;
+            let mut scales = kind.scales.clone();
+            if !scales.contains(&scale) {
+                scales.push(scale);
+            }
+            let scales: Vec<Choice> = scales.iter().map(|s| Choice { key: s.to_string(), label: bim_library::drawing::scale_text(*s) }).collect();
+            let now = scales.iter().find(|c| c.key == scale.to_string()).cloned();
+            let picked = pick_list(scales, now, |c: Choice| Message::ViewScale(c.key.parse().unwrap_or(100))).text_size(12).padding([2, 6]).width(Length::FillPortion(3));
+            rows = rows.push(pick_row(p, l.text("Schaal", "Scale"), picked.into()));
+            let rules = self.view_rules(&path);
+            rows = rows.push(row(l.text("Lijndiktes", "Line weights"), format!("{} / {} mm", rules.cut, rules.beyond)));
+            // the kind's own fields open under the view's: what is set there holds for every
+            // drawing of the kind
+            let open = self.standard_view.picked == Some(super::standards::Setting::Kind(kind.key.clone()));
+            let label = if open { l.text("Soort sluiten", "Close the kind") } else { l.text("Soort bewerken", "Edit the kind") };
+            rows = rows.push(button(text(label).size(12).color(p.text_secondary)).padding([3, 8]).style(move |_, s| p.row_button(s)).on_press(Message::ViewKindEdit(!open)));
+            if open {
+                rows = rows
+                    .push(text(l.text("Wat je hier instelt, geldt voor elke tekening van deze soort.", "What is set here holds for every drawing of this kind.")).size(11).color(p.text_muted).wrapping(Wrapping::Word))
+                    .push(self.standard_pane(p, l));
+            }
+        }
+        let own = self.document.view_layers(&path).map_or(0, |o| o.len());
+        let own = if own == 0 { l.text("zoals het model", "as the model").to_string() } else { own.to_string() };
+        let hidden = self.document.view_hidden(&path).map_or(0, |h| h.len());
+        let hidden = if hidden == 0 { l.text("geen", "none").to_string() } else { super::format_count(hidden) };
+        Some(rows.push(row(l.text("Eigen lagen", "Own layers"), own)).push(row(l.text("Verborgen elementen", "Hidden elements"), hidden)).into())
+    }
+}
+
+/// One of a list to pick from: what it stands for, and how it is named.
+#[derive(Debug, Clone, PartialEq)]
+struct Choice {
+    key: String,
+    label: String,
+}
+
+impl std::fmt::Display for Choice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
+    }
+}
+
+/// A property to pick: its label, and the list it is picked from.
+fn pick_row<'a>(p: Palette, label: &str, pick: Element<'a, Message>) -> Element<'a, Message> {
+    row![text(label.to_string()).size(12).color(p.text_secondary).wrapping(Wrapping::WordOrGlyph).width(Length::FillPortion(2)), pick].spacing(8).align_y(Center).into()
+}
+
+/// A property to type in: its label, and a field that sends what is typed.
+fn field_row(p: Palette, label: &str, value: String, field: ViewField) -> Element<'static, Message> {
+    row![
+        text(label.to_string()).size(12).color(p.text_secondary).wrapping(Wrapping::WordOrGlyph).width(Length::FillPortion(2)),
+        text_input("", &value)
+            .on_input(move |typed| Message::ViewField(field, typed))
+            .on_submit(Message::ViewFieldDone)
+            .size(12)
+            .padding([2, 6])
+            .width(Length::FillPortion(3)),
+    ]
+    .spacing(8)
+    .align_y(Center)
+    .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::layers::tests::{app_with_plan, room, shows};
+    use crate::app::paper::SheetPick;
+    use crate::app::views::DocTab;
+    use std::sync::Arc;
+
+    fn type_in(app: &mut App, field: ViewField, typed: &str) {
+        let _ = app.update(Message::ViewField(field, typed.into()));
+    }
+
+    /// The app with the plan of level 00 placed on a sheet (cut there), the sheet shown.
+    fn plan_on_sheet() -> (App, Arc<str>) {
+        let (mut app, plan) = app_with_plan();
+        let _ = app.update(Message::NewSheet("Sheet"));
+        let sheet = Arc::<str>::from(app.document.sheets()[0].path.as_str());
+        let _ = app.update(Message::PlaceOnSheet(sheet, plan.clone()));
+        assert!(app.cuts.contains_key(&*plan));
+        (app, plan)
+    }
+
+    #[test]
+    fn a_name_typed_renames_the_view_in_its_tab_and_in_the_ifcx() {
+        let (mut app, plan) = app_with_plan();
+        let other = app.document.levels()[1].path.clone();
+        app.document.add_plan(&other).unwrap();
+        type_in(&mut app, ViewField::Name, "Ground floor");
+        assert_eq!(app.document.view_name(&plan), Some("Ground floor"));
+        assert_eq!(app.tab_title(DocTab::Plan(0)), "Ground floor");
+        let ifcx = serde_json::to_string(&app.document.ifcx_drawing_nodes()).unwrap();
+        assert!(ifcx.contains("Ground floor"), "{ifcx}");
+        // empty, or the other plan's name: the view keeps its name, the field what was typed
+        for typed in [" ", "01"] {
+            type_in(&mut app, ViewField::Name, typed);
+            assert_eq!(app.document.view_name(&plan), Some("Ground floor"), "{typed:?}");
+            assert_eq!(app.view_field_text(&plan, ViewField::Name), typed);
+        }
+        let _ = app.update(Message::ViewFieldDone);
+        assert_eq!(app.view_field_text(&plan, ViewField::Name), "Ground floor");
+    }
+
+    #[test]
+    fn a_cut_height_or_view_depth_typed_cuts_the_plan_again_and_its_box_follows() {
+        let (mut app, plan) = plan_on_sheet();
+        let both = app.cuts[&*plan].segments.len();
+        let _ = app.update(Message::SelectTab(1));
+        assert_eq!(app.active_plan.as_deref(), Some(&*plan));
+        assert_eq!(app.view_field_text(&plan, ViewField::Cut), "1.200");
+        type_in(&mut app, ViewField::Cut, "2,5");
+        assert_eq!(app.document.plan(&plan).unwrap().cut, 2.5);
+        let walls = app.cuts[&*plan].segments.len();
+        assert!(walls < both, "the cupboard is under the cut now: {walls} of {both}");
+        assert!((app.section.expect("the tab's box").max.z - 2.5).abs() < 1e-4);
+        type_in(&mut app, ViewField::Depth, "0.5 m");
+        assert_eq!(app.document.plan(&plan).unwrap().depth, 0.5);
+        assert!((app.section.unwrap().min.z + 0.5).abs() < 1e-4);
+        // not a height, or under the view depth: not used, the field keeps what was typed
+        for typed in ["", "abc", "-0,6"] {
+            type_in(&mut app, ViewField::Cut, typed);
+            assert_eq!(app.document.plan(&plan).unwrap().cut, 2.5, "{typed:?}");
+            assert_eq!(app.view_field_text(&plan, ViewField::Cut), typed);
+        }
+        type_in(&mut app, ViewField::Depth, "-1");
+        assert_eq!(app.document.plan(&plan).unwrap().depth, 0.5);
+        let _ = app.update(Message::ViewFieldDone);
+        assert_eq!(app.view_field_text(&plan, ViewField::Cut), "2.500");
+        assert_eq!(app.view_field_text(&plan, ViewField::Depth), "0.500");
+    }
+
+    #[test]
+    fn picked_on_a_sheet_a_view_is_typed_into_and_the_sheet_bar_follows() {
+        let (mut app, plan) = plan_on_sheet();
+        let both = app.cuts[&*plan].segments.len();
+        let _ = app.update(Message::SelectTab(0));
+        let _ = app.update(Message::SelectTab(2));
+        let _ = app.update(Message::PickOnSheet(Some(SheetPick::View(0))));
+        assert_eq!(app.properties_view().as_deref(), Some(&*plan));
+        type_in(&mut app, ViewField::Cut, "2.5");
+        assert!(app.cuts[&*plan].segments.len() < both);
+        assert_eq!(app.cut_edit, Some((plan.to_string(), "2.500".to_string())));
+        // typed in the sheet bar, the right pane shows it
+        let _ = app.update(Message::CutText("1.2".into()));
+        let _ = app.update(Message::ApplyCut);
+        assert_eq!(app.view_field_text(&plan, ViewField::Cut), "1.200");
+        assert_eq!(app.cuts[&*plan].segments.len(), both);
+    }
+
+    #[test]
+    fn a_sections_depth_typed_cuts_it_again() {
+        let mut app = App::default();
+        app.set_model(room());
+        // across the room at y 2.5, looking to -y: the cupboard is cut, the wall at y 0 is seen
+        let section = app.document.add_section("Section A", [9.0, 2.5], [-1.0, 2.5], 10.0).unwrap();
+        let _ = app.update(Message::OpenPlan(Arc::from(section.as_str())));
+        assert_eq!(app.active_plan.as_deref(), Some(section.as_str()));
+        app.cut_view(&section);
+        let lines = |app: &App| app.cuts[&section].segments.len() + app.cuts[&section].below.len();
+        let far = lines(&app);
+        let before = app.section;
+        assert_eq!(app.view_field_text(&section, ViewField::Depth), "10.000");
+        type_in(&mut app, ViewField::Depth, "1");
+        assert_eq!(app.document.section(&section).unwrap().depth, 1.0);
+        assert!(lines(&app) < far, "the wall at y 0 is out of sight: {} of {far}", lines(&app));
+        assert_ne!(app.section, before, "its tab's box follows");
+        type_in(&mut app, ViewField::Depth, "0");
+        assert_eq!(app.document.section(&section).unwrap().depth, 1.0);
+    }
+
+    #[test]
+    fn the_view_section_has_fields_for_what_can_be_typed() {
+        let (mut app, _) = app_with_plan();
+        assert!(shows(&app, "Cut height (m)"));
+        assert!(shows(&app, "View depth (m)"));
+        let _ = app.update(Message::SelectTab(0));
+        assert!(shows(&app, "3D view"));
+        assert!(!shows(&app, "Cut height (m)"), "the 3D view has none");
+    }
+}

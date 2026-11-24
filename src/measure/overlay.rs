@@ -7,7 +7,7 @@
 use super::format::{Category, UnitSettings};
 use super::geometry::{self, Angle, Entity, FaceRegion};
 use super::hover::{Hover, SnapKind};
-use super::{arc_radius, Measurement, Snap, Tool};
+use super::{arc_radius, MarkKind, Measurement, Snap, Tool};
 use glam::{Mat4, Vec3};
 use iced::widget::canvas::{self, Frame, LineDash, Path, Stroke};
 use iced::{alignment, mouse, Color, Point, Rectangle, Size};
@@ -32,6 +32,8 @@ pub struct MeasureOverlay<'a> {
     pub ink: Color,
     pub label_bg: Color,
     pub label_text: Color,
+    /// Labels of the model on its points (Rhino's text dots): where, text, background colour.
+    pub dots: Vec<(Vec3, String, Color)>,
 }
 
 struct Projector {
@@ -107,6 +109,28 @@ impl MeasureOverlay<'_> {
         }
     }
 
+    /// A label of the model: its text in white (black on a light colour) on its colour, centred
+    /// on its point, a fixed size on the screen.
+    fn model_dot(&self, frame: &mut Frame, pr: &Projector, at: Vec3, content: &str, color: Color) {
+        let Some(c) = pr.point(at) else { return };
+        let size = 12.0;
+        let width = content.chars().count() as f32 * size * 0.58 + 10.0;
+        let height = size + 6.0;
+        let rect = Path::rounded_rectangle(Point::new(c.x - width / 2.0, c.y - height / 2.0), Size::new(width, height), 3.0.into());
+        frame.fill(&rect, color);
+        let light = 0.299 * color.r + 0.587 * color.g + 0.114 * color.b > 0.6;
+        frame.fill_text(canvas::Text {
+            content: content.to_string(),
+            position: c,
+            align_x: alignment::Horizontal::Center.into(),
+            align_y: alignment::Vertical::Center,
+            size: iced::Pixels(size),
+            color: if light { Color::BLACK } else { Color::WHITE },
+            font: openaec_ui::fonts::MEDIUM,
+            ..canvas::Text::default()
+        });
+    }
+
     /// A value on a rounded label centred on `at`.
     fn label(&self, frame: &mut Frame, pr: &Projector, at: Vec3, content: String) {
         let Some(c) = pr.point(at) else { return };
@@ -171,6 +195,11 @@ impl MeasureOverlay<'_> {
                 }
             }
             Measurement::Volume { .. } => {}
+            Measurement::Note { at, .. } => self.dot(frame, pr, *at),
+            Measurement::Mark { kind, points } => {
+                self.mark(frame, pr, *kind, points);
+                return;
+            }
             Measurement::Polygon { points, .. } => {
                 if let Some(path) = pr.path(points, true) {
                     frame.fill(&path, self.fill());
@@ -182,6 +211,52 @@ impl MeasureOverlay<'_> {
             }
         }
         self.label(frame, pr, m.anchor(), m.label(&self.units, self.language));
+    }
+
+    /// A mark as it is drawn: a line, a line with a head at its end, or a cloud (arcs bulging
+    /// out of the outline through its points), a few pixels wide whatever the distance.
+    fn mark(&self, frame: &mut Frame, pr: &Projector, kind: MarkKind, points: &[Vec3]) {
+        let screen: Vec<Point> = points.iter().filter_map(|&p| pr.point(p)).collect();
+        if screen.len() < 2 || screen.len() != points.len() {
+            return;
+        }
+        let path = match kind {
+            MarkKind::Line => Path::line(screen[0], screen[1]),
+            MarkKind::Arrow => Path::new(|b| {
+                let (from, to) = (screen[0], screen[1]);
+                b.move_to(from);
+                b.line_to(to);
+                let (dx, dy) = (to.x - from.x, to.y - from.y);
+                let length = dx.hypot(dy).max(1e-3);
+                let (ux, uy) = (dx / length, dy / length);
+                let head = 12.0f32.min(length / 2.0);
+                for side in [-1.0f32, 1.0] {
+                    b.move_to(to);
+                    b.line_to(Point::new(to.x - ux * head + side * uy * head * 0.45, to.y - uy * head - side * ux * head * 0.45));
+                }
+            }),
+            MarkKind::Cloud => Path::new(|b| {
+                // which way round the outline runs, so every arc bulges out of it
+                let area: f32 = (0..screen.len()).map(|i| screen[i].x * screen[(i + 1) % screen.len()].y - screen[(i + 1) % screen.len()].x * screen[i].y).sum();
+                let out = if area >= 0.0 { 1.0 } else { -1.0 };
+                b.move_to(screen[0]);
+                for i in 0..screen.len() {
+                    let (a, z) = (screen[i], screen[(i + 1) % screen.len()]);
+                    let (dx, dy) = (z.x - a.x, z.y - a.y);
+                    let length = dx.hypot(dy);
+                    let arcs = (length / 22.0).round().max(1.0) as usize;
+                    for k in 0..arcs {
+                        let (s, t) = (k as f32 / arcs as f32, (k + 1) as f32 / arcs as f32);
+                        let (from, to) = (Point::new(a.x + dx * s, a.y + dy * s), Point::new(a.x + dx * t, a.y + dy * t));
+                        let bulge = length / arcs as f32 * 0.55;
+                        let control = Point::new((from.x + to.x) / 2.0 + out * dy / length.max(1e-3) * bulge, (from.y + to.y) / 2.0 - out * dx / length.max(1e-3) * bulge);
+                        b.quadratic_curve_to(control, to);
+                    }
+                }
+                b.close();
+            }),
+        };
+        self.halo_line(frame, &path, 2.0);
     }
 
     fn pick(&self, frame: &mut Frame, pr: &Projector, s: &Snap) {
@@ -315,6 +390,10 @@ impl<Message> canvas::Program<Message> for MeasureOverlay<'_> {
     ) -> Vec<canvas::Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
         let pr = Projector { view_proj: self.view_proj, size: (bounds.width, bounds.height) };
+        // the model's own labels first, under the measurements
+        for (at, text, color) in &self.dots {
+            self.model_dot(&mut frame, &pr, *at, text, *color);
+        }
         for m in self.results {
             self.measurement(&mut frame, &pr, m);
         }
@@ -330,7 +409,7 @@ impl<Message> canvas::Program<Message> for MeasureOverlay<'_> {
         }
         if let Some(h) = self.hover {
             // the polygon in progress runs on to the cursor
-            if let (Some(Tool::Polygon), Some(last)) = (self.tool, points.last()) {
+            if let (Some(Tool::Polygon | Tool::Cloud | Tool::Arrow | Tool::Line), Some(last)) = (self.tool, points.last()) {
                 self.line(&mut frame, &pr, *last, h.snap.entity.pick(), self.dashed());
             }
             self.hover(&mut frame, &pr, h);

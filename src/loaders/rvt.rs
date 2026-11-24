@@ -4,7 +4,7 @@
 use crate::loaders::{Loaded, Loader, Phase, Progress, Source};
 use crate::model::{
     y_up_to_z_up, GridLine, Later, Layer, PlanRange, ProjectData, Room, SavedView, Schedule, ScheduleRow, Sheet, SheetRect,
-    SheetViewport, ViewCamera, ViewKind,
+    SheetViewport, SourceWall, ViewCamera, ViewKind,
 };
 use rvt_model::{FieldValue, ObjectView};
 use std::collections::HashMap;
@@ -16,6 +16,10 @@ pub struct RvtLoader;
 impl Loader for RvtLoader {
     fn name(&self) -> &'static str {
         "Revit"
+    }
+
+    fn featured(&self) -> Option<u8> {
+        Some(1)
     }
 
     fn extensions(&self) -> &'static [&'static str] {
@@ -34,16 +38,51 @@ impl Loader for RvtLoader {
         progress.set(Phase::Read);
         // the Revit reader opens the file itself (a compound file, read in parts)
         let path = source.path().ok_or("Revit files open in the desktop app only")?;
-        let doc = rvt_read::Document::open(path).map_err(|e| format!("Cannot read Revit file: {e}"))?;
+        let doc = std::sync::Arc::new(rvt_read::Document::open(path).map_err(|e| format!("Cannot read Revit file: {e}"))?);
         progress.set(Phase::Convert);
-        // `scene` returns view coordinates: metres, Y up (x, z, -y)
-        let scene = rvt_export::mesh::scene(&doc);
-        let (view_ids, views): (Vec<u64>, Vec<SavedView>) = saved_views(&doc).into_iter().unzip();
+        // `scene` returns view coordinates: metres, Y up (x, z, -y); the walls the Modeller can
+        // take over are read beside it (a second or so on a large project)
+        let (scene, walls) = std::thread::scope(|s| {
+            let walls = s.spawn(|| source_walls(&doc));
+            let scene = rvt_export::mesh::scene(&doc);
+            (scene, walls.join().unwrap_or_default())
+        });
+        let mut infos = rvt_export::views::views(&doc);
+        for v in &mut infos {
+            if let (Some(crop), Some(active)) = (v.crop_box.as_mut(), crop_active(&doc, v.id)) {
+                crop.active = active;
+            }
+        }
+        // the ways the file's browser orders its views, each view in the folders of the one shown
+        let (orders, shown) = rvt_export::browser::organizations(&doc, &infos);
+        let mut orders: Vec<crate::model::ViewOrder> = orders.into_iter().map(|o| crate::model::ViewOrder { name: o.name, folders: o.folders }).collect();
+        let (view_ids, mut views): (Vec<u64>, Vec<SavedView>) = saved_views(&infos).into_iter().unzip();
+        let at: HashMap<u64, usize> = infos.iter().enumerate().map(|(k, v)| (v.id, k)).collect();
+        for order in &mut orders {
+            order.folders = view_ids.iter().map(|id| at.get(id).and_then(|&k| order.folders.get(k).cloned().flatten())).collect();
+        }
+        if let Some(order) = shown.and_then(|k| orders.get(k)) {
+            for (view, folder) in views.iter_mut().zip(&order.folders) {
+                view.folder = folder.clone().unwrap_or_default();
+            }
+        }
+        // how each 3D view draws the model
+        for (view, &id) in views.iter_mut().zip(&view_ids).filter(|(v, _)| v.kind == ViewKind::ThreeD) {
+            view.style = view_style(&doc, id);
+        }
         let mut project = project_data(&doc, &scene.levels);
+        project.walls = walls;
+        (project.view_orders, project.view_order) = (orders, shown);
+        // how a cut through each material is hatched
+        project.cut_patterns = rvt_read::materials::cut_patterns(&doc).into_iter().map(|(name, p)| (name, pattern(p))).collect();
+        // down to where a section fills the earth under the terrain, and as what material
+        project.earth = doc.site_poche_base().map(|(base, material)| ((base * FT) as f32, material.and_then(|m| rvt_read::materials::name(&doc, m))));
         let layers = scene
             .batches
             .into_iter()
             .map(|b| {
+                // the categories whose elements say whether they carry load
+                let hosts = matches!(b.name.as_str(), "Walls" | "Floors");
                 let mut positions = b.positions;
                 let mut normals = b.normals;
                 y_up_to_z_up(&mut positions);
@@ -59,25 +98,450 @@ impl Loader for RvtLoader {
                     colors,
                     indices: b.indices,
                     elements: b.elements,
-                    props: b.props,
+                    // a wall or a floor also says whether it carries load: a structural plan
+                    // leaves out the ones that do not
+                    props: b.props.into_iter().map(|(id, props)| match Some(id).filter(|_| hosts).and_then(|id| rvt_read::structure::bearing(&doc, id)) {
+                        Some(bearing) => (id, with_bearing(props, bearing)),
+                        None => (id, props),
+                    }).collect(),
                     hidden: false,
+                    points: false,
+                    lines: Vec::new(),
+                    line_elements: Vec::new(),
+                    texturing: None,
+                    splats: None,
                 }
             })
             .collect::<Vec<Layer>>();
-        project.sheets = sheets(&doc, &view_ids, &views, &layers);
+        // the drawings (the annotated views, the legends and drafting views, the sheets) take far
+        // longer than the model on a large project: read once the model shows
+        let file = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        // each plan, section, elevation and detail under the name its drawing gets
+        for (view, &id) in views.iter_mut().zip(&view_ids).filter(|(v, _)| v.kind != ViewKind::ThreeD) {
+            view.drawing = Some(crate::document::uuid(&format!("rvt/{file}/view/{id}")));
+        }
+        let elements: Vec<u64> = layers.iter().flat_map(|l| l.elements.iter().map(|e| e.0)).collect();
+        // the type and family name of every element, for the filters of the views
+        let names: super::rvt_filters::Names = layers
+            .iter()
+            .flat_map(|l| &l.props)
+            .filter_map(|(id, json)| {
+                let said: serde_json::Value = serde_json::from_str(json).ok()?;
+                let name = |key: &str| said.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                Some((*id, (name("type"), name("family"))))
+            })
+            .collect();
+        // the building without its site: the terrain reaches far beyond what a view shows
+        let mut building = crate::model::Bounds::empty();
+        for p in layers.iter().filter(|l| !l.name.contains("Topograph")).flat_map(|l| l.positions.chunks_exact(3)) {
+            building.extend([p[0], p[1], p[2]]);
+        }
+        let size = if building.is_valid() { building.size() } else { [10.0; 3] };
+        // the sheets at once, as their list and frames (their number, name, paper and placed
+        // views); their title blocks, tables and view titles come with the drawings
+        project.sheets = sheets(&doc, &view_ids, &views, size, &file, &project, &infos, true);
+        let (later, placed) = (doc.clone(), views.clone());
+        project.later = Later::new(move || drawings(&later, &infos, &view_ids, &placed, &elements, &names, size, &file));
         // the schedules take seconds on a large project: computed once the model shows
         project.schedules = Later::new(move || schedules(&doc));
-        Ok(Loaded { layers, views, project })
+        Ok(Loaded { structural: Vec::new(), origin: None, layers, views, project })
     }
+}
+
+/// The elements a view does not show: those of the categories it switches off (its view
+/// template's, when it has one: a template decides them) and those hidden in it one by one.
+/// So are the elements its filters hide by rule ([`super::rvt_filters`]). Worksets are not
+/// looked at; its phase is, where [`drawings`] adds what its phase filter leaves out.
+fn hidden_in_view(doc: &rvt_read::Document, view: u64, by_category: &HashMap<i64, Vec<u64>>, filters: &mut super::rvt_filters::Filters) -> std::collections::HashSet<u64> {
+    let mut out = std::collections::HashSet::new();
+    let Some(o) = doc.object(view) else { return out };
+    let template = o.get("m_viewTemplateId").and_then(|v| v.element()).filter(|t| *t > 0).and_then(|t| doc.object(t as u64));
+    let from = template.as_ref().unwrap_or(&o);
+    for filter in from.get("m_oaDrawFilters").and_then(|v| v.as_list()).unwrap_or(&[]) {
+        let Some(filter) = from.deref(filter).filter(|f| f.class.starts_with("IckyExcludedCategories")) else { continue };
+        for category in filter.get("m_categoryIds").and_then(|v| v.as_list()).unwrap_or(&[]).iter().filter_map(|c| c.element()) {
+            out.extend(by_category.get(&category).into_iter().flatten().copied());
+        }
+    }
+    // and what its filters hide by rule
+    out.extend(filters.hidden(from));
+    // the elements hidden in it one by one: where the view keeps them, and where older files did
+    let one_by_one = o.path(&["m_oHiddenElementsViewSettings", "m_hiddenElements"]).and_then(|v| v.as_list()).unwrap_or(&[]);
+    let older = o.get("m_explicitlyHiddenElements").and_then(|v| v.as_list()).unwrap_or(&[]);
+    out.extend(one_by_one.iter().chain(older).filter_map(|e| e.element()).filter_map(|e| u64::try_from(e).ok()));
+    out
+}
+
+/// How a 3D view (its template, when it has one) draws the model: its visual style
+/// (`ViewDisplayModel::m_surfaces`: 1 wireframe, 2 hidden line, else shaded or in colours), with
+/// its edges where it shows them.
+fn view_style(doc: &rvt_read::Document, view: u64) -> Option<crate::model::ViewStyle> {
+    use crate::model::ViewStyle;
+    let o = doc.object(view)?;
+    let template = o.get("m_viewTemplateId").and_then(|v| v.element()).filter(|t| *t > 0).and_then(|t| doc.object(t as u64));
+    let from = template.as_ref().unwrap_or(&o);
+    let surfaces = from.path(&["m_pViewDisplayMgr", "m_model", "m_surfaces"])?.as_i64()?;
+    let edges = from.path(&["m_pViewDisplayMgr", "m_model", "m_edges"]).and_then(|v| v.as_i64()).unwrap_or(1) != 0;
+    Some(match surfaces {
+        1 => ViewStyle::Wireframe,
+        2 => ViewStyle::HiddenLine,
+        _ if edges => ViewStyle::ShadedEdges,
+        _ => ViewStyle::Shaded,
+    })
+}
+
+/// The drawings of the project: its plans, sections and elevations with their tags, texts,
+/// dimensions and detail components, its legends and drafting views, and its sheets. `elements`
+/// are the elements the model draws, `size` the extent of the building.
+fn drawings(doc: &rvt_read::Document, infos: &[rvt_export::views::ViewInfo], view_ids: &[u64], views: &[SavedView], elements: &[u64], names: &super::rvt_filters::Names, size: [f32; 3], file: &str) -> crate::model::Drawings {
+    let mut project = ProjectData::default();
+    // the tags of its views, with the labels and lines of their types
+    let mut types = super::rvt_drawings::Types::new(doc);
+    let tags = super::rvt_tags::tags(doc, &mut types);
+    // the detail components of its views, as the lines of their families
+    let details = super::rvt_tags::details(doc, &mut types);
+    // what a view leaves out because the element's family shows none of its solids there
+    for &(view, element) in types.switched_off() {
+        project.switched_off.entry(crate::document::uuid(&format!("rvt/{file}/view/{view}"))).or_default().insert(element);
+    }
+    drop(types);
+    // what each 3D view leaves out: the categories it switches off and the elements hidden in it
+    let mut by_category: HashMap<i64, Vec<u64>> = HashMap::new();
+    for &id in elements {
+        if let Some(e) = doc.element(id) {
+            by_category.entry(e.category as i64).or_default().push(id);
+        }
+    }
+    // the filters of the views, worked out as they are asked
+    let mut filters = super::rvt_filters::Filters::new(doc, &by_category, names);
+    // the phase and phase filter of every view, and the phases of the elements
+    let ids: Vec<u64> = infos.iter().map(|v| v.id).collect();
+    let path = |view: u64| crate::document::uuid(&format!("rvt/{file}/view/{view}"));
+    // the reader keys a view's phase by its element; the document names a view by its path
+    let phasing = rvt_read::phases::phasing(doc, &ids);
+    project.phasing = crate::phasing::Phasing {
+        elements: phasing.elements,
+        halftone: phasing.halftone,
+        views: phasing.views.into_iter().map(|(view, v)| (path(view), crate::phasing::ViewPhase { phase: v.phase, show: v.show })).collect(),
+    };
+    for (i, &view) in view_ids.iter().enumerate() {
+        if views.get(i).is_some_and(|v| v.kind == ViewKind::ThreeD) {
+            let mut hidden = hidden_in_view(doc, view, &by_category, &mut filters);
+            // and what its phase filter leaves out: work of a later phase, or demolished before
+            let at = path(view);
+            let mut faint = std::collections::HashSet::new();
+            if project.phasing.applies(&at) {
+                for &e in elements {
+                    match project.phasing.look(&at, e) {
+                        crate::phasing::Look::Hidden => _ = hidden.insert(e),
+                        crate::phasing::Look::Halftone => _ = faint.insert(e),
+                        crate::phasing::Look::Normal => {}
+                    }
+                }
+            }
+            // how it draws its elements otherwise: its categories and filters, and its
+            // discipline, which leaves some out or draws them faint
+            let Some(o) = doc.object(view) else { continue };
+            let template = o.get("m_viewTemplateId").and_then(|v| v.element()).filter(|t| *t > 0).and_then(|t| doc.object(t as u64));
+            let from = template.as_ref().unwrap_or(&o);
+            let mut looks = filters.looks_3d(from);
+            let (off, service) = filters.discipline(from);
+            hidden.extend(off);
+            for e in faint.into_iter().chain(service) {
+                looks.entry(e).or_default().halftone = true;
+            }
+            looks.retain(|e, look| !hidden.contains(e) && !look.is_empty());
+            if !looks.is_empty() {
+                project.looks.insert(crate::model::view3d_key(i), std::sync::Arc::new(looks));
+            }
+            if !hidden.is_empty() {
+                project.switched_off.insert(crate::model::view3d_key(i), hidden);
+            }
+        }
+    }
+    // what the plans, sections and elevations leave out, and how their filters draw elements
+    // otherwise: once per template (or per view without one), as views share them
+    // the looks of a view's filters by where they come from (its template, or itself), and with
+    // the widths of their pens at the view's scale
+    let mut by_source: HashMap<u64, HashMap<u64, crate::hatching::Look>> = HashMap::new();
+    let mut at_scale: HashMap<(u64, u64), std::sync::Arc<HashMap<u64, crate::hatching::Look>>> = HashMap::new();
+    let mut pens: Option<super::rvt_props::Pens> = None;
+    let scales: HashMap<u64, f64> = infos.iter().filter_map(|v| Some((v.id, v.scale?))).collect();
+    for (i, &view) in view_ids.iter().enumerate() {
+        if views.get(i).is_none_or(|v| v.kind == ViewKind::ThreeD) {
+            continue;
+        }
+        let at = path(view);
+        let hidden = hidden_in_view(doc, view, &by_category, &mut filters);
+        if !hidden.is_empty() {
+            project.switched_off.entry(at.clone()).or_default().extend(hidden);
+        }
+        let Some(o) = doc.object(view) else { continue };
+        let source = o.get("m_viewTemplateId").and_then(|v| v.element()).filter(|t| *t > 0).map_or(view, |t| t as u64);
+        let scale = scales.get(&view).copied().unwrap_or(100.0);
+        let looks = match at_scale.get(&(source, scale.to_bits())) {
+            Some(looks) => looks.clone(),
+            None => {
+                let looks = by_source.entry(source).or_insert_with(|| {
+                    let from = if source == view { Some(o.clone()) } else { doc.object(source) };
+                    from.map(|from| filters.looks(&from)).unwrap_or_default()
+                });
+                let mut looks = looks.clone();
+                if looks.values().any(|l| l.pens.iter().any(Option::is_some)) {
+                    let pens = pens.get_or_insert_with(|| super::rvt_props::pens(doc));
+                    // feet on paper to millimetres
+                    let width = |pen: Option<i64>| pen.and_then(|p| pens.width(p, scale, true)).map(|w| (w * 304.8) as f32);
+                    for look in looks.values_mut() {
+                        look.cut_line.width = width(look.pens[0]);
+                        look.seen_line.width = width(look.pens[1]);
+                    }
+                }
+                let looks = std::sync::Arc::new(looks);
+                at_scale.insert((source, scale.to_bits()), looks.clone());
+                looks
+            }
+        };
+        if !looks.is_empty() {
+            project.looks.insert(at, looks);
+        }
+    }
+    project.drawings = super::rvt_drawings::drawings(doc, infos, file, &tags, &details);
+    // which of the drawn elements are joined with which
+    project.joins = rvt_read::joins::joins(doc, elements.iter().copied());
+    // the legends and drafting views: drawings without a model
+    project.drafts = super::rvt_drafts::drafts(doc, &tags, &details);
+    project.drawn = super::rvt_props::drawn(doc, &project.drafts);
+    project.sheets = sheets(doc, view_ids, views, size, file, &project, infos, false);
+    crate::model::Drawings {
+        sheets: project.sheets,
+        drafts: project.drafts,
+        phasing: project.phasing,
+        switched_off: project.switched_off,
+        looks: project.looks,
+        joins: project.joins,
+        drawn: project.drawn,
+        drawings: project.drawings,
+    }
+}
+
+/// Feet to metres.
+const FT: f64 = 0.3048;
+/// Revit's categories of doors and windows.
+const DOORS: i32 = -2000023;
+const WINDOWS: i32 = -2000014;
+
+/// The straight walls of the project that the Modeller can take over ([`SourceWall`]), by
+/// element id: the location line, base and height of the wall, its type's thickness, the name of
+/// its base level, and the doors and windows it hosts as openings ([`cut_of`]). Curved, stacked,
+/// in-place and curtain walls, walls without a thickness or a height, and walls with a door or
+/// window whose extent along them cannot be told, are left out: they stay meshes.
+fn source_walls(doc: &rvt_read::Document) -> HashMap<u64, SourceWall> {
+    let levels: HashMap<i64, String> = doc.levels().into_iter().map(|l| (l.id as i64, l.name)).collect();
+    let mut walls = HashMap::new();
+    // the layers of each wall type, from the exterior in, and each material once
+    let types: HashMap<i64, rvt_model::CompoundType> = doc.compound_types().into_iter().map(|t| (t.id as i64, t)).collect();
+    let mut materials: HashMap<i64, (String, Option<[u8; 3]>)> = HashMap::new();
+    let mut material = |id: Option<i64>| -> (String, Option<[u8; 3]>) {
+        let Some(id) = id.filter(|id| *id > 0) else { return (String::new(), None) };
+        materials
+            .entry(id)
+            .or_insert_with(|| {
+                let o = doc.object(id as u64);
+                let m = o.as_ref().and_then(|o| o.deref(o.get("m_pMaterial")?));
+                let name = m.and_then(|m| m.get("m_name")?.as_str()).unwrap_or_default().to_string();
+                (name, m.and_then(|m| m.get("m_color")?.as_i64()).map(rvt_read::materials::rgb))
+            })
+            .clone()
+    };
+    for w in doc.walls() {
+        if w.curve.is_some() || w.in_place || w.stacked || w.stacked_parent.is_some() || w.curtain_panel {
+            continue;
+        }
+        let (Some(thickness), Some(height)) = (doc.type_thickness(w.wall_type), w.height) else { continue };
+        if !(thickness.is_finite() && height.is_finite() && thickness > 0.0 && height > 0.0) {
+            continue;
+        }
+        let (start, end) = (glam::DVec2::new(w.p0[0], w.p0[1]) * FT, glam::DVec2::new(w.p1[0], w.p1[1]) * FT);
+        if start.distance(end) < 1e-3 {
+            continue;
+        }
+        // as the mesher stands it: on its base level and offset, else on its line's height
+        let base = doc.level_elevation(w.base_level).map_or(w.p0[2], |z| z + w.base_offset) * FT;
+        let layers = types.get(&w.wall_type).map_or_else(Vec::new, |t| {
+            t.layers
+                .iter()
+                .map(|l| {
+                    let (name, colour) = material(l.material);
+                    crate::model::SourceLayer { material: name, thickness: l.width * FT, function: l.function.to_string(), colour }
+                })
+                .collect()
+        });
+        // a wall as drawn has its exterior on the left of its location line; flipped, on the right
+        let flipped = doc.object(w.id).and_then(|o| o.get("m_isFlipped")?.as_i64()).is_some_and(|f| f != 0);
+        let wall = SourceWall { start, end, base, height: height * FT, thickness: thickness * FT, openings: Vec::new(), level: levels.get(&w.base_level).cloned(), layers, exterior_left: !flipped };
+        walls.insert(w.id, wall);
+    }
+    // a door's or window's category is its family's, which its instance record carries
+    let doors_windows: HashMap<u64, rvt_model::Instance> = doc.instances().into_iter().filter(|i| matches!(i.cat, DOORS | WINDOWS)).map(|i| (i.id, i)).collect();
+    // their types' Width (−1001301) and Height (−1001300), where both are given
+    let types: HashMap<u64, rvt_model::ValueSet> = doc.type_values_by_chain().into_iter().flat_map(|(_, _, m)| m).collect();
+    let size = |symbol: Option<u64>| -> Option<(f64, f64)> {
+        let rows = &types.get(&symbol?)?.rows;
+        let value = |param: i64| rows.iter().find(|r| r.param == param).map(|r| r.num).filter(|v| *v > 1e-6);
+        Some((value(-1001301)?, value(-1001300)?))
+    };
+    let mut unknown = std::collections::HashSet::new();
+    for h in doc.hosted() {
+        let Some(host) = h.host.and_then(|x| u64::try_from(x).ok()) else { continue };
+        let Some(wall) = walls.get_mut(&host) else { continue };
+        let Some(instance) = doors_windows.get(&h.id) else { continue };
+        let hole = Hole {
+            bb: doc.element(h.id).and_then(|e| e.bbox),
+            size: size(instance.symbol),
+            origin: instance.origin,
+            bottom: doc.level_elevation(h.level).map(|z| z + h.sill.unwrap_or(0.0)),
+        };
+        match cut_of(wall, &hole) {
+            Cut::Opening(o) => wall.openings.push(o),
+            Cut::Nothing => {}
+            Cut::Unknown => {
+                unknown.insert(host);
+            }
+        }
+    }
+    walls.retain(|id, _| !unknown.contains(id));
+    for wall in walls.values_mut() {
+        wall.openings = merged(std::mem::take(&mut wall.openings));
+    }
+    walls
+}
+
+/// Openings that overlap (a door's frame, leaf and lining are elements of their own, each with
+/// its box) as one: the extent of them all, as the mesher's cuts of them make one hole.
+fn merged(mut openings: Vec<bim_core::Opening>) -> Vec<bim_core::Opening> {
+    let overlap = |a: &bim_core::Opening, b: &bim_core::Opening| {
+        a.along < b.along + b.width && b.along < a.along + a.width && a.sill < b.sill + b.height && b.sill < a.sill + a.height
+    };
+    let mut out: Vec<bim_core::Opening> = Vec::new();
+    while let Some(mut o) = openings.pop() {
+        // grow it by every opening it overlaps, until none does
+        while let Some(k) = openings.iter().chain(out.iter()).position(|other| overlap(&o, other)) {
+            let other = if k < openings.len() { openings.swap_remove(k) } else { out.swap_remove(k - openings.len()) };
+            let (from, to) = (o.along.min(other.along), (o.along + o.width).max(other.along + other.width));
+            let (bottom, top) = (o.sill.min(other.sill), (o.sill + o.height).max(other.sill + other.height));
+            o = bim_core::Opening { along: from, sill: bottom, width: to - from, height: top - bottom, framing: None };
+        }
+        out.push(o);
+    }
+    out.sort_by(|a, b| a.along.total_cmp(&b.along).then(a.sill.total_cmp(&b.sill)));
+    out
+}
+
+/// What a door or window tells of the hole it makes in its wall, in feet and the file's frame.
+struct Hole {
+    /// Its box (xmin, ymin, zmin, xmax, ymax, zmax), if stored.
+    bb: Option<[f64; 6]>,
+    /// Its type's width and height, when the type gives both.
+    size: Option<(f64, f64)>,
+    /// Its insertion point: the middle of its width.
+    origin: Option<[f64; 3]>,
+    /// The height its bottom stands at: its level's elevation plus its sill.
+    bottom: Option<f64>,
+}
+
+/// What a door or window does to its wall.
+#[derive(Debug, PartialEq)]
+enum Cut {
+    Opening(bim_core::Opening),
+    /// It takes nothing from the wall: a symbol without height (a swing drawn in plan), or a hole
+    /// beside the wall.
+    Nothing,
+    /// Its extent along the wall cannot be told: the wall stays a mesh.
+    Unknown,
+}
+
+/// The opening a door or window makes in `wall`, within the wall:
+/// - by its type, where the type gives a width and a height: that width about its insertion
+///   point, that height from its level plus its sill. A type's width is its nominal width (often
+///   the clear opening), so the wall may reach a few centimetres into the door's frame;
+/// - else by its box, as the mesher cuts it: the box's extent along the axis and its height. A
+///   box turned with the wall is `w·c + t·s` wide in x and `w·s + t·c` in y, for a width `w` along
+///   the wall, a depth `t` across it and the axis direction's `c = |cos|`, `s = |sin|`; the width
+///   follows from both, except near 45°, where the box does not tell it.
+fn cut_of(wall: &SourceWall, hole: &Hole) -> Cut {
+    let length = wall.start.distance(wall.end);
+    let d = (wall.end - wall.start) / length;
+    let (from, to, bottom, top) = if let (Some((w, h)), Some(o), Some(z)) = (hole.size, hole.origin, hole.bottom) {
+        let middle = (glam::DVec2::new(o[0], o[1]) * FT - wall.start).dot(d);
+        (middle - w * FT / 2.0, middle + w * FT / 2.0, z * FT, (z + h) * FT)
+    } else if let Some(bb) = hole.bb {
+        let bb = bb.map(|v| v * FT);
+        let (c, s) = (d.x.abs(), d.y.abs());
+        let (ex, ey) = (bb[3] - bb[0], bb[4] - bb[1]);
+        let width = if s < 1e-6 {
+            ex
+        } else if c < 1e-6 {
+            ey
+        } else {
+            let det = c * c - s * s;
+            if det.abs() < 0.2 {
+                return Cut::Unknown;
+            }
+            (ex * c - ey * s) / det
+        };
+        let middle = (glam::DVec2::new(bb[0] + bb[3], bb[1] + bb[4]) / 2.0 - wall.start).dot(d);
+        (middle - width / 2.0, middle + width / 2.0, bb[2], bb[5])
+    } else {
+        return Cut::Unknown;
+    };
+    let (from, to) = (from.max(0.0), to.min(length));
+    let (bottom, top) = ((bottom - wall.base).max(0.0), (top - wall.base).min(wall.height));
+    if to - from > 1e-3 && top - bottom > 1e-3 {
+        Cut::Opening(bim_core::Opening { along: from, sill: bottom, width: to - from, height: top - bottom, framing: None })
+    } else {
+        Cut::Nothing
+    }
+}
+
+/// The crop of a view split in pieces, when it is: the view's viewer (`m_viewerId`) lays it out in
+/// regions (`ViewLayout::m_arrViewRegions`) along one axis (`m_iDim`: 0 across, 1 up), each the
+/// part of the crop it shows (`m_dMin`, `m_dMax`: fractions) and how far it is moved
+/// (`m_dOffset`, feet). One region is a crop that is not split.
+fn split_of(doc: &rvt_read::Document, view: u64) -> Option<crate::model::CropSplit> {
+    let o = doc.object(view)?;
+    let viewer = doc.object(u64::try_from(o.get("m_viewerId")?.element()?).ok()?)?;
+    let layout = viewer.get("m_oViewLayout").and_then(|v| viewer.deref(v))?;
+    let axis = u8::try_from(layout.get("m_iDim")?.as_i64()?).ok().filter(|a| *a <= 1)?;
+    let regions = layout.get("m_arrViewRegions")?.as_list()?;
+    let pieces: Vec<[f64; 3]> = regions
+        .iter()
+        .filter_map(|r| {
+            let r = r.as_object()?;
+            let number = |name: &str| r.get(name)?.as_f64().filter(|v| v.is_finite());
+            Some([number("m_dMin")?, number("m_dMax")?, number("m_dOffset")? * FT])
+        })
+        .filter(|p| p[1] > p[0])
+        .collect();
+    (pieces.len() > 1).then_some(crate::model::CropSplit { axis, pieces })
 }
 
 /// The schedules as the viewer shows them: templates left out, the shown columns only.
 fn schedules(doc: &rvt_read::Document) -> Vec<Schedule> {
+    let units = super::rvt_schedules::units(doc);
     rvt_export::schedules::schedules(doc)
         .into_iter()
         .filter(|s| !s.is_template)
-        .map(|s| {
+        .map(|mut s| {
+            // what the computation left open: from the types and from the texts the file stores
+            super::rvt_schedules::complete(doc, &mut s, units);
             let shown: Vec<usize> = (0..s.columns.len()).filter(|&i| !s.columns[i].hidden).collect();
+            // the image a cell shows: what the column's parameter names for the row's first element
+            let parameters: Vec<i64> = shown.iter().map(|&i| s.columns[i].parameter).collect();
+            let image = |element: u64, parameter: i64| {
+                let file = rvt_read::images::of_parameter(doc, element, parameter)?;
+                let pixels = image::load_from_memory(&file).ok()?.to_rgba8();
+                Some(iced::widget::image::Handle::from_rgba(pixels.width(), pixels.height(), pixels.into_raw()))
+            };
             Schedule {
                 name: s.name,
                 title: s.title,
@@ -86,6 +550,11 @@ fn schedules(doc: &rvt_read::Document) -> Vec<Schedule> {
                     .rows
                     .into_iter()
                     .map(|r| ScheduleRow {
+                        images: {
+                            let first = r.elements.first().copied().filter(|_| !r.total);
+                            let all: Vec<_> = parameters.iter().map(|&p| image(first?, p)).collect();
+                            if all.iter().any(Option::is_some) { all } else { Vec::new() }
+                        },
                         cells: shown.iter().map(|&i| r.cells.get(i).cloned().flatten()).collect(),
                         elements: r.elements,
                         total: r.total,
@@ -281,14 +750,14 @@ fn natural_key(s: &str) -> (u64, String) {
 
 /// The model views of the file (beta) in world coordinates: the mesh is in Revit's model
 /// coordinates scaled from feet to metres, Z up, so the views convert the same way.
-fn saved_views(doc: &rvt_read::Document) -> Vec<(u64, SavedView)> {
+fn saved_views(infos: &[rvt_export::views::ViewInfo]) -> Vec<(u64, SavedView)> {
     use rvt_export::views::{OrientedBox, ViewKind as K};
     const FT: f32 = 0.3048;
     let v3 = |p: [f64; 3]| Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32);
     let frame = |b: &OrientedBox| SectionBox::from_frame(v3(b.origin) * FT, b.basis.map(v3), v3(b.min) * FT, v3(b.max) * FT);
     // ±1e9 ft means unlimited
     let limited = |v: Option<f64>| v.filter(|v| v.abs() < 1e8);
-    rvt_export::views::views(doc)
+    infos
         .into_iter()
         .filter_map(|v| {
             let kind = match &v.kind {
@@ -299,7 +768,7 @@ fn saved_views(doc: &rvt_read::Document) -> Vec<(u64, SavedView)> {
                 K::Detail => ViewKind::Detail,
                 _ => return None,
             };
-            let mut out = SavedView { name: v.name.clone(), kind, camera: None, clip: None, plan: None, level: v.level_name.clone() };
+            let mut out = SavedView { folder: Vec::new(), style: None, drawing: None, name: v.name.clone(), kind, camera: None, clip: None, plan: None, level: v.level_name.clone() };
             match kind {
                 ViewKind::ThreeD => {
                     out.camera = v.camera.as_ref().map(|c| ViewCamera {
@@ -315,7 +784,11 @@ fn saved_views(doc: &rvt_read::Document) -> Vec<(u64, SavedView)> {
                     let range = v.view_range.as_ref();
                     let cut = limited(range.and_then(|r| r.cut)).or(level.zip(v.cut_offset).map(|(l, c)| l + c)).or(level.map(|l| l + 4.0))?;
                     let ceiling = v.kind == K::CeilingPlan;
-                    let (low, high) = if ceiling {
+                    // a structural plan can look up too: its view depth then lies above its cut
+                    let above = limited(range.and_then(|r| r.depth)).filter(|depth| !ceiling && *depth > cut + 1e-6);
+                    let (low, high) = if let Some(depth) = above {
+                        (cut, depth + 0.01)
+                    } else if ceiling {
                         (cut, limited(range.and_then(|r| r.top)).unwrap_or(cut + 10.0))
                     } else {
                         // down to the view depth, so the floor below the cut shows
@@ -340,20 +813,64 @@ fn saved_views(doc: &rvt_read::Document) -> Vec<(u64, SavedView)> {
         .collect()
 }
 
+/// Whether a view's crop region crops it: its frame's bounds are active across the view
+/// (`BoundedSpace::m_boundActive`, the rows of right and up). A frame resized but not switched on
+/// keeps its size with these off (3077 R26: four 3D views of 8 x 6 m printed whole); bit 1 of
+/// `m_viewerFlags` goes with them in every view of that file, bit 0 does not. `None`: the view
+/// has no frame to tell.
+fn crop_active(doc: &rvt_read::Document, view: u64) -> Option<bool> {
+    let o = doc.object(view)?;
+    let viewer = doc.object(u64::try_from(o.get("m_viewerId")?.element()?).ok()?)?;
+    let space = match viewer.get("m_boundedSpace")? {
+        FieldValue::Object(n) => n,
+        v => viewer.deref(v)?,
+    };
+    let rows = space.get("m_boundActive")?.as_list()?;
+    let on = |row: &FieldValue| row.as_list().is_some_and(|r| r.iter().any(|b| matches!(b, FieldValue::Bool(true))));
+    Some(rows.iter().take(2).any(on))
+}
+
+/// Where the origin of a 3D view's frame lies on its drawing in hidden lines (metres, along the
+/// axes [`crate::drawing::view_axes`] gives the view's camera direction `forward`). Its viewport
+/// holds that point at its position, whether the frame crops the view or not (3077 R26: a 3D view
+/// whose frame lies 9 m above the middle of the building prints 9 cm under its position at 1:100).
+fn frame_origin(frame: &rvt_export::views::OrientedBox, forward: [f64; 3]) -> [f64; 2] {
+    let f = Vec3::new(forward[0] as f32, forward[1] as f32, forward[2] as f32).normalize_or(Vec3::NEG_Z);
+    let (right, up, _) = crate::drawing::view_axes(f.to_array());
+    let p = glam::DVec3::from(frame.origin) * 0.3048;
+    [p.dot(glam::DVec3::from(Vec3::from(right))), p.dot(glam::DVec3::from(Vec3::from(up)))]
+}
+
 /// The sheets (beta) in sheet metres. The paper comes from the title block's size: its
 /// insertion point is the paper's lower right corner (3077 R26), else another corner or the
-/// centre, whichever holds the most viewports. A viewport without an active crop region gets the
+/// centre, whichever holds the most viewports. `bare` leaves out what takes long to read (the title
+/// blocks, the placed schedules and the titles of the views): the list of sheets right after opening. A viewport without an active crop region gets the
 /// size of the building as its view sees it (`estimated`, centred on its position).
-fn sheets(doc: &rvt_read::Document, view_ids: &[u64], views: &[SavedView], layers: &[Layer]) -> Vec<Sheet> {
+fn sheets(doc: &rvt_read::Document, view_ids: &[u64], views: &[SavedView], size: [f32; 3], file: &str, project: &ProjectData, infos: &[rvt_export::views::ViewInfo], bare: bool) -> Vec<Sheet> {
+    let mut types = super::rvt_drawings::Types::new(doc);
+    // the schedules placed on the sheets, as tables
+    let mut tables = if bare { HashMap::new() } else { super::rvt_schedules::placed(doc) };
+    let anchors: HashMap<u64, ([f64; 2], [f64; 2])> = infos.iter().filter_map(|v| Some((v.id, super::rvt_drawings::view_origin(v)?))).collect();
+    // whether a view's crop region crops it (rvt-export reads another flag for its viewports' boxes)
+    let cropping: HashMap<u64, bool> = infos.iter().filter_map(|v| Some((v.id, v.crop_box.as_ref()?.active))).collect();
+    // a 3D view (not in perspective): the point of its drawing at its viewport's position
+    let origins: HashMap<u64, [f64; 2]> = infos
+        .iter()
+        .filter(|v| v.kind == K::ThreeD)
+        .filter_map(|v| Some((v.id, frame_origin(v.crop_box.as_ref()?, v.camera.as_ref().filter(|c| !c.perspective)?.forward))))
+        .collect();
+    // the views the document draws, and the legends and drafting views, by their element
+    let drawings: std::collections::HashSet<&str> = project.drawings.iter().map(|(path, _)| path.as_str()).collect();
+    let drafts: HashMap<u64, usize> = project.drafts.iter().enumerate().map(|(k, d)| (d.id, k)).collect();
     use rvt_export::views::ViewKind as K;
     const FT: f32 = 0.3048;
     let index: HashMap<u64, usize> = view_ids.iter().enumerate().map(|(i, &id)| (id, i)).collect();
-    // the building without its site: the terrain reaches far beyond what a view shows
-    let mut model = crate::model::Bounds::empty();
-    for p in layers.iter().filter(|l| !l.name.contains("Topograph")).flat_map(|l| l.positions.chunks_exact(3)) {
-        model.extend([p[0], p[1], p[2]]);
-    }
-    let [dx, dy, dz] = if model.is_valid() { model.size() } else { [10.0; 3] };
+    let [dx, dy, dz] = size;
+    // a placed title block draws its own variant of its type, with what is switched on for it
+    let block_kind = |t: &rvt_export::sheets::TitleBlock| {
+        let own = doc.object(t.id).and_then(|o| u64::try_from(o.path(&["m_pInstanceInfo", "m_symbolId"])?.element()?).ok());
+        own.or(t.symbol)
+    };
     rvt_export::sheets::sheets(doc)
         .into_iter()
         .map(|s| {
@@ -364,28 +881,66 @@ fn sheets(doc: &rvt_read::Document, view_ids: &[u64], views: &[SavedView], layer
                     let view = index.get(&v.view).copied();
                     let position = [v.position[0] as f32 * FT, v.position[1] as f32 * FT];
                     let scale = v.scale as f32;
-                    let (rect, estimated) = match v.rect {
-                        Some([lo, hi]) => (SheetRect { min: lo.map(|x| x as f32 * FT), max: hi.map(|x| x as f32 * FT) }, false),
-                        None => {
+                    // a legend or drafting view covers what is drawn in it
+                    let drawn = drafts.get(&v.view).and_then(|&k| project.drafts[k].extent()).map(|e| SheetRect { min: [position[0] + e.min[0] * scale, position[1] + e.min[1] * scale], max: [position[0] + e.max[0] * scale, position[1] + e.max[1] * scale] });
+                    // the box of its crop, where its crop crops it
+                    let cropped_box = v.rect.filter(|_| cropping.get(&v.view).copied().unwrap_or(true));
+                    let (rect, estimated) = match (cropped_box, drawn) {
+                        (Some([lo, hi]), _) => (SheetRect { min: lo.map(|x| x as f32 * FT), max: hi.map(|x| x as f32 * FT) }, false),
+                        (None, Some(drawn)) => (drawn, false),
+                        (None, None) => {
                             // the model as the view sees it: from above for a plan, across the view
                             // direction (and the full height) for the others
                             let seen = match (&v.view_kind, view.and_then(|i| views[i].camera.as_ref())) {
                                 (k, _) if k.is_plan() => [dx, dy],
+                                // a 3D view: what it shows (its section box, else the building)
+                                // as it lies on the drawing, looked at along its camera
+                                (K::ThreeD, Some(c)) => {
+                                    let (right, up, _) = crate::drawing::view_axes(c.forward);
+                                    let sides: [Vec3; 3] = match view.and_then(|i| views[i].clip.as_ref()) {
+                                        Some(clip) => [0, 1, 2].map(|i| clip.axis(i) * (clip.max[i] - clip.min[i])),
+                                        None => [Vec3::X * dx, Vec3::Y * dy, Vec3::Z * dz],
+                                    };
+                                    let across = |axis: [f32; 3]| sides.iter().map(|s| s.dot(Vec3::from(axis)).abs()).sum::<f32>();
+                                    [across(right), across(up)]
+                                }
                                 (_, Some(c)) => [dx * c.forward[1].abs() + dy * c.forward[0].abs(), dz],
                                 (K::ThreeD, None) => [dx.max(dy), dz],
                                 // legends and drafting views: a label-sized box
                                 _ => [0.12 / scale, 0.08 / scale],
                             };
-                            (SheetRect::around(position, [seen[0] * scale, seen[1] * scale]), true)
+                            // a 3D view holds the origin of its frame at its position: what it shows lies
+                            // around the middle of its section box, where it has one
+                            let middle = view.and_then(|i| Some((views[i].camera.as_ref()?, views[i].clip.as_ref()?, origins.get(&v.view)?))).map(|(c, clip, at)| {
+                                let (right, up, _) = crate::drawing::view_axes(c.forward);
+                                let mid = clip.to_world((clip.min + clip.max) * 0.5);
+                                [(f64::from(mid.dot(Vec3::from(right))) - at[0]) as f32, (f64::from(mid.dot(Vec3::from(up))) - at[1]) as f32]
+                            });
+                            let centre = middle.map_or(position, |m| [position[0] + m[0] * scale, position[1] + m[1] * scale]);
+                            (SheetRect::around(centre, [seen[0] * scale, seen[1] * scale]), true)
                         }
                     };
+
+                    // the title as the type of the viewport writes it: its name and scale in one, or none
+                    let ratio_text = format!("1:{}", (1.0 / v.scale).round());
+                    let (written, face) = if bare { (None, Default::default()) } else { super::rvt_tags::viewport_title(doc, &mut types, v.id, v.view, &v.view_name, &format!("1 : {}", (1.0 / v.scale).round()), v.detail_number.as_deref()).map_or((None, Default::default()), |(w, f)| (Some(w), f)) };
                     SheetViewport {
                         title: v.view_name.clone(),
+                        written,
+                        face,
                         view,
                         rect,
                         estimated,
-                        scale: format!("1:{}", (1.0 / v.scale).round()),
+                        scale: ratio_text,
                         detail: v.detail_number.clone(),
+                        label: v.label_origin.map(|p| p.map(|x| x as f32 * FT)),
+                        origin: position,
+                        ratio: scale,
+                        drawing: Some(crate::document::uuid(&format!("rvt/{file}/view/{}", v.view))).filter(|path| drawings.contains(path.as_str())),
+                        anchor: anchors.get(&v.view).map(|a| a.0).or(origins.get(&v.view).copied()),
+                        turn: anchors.get(&v.view).map_or([1.0, 0.0], |a| a.1),
+                        draft: drafts.get(&v.view).copied(),
+                        split: split_of(doc, v.view),
                     }
                 })
                 .collect();
@@ -401,13 +956,273 @@ fn sheets(doc: &rvt_read::Document, view_ids: &[u64], views: &[SavedView], layer
                 let min = corners.into_iter().rev().max_by_key(|&c| held(c))?;
                 Some(SheetRect { min, max: [min[0] + w, min[1] + h] })
             });
-            Sheet::new(s.number, s.name, paper, viewports)
+            // the title block as its family draws it, from where it is placed
+            let block = s.title_block.as_ref().filter(|_| !bare).and_then(|t| Some((t, block_kind(t)?))).map(|(t, kind)| {
+                let (lines, texts) = super::rvt_tags::title_block(doc, &mut types, kind, s.id, &s.number, &s.name);
+                let on = |p: [f64; 2]| [(t.origin[0] * 0.3048 + p[0]) as f32, (t.origin[1] * 0.3048 + p[1]) as f32];
+                let texts = texts.into_iter().map(|x| {
+                    let align = x.align.clamp(0, 2) as usize;
+                    let at = on([x.at[0] - [0.0, x.width / 2.0, x.width][align], x.at[1]]);
+                    crate::model::DraftText { element: t.id, at, width: x.width as f32, height: x.height() as f32, size: x.em as f32, align: align as u8, angle: x.angle as f32, face: x.face.clone(), text: x.wording }
+                });
+                (lines.into_iter().map(|l| [on(l[0]), on(l[1])]).collect(), texts.collect())
+            });
+            // the paper where the title block draws its border, when its lines span the paper's
+            // size: a family has its origin at the lower right or at the lower left corner
+            let paper = paper.map(|chosen| {
+                let Some((lines, _)) = block.as_ref() else { return chosen };
+                let lines: &Vec<[[f32; 2]; 2]> = lines;
+                let (mut lo, mut hi) = ([f32::INFINITY; 2], [f32::NEG_INFINITY; 2]);
+                for p in lines.iter().flatten() {
+                    lo = [lo[0].min(p[0]), lo[1].min(p[1])];
+                    hi = [hi[0].max(p[0]), hi[1].max(p[1])];
+                }
+                let (w, h) = (chosen.max[0] - chosen.min[0], chosen.max[1] - chosen.min[1]);
+                let spans = |got: f32, want: f32| got <= want * 1.001 && got >= want * 0.9;
+                if lo[0].is_finite() && spans(hi[0] - lo[0], w) && spans(hi[1] - lo[1], h) {
+                    // centred on the border the block draws
+                    let min = [(lo[0] + hi[0] - w) / 2.0, (lo[1] + hi[1] - h) / 2.0];
+                    SheetRect { min, max: [min[0] + w, min[1] + h] }
+                } else {
+                    chosen
+                }
+            });
+            let mut sheet = Sheet::new(s.number, s.name, paper, viewports);
+            if let Some((lines, texts)) = block {
+                (sheet.lines, sheet.texts) = (lines, texts);
+            }
+            // the regions of its title block filled in one colour
+            if let Some((t, kind)) = s.title_block.as_ref().filter(|_| !bare).and_then(|t| Some((t, block_kind(t)?))) {
+                let on = |p: [f64; 2]| [(t.origin[0] * 0.3048 + p[0]) as f32, (t.origin[1] * 0.3048 + p[1]) as f32];
+                let fills = super::rvt_tags::title_block_fills(doc, &mut types, kind).into_iter();
+                sheet.line_colors = super::rvt_tags::title_block_line_colors(doc, &mut types, kind);
+                sheet.fills = fills.map(|(loops, color)| crate::model::DraftFill { element: t.id, loops: loops.iter().map(|l| l.iter().map(|&p| on(p)).collect()).collect(), color }).collect();
+            }
+            sheet.tables = tables.remove(&s.id).unwrap_or_default();
+            // the images of its title block
+            if let Some((t, kind)) = s.title_block.as_ref().filter(|_| !bare).and_then(|t| Some((t, block_kind(t)?))) {
+                // decoded here: an image that cannot be read is left out, the others show at once
+                let images = rvt_read::images::images(doc, kind).into_iter().filter_map(|i| {
+                    let pixels = image::load_from_memory(&i.file).ok()?.to_rgba8();
+                    Some(crate::model::SheetImage {
+                        center: [(t.origin[0] * 0.3048 + i.center[0]) as f32, (t.origin[1] * 0.3048 + i.center[1]) as f32],
+                        size: i.size.map(|x| x as f32),
+                        angle: i.angle as f32,
+                        image: iced::widget::image::Handle::from_rgba(pixels.width(), pixels.height(), pixels.into_raw()),
+                    })
+                });
+                sheet.images = images.collect();
+            }
+            sheet
         })
         .collect()
 }
 
+/// The reader's rows of a hatch as the app's.
+pub(super) fn grid(g: rvt_read::materials::Grid) -> crate::hatching::Grid {
+    crate::hatching::Grid { angle: g.angle, origin: g.origin, shift: g.shift, offset: g.offset, dashes: g.dashes }
+}
+
+/// The reader's cut pattern of a material as the app's.
+fn pattern(p: rvt_read::materials::CutPattern) -> crate::hatching::Pattern {
+    crate::hatching::Pattern { fill: p.fill, line: p.line, solid: p.solid, grids: p.grids.into_iter().map(grid).collect(), on_paper: p.on_paper, from: 0.0, below: None }
+}
+
+/// The properties of an element (a JSON object) with `LoadBearing` added: what a structural plan
+/// goes by (the reader says whether a wall or floor carries load).
+fn with_bearing(props: String, bearing: bool) -> String {
+    match props.trim_end().strip_suffix('}') {
+        Some(body) if body.trim_end().ends_with('{') => format!("{body}\"LoadBearing\":\"{bearing}\"}}"),
+        Some(body) => format!("{body},\"LoadBearing\":\"{bearing}\"}}"),
+        None => props,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn load_bearing_is_added_to_an_elements_properties() {
+        use super::with_bearing;
+        let with = with_bearing(r#"{"id":"12","category":"Walls"}"#.into(), false);
+        assert_eq!(with, r#"{"id":"12","category":"Walls","LoadBearing":"false"}"#);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&with).unwrap()["LoadBearing"], "false");
+        assert_eq!(with_bearing("{}".into(), true), r#"{"LoadBearing":"true"}"#);
+        assert_eq!(with_bearing("nothing".into(), true), "nothing");
+        // and that is what a structural plan goes by
+        let props = vec![("category".to_string(), "Walls".to_string()), ("LoadBearing".to_string(), "false".to_string())];
+        assert_eq!(crate::element_class::load_bearing("Revit", "Walls", &props), Some(false));
+    }
+
+    /// A project with drawings (`RVT_DRAWINGS`, read-only; skipped when absent): its plans and
+    /// sections become views of the document, with the texts and dimensions drawn in them.
+    #[test]
+    fn views_become_drawings_of_the_document() {
+        let Some(path) = std::env::var_os("RVT_DRAWINGS").map(std::path::PathBuf::from).filter(|p| p.exists()) else {
+            eprintln!("skipped: set RVT_DRAWINGS to a Revit project with annotated views");
+            return;
+        };
+        let t = std::time::Instant::now();
+        let model = crate::loaders::load(&path).expect("rvt");
+        eprintln!("loaded in {:?}, {} drawing nodes", t.elapsed(), model.project.drawings.len());
+        let document = crate::document::Document::from_model(&model);
+        let (plans, sections) = (document.plans(), document.sections());
+        eprintln!("{} plans, {} sections and elevations", plans.len(), sections.len());
+        for p in plans {
+            eprintln!("plan {:?} {:?} cut {:.2} depth {:.2} crop {:?}: {} notes, {} dimensions", p.name, p.kind, p.cut, p.depth, p.crop, p.notes.len(), p.dimensions.len());
+            for n in p.notes.iter().take(3) {
+                eprintln!("    note {:?} {:?}", n.at, n.text);
+            }
+            for d in p.dimensions.iter().take(3) {
+                eprintln!("    dimension {:?} -> {:?} = {:.0} mm", d.from, d.to, d.length() * 1000.0);
+            }
+        }
+        for s in sections {
+            eprintln!("section {:?} {:?} {:?} -> {:?} depth {:.2} crop {:?}: {} notes, {} dimensions", s.name, s.kind, s.from, s.to, s.depth, s.crop, s.notes.len(), s.dimensions.len());
+            for n in s.notes.iter().take(3) {
+                eprintln!("    note {:?} {:?}", n.at, n.text);
+            }
+            for d in s.dimensions.iter().take(3) {
+                eprintln!("    dimension {:?} -> {:?} = {:.0} mm", d.from, d.to, d.length() * 1000.0);
+            }
+        }
+        assert!(!plans.is_empty() && !sections.is_empty());
+        // texts and lines: a dimension of the file is drawn as the lines and texts it has there
+        assert!(plans.iter().any(|p| !p.notes.is_empty() && !p.lines.is_empty()) || sections.iter().any(|s| !s.notes.is_empty() && !s.lines.is_empty()));
+        // marks lie in or near the model: a wrong frame would put them far away
+        let b = &model.bounds;
+        let near = |p: [f64; 2]| p[0] > b.min[0] as f64 - 50.0 && p[0] < b.max[0] as f64 + 50.0 && p[1] > b.min[1] as f64 - 50.0 && p[1] < b.max[1] as f64 + 50.0;
+        assert!(plans.iter().flat_map(|p| &p.notes).all(|n| near(n.at)), "bounds {b:?}");
+    }
+
+    use super::*;
+
+    fn wall(start: glam::DVec2, end: glam::DVec2) -> SourceWall {
+        SourceWall { start, end, base: 1.0, height: 3.0, thickness: 0.3, openings: Vec::new(), level: None, layers: Vec::new(), exterior_left: false }
+    }
+
+    /// A box in feet from metres.
+    fn feet(b: [f64; 6]) -> [f64; 6] {
+        b.map(|v| v / FT)
+    }
+
+    /// A door or window known by its box (metres) alone.
+    fn boxed(b: [f64; 6]) -> Hole {
+        Hole { bb: Some(feet(b)), size: None, origin: None, bottom: None }
+    }
+
+    fn opening(cut: Cut) -> bim_core::Opening {
+        match cut {
+            Cut::Opening(o) => o,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_door_in_a_wall_along_x_opens_where_its_box_is() {
+        let w = wall(glam::DVec2::ZERO, glam::DVec2::new(6.0, 0.0));
+        // 0.9 wide from 2 m, 2.1 high from the wall's base, its frame standing out of the wall
+        let o = opening(cut_of(&w, &boxed([2.0, -0.2, 1.0, 2.9, 0.2, 3.1])));
+        assert!((o.along - 2.0).abs() < 1e-9 && (o.width - 0.9).abs() < 1e-9 && o.sill.abs() < 1e-9 && (o.height - 2.1).abs() < 1e-9, "{o:?}");
+        // drawn the other way, along y: the same opening, measured from that wall's start
+        let w = wall(glam::DVec2::new(0.0, 6.0), glam::DVec2::ZERO);
+        let o = opening(cut_of(&w, &boxed([-0.2, 2.0, 2.0, 0.2, 2.9, 3.2])));
+        assert!((o.along - 3.1).abs() < 1e-9 && (o.width - 0.9).abs() < 1e-9 && (o.sill - 1.0).abs() < 1e-9 && (o.height - 1.2).abs() < 1e-9, "{o:?}");
+    }
+
+    #[test]
+    fn a_door_with_its_types_sizes_opens_about_its_insertion_point() {
+        let w = wall(glam::DVec2::ZERO, glam::DVec2::new(6.0, 0.0));
+        // a box that reaches far to one side (its swing) and above the wall; the type says 0.9 × 2.1
+        let hole = Hole { bb: Some(feet([1.5, -0.2, 0.9, 3.4, 0.2, 4.1])), size: Some((0.9 / FT, 2.1 / FT)), origin: Some([3.0 / FT, 0.0, 1.0 / FT]), bottom: Some(1.0 / FT) };
+        let o = opening(cut_of(&w, &hole));
+        assert!((o.along - 2.55).abs() < 1e-9 && (o.width - 0.9).abs() < 1e-9 && o.sill.abs() < 1e-9 && (o.height - 2.1).abs() < 1e-9, "{o:?}");
+        // a type without sizes: its box
+        let o = opening(cut_of(&w, &Hole { size: None, ..hole }));
+        assert!((o.along - 1.5).abs() < 1e-9 && (o.width - 1.9).abs() < 1e-9 && (o.height - 3.0).abs() < 1e-9, "{o:?}");
+    }
+
+    #[test]
+    fn a_swing_drawn_in_plan_cuts_nothing_and_a_door_without_a_box_or_type_is_unknown() {
+        let w = wall(glam::DVec2::ZERO, glam::DVec2::new(6.0, 0.0));
+        assert_eq!(cut_of(&w, &boxed([2.0, -0.2, 1.0, 2.9, 0.2, 1.0])), Cut::Nothing, "no height");
+        assert_eq!(cut_of(&w, &boxed([7.0, -0.2, 1.0, 8.0, 0.2, 3.0])), Cut::Nothing, "beside the wall");
+        assert_eq!(cut_of(&w, &Hole { bb: None, size: None, origin: None, bottom: None }), Cut::Unknown);
+    }
+
+    #[test]
+    fn the_parts_of_one_door_make_one_opening_and_apart_ones_stay_apart() {
+        let o = |along: f64, sill: f64, width: f64, height: f64| bim_core::Opening { along, sill, width, height, framing: None };
+        // frame, leaf and lining of one door, overlapping; a window beside it
+        let got = merged(vec![o(1.7, 0.07, 1.58, 2.45), o(4.0, 0.9, 1.0, 1.2), o(1.78, 0.14, 1.44, 2.39), o(1.7, 0.07, 1.58, 2.44)]);
+        assert_eq!(got.len(), 2);
+        assert!((got[0].along - 1.7).abs() < 1e-12 && (got[0].width - 1.58).abs() < 1e-12 && (got[0].height - 2.46).abs() < 1e-12, "{got:?}");
+        assert_eq!(got[1], o(4.0, 0.9, 1.0, 1.2));
+    }
+
+    #[test]
+    fn a_window_in_a_turned_wall_takes_its_width_from_its_box_unless_the_wall_is_near_45_degrees() {
+        // a wall at 30°, a window 1.2 along it and 0.3 across, centred 2 m from the start
+        let d = 30_f64.to_radians();
+        let dir = glam::DVec2::new(d.cos(), d.sin());
+        let w = wall(glam::DVec2::ZERO, dir * 5.0);
+        let centre = dir * 2.0;
+        let (c, s) = (d.cos(), d.sin());
+        let (ex, ey) = (1.2 * c + 0.3 * s, 1.2 * s + 0.3 * c);
+        let bb = [centre.x - ex / 2.0, centre.y - ey / 2.0, 1.9, centre.x + ex / 2.0, centre.y + ey / 2.0, 3.1];
+        let o = opening(cut_of(&w, &boxed(bb)));
+        assert!((o.width - 1.2).abs() < 1e-9 && (o.along - 1.4).abs() < 1e-9 && (o.sill - 0.9).abs() < 1e-9, "{o:?}");
+        // at 45° the box does not tell
+        let dir = glam::DVec2::new(1.0, 1.0).normalize();
+        let w = wall(glam::DVec2::ZERO, dir * 5.0);
+        assert_eq!(cut_of(&w, &boxed([1.0, 1.0, 1.0, 2.0, 2.0, 3.0])), Cut::Unknown);
+    }
+
+    /// The location line of a sample's walls against their meshes: how far the middle of each
+    /// wall's mesh lies from its line, across it, for the walls the file draws with their ids.
+    /// Set `RVT_SAMPLE` to a Revit 2024+ file; skipped when absent.
+    #[test]
+    fn walls_of_a_sample_lie_on_their_meshes() {
+        let Some(path) = std::env::var_os("RVT_SAMPLE").map(std::path::PathBuf::from).filter(|p| p.exists()) else {
+            eprintln!("skipped: set RVT_SAMPLE to a Revit 2024+ file");
+            return;
+        };
+        let model = crate::loaders::load(&path).expect("rvt");
+        let walls = &model.project.walls;
+        let (mut centred, mut off, mut thick, mut drawn) = (0, 0, 0, 0);
+        for (&id, w) in walls {
+            let ranges = model.element_ranges(id);
+            if ranges.is_empty() {
+                continue;
+            }
+            drawn += 1;
+            let Some((lo, hi)) = crate::app::across_mesh(&model, id, w.start, w.end) else { continue };
+            if ((hi - lo) - w.thickness).abs() > 0.005 {
+                thick += 1;
+                continue;
+            }
+            if ((lo + hi) / 2.0).abs() <= 0.001 {
+                centred += 1;
+            } else {
+                off += 1;
+            }
+        }
+        eprintln!("{} walls, {drawn} drawn with their ids: {centred} centred on their line, {off} beside it, {thick} not as thick as their type", walls.len());
+        assert!(!walls.is_empty());
+        // what reading them adds to a load: the mesher alone, and with the walls read beside it
+        // (each on a document of its own, so neither finds the other's caches warm)
+        let doc = rvt_read::Document::open(&path).expect("rvt");
+        let t = std::time::Instant::now();
+        drop(rvt_export::mesh::scene(&doc));
+        let alone = t.elapsed();
+        let doc = rvt_read::Document::open(&path).expect("rvt");
+        let t = std::time::Instant::now();
+        let again = std::thread::scope(|s| {
+            let walls = s.spawn(|| source_walls(&doc));
+            drop(rvt_export::mesh::scene(&doc));
+            walls.join().unwrap_or_default()
+        });
+        eprintln!("mesher {alone:?} alone, {:?} with the walls read beside it; {} walls with openings", t.elapsed(), again.values().filter(|w| !w.openings.is_empty()).count());
+    }
     /// Autodesk's racbasicsampleproject_2026.rvt, read-only from `RVT_SAMPLE`; skipped when absent.
     #[test]
     fn loads_revit_sample() {
@@ -427,7 +1242,7 @@ mod tests {
         assert!(elements > 100 && model.props.len() > 100, "{elements} elements, {} props", model.props.len());
         let c = model.bounds.center();
         let t = std::time::Instant::now();
-        let hit = crate::app::pick_triangle(&model, &vec![true; model.layers.len()], glam::Vec3::new(c[0], c[1], model.bounds.max[2] + 10.0), glam::Vec3::new(0.0, 0.0, -1.0), &|_, _| glam::Vec3::ZERO, &|_| true, None);
+        let hit = crate::app::pick_triangle(&model, &vec![true; model.layers.len()], glam::Vec3::new(c[0], c[1], model.bounds.max[2] + 10.0), glam::Vec3::new(0.0, 0.0, -1.0), &|_, _| glam::Vec3::ZERO, &|_| true, &|_, _| false, None);
         let id = hit.and_then(|(l, t)| model.layers[l].element_at(t));
         eprintln!("pick {:?} in {:?}: {:?}", id, t.elapsed(), id.map(|id| model.element_props(id)));
         // material transparency: alpha per vertex
@@ -457,4 +1272,146 @@ mod tests {
             model.bounds
         );
     }
+    /// What the 3D views of a file say about what they show: `O3V_RVT` names the file.
+    #[test]
+    #[ignore]
+    fn what_3d_views_say_of_their_visibility() {
+        let Ok(path) = std::env::var("O3V_RVT") else { return };
+        let doc = rvt_read::Document::open(&path).expect("rvt");
+        for id in doc.object_ids_of_class("DBView3d") {
+            let Some(o) = doc.object(id) else { continue };
+            let name = o.get("m_viewName").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if !name.contains("3D") {
+                continue;
+            }
+            println!("== view {id} {name:?} class {} fields {}", o.class, o.fields.len());
+            for f in &o.fields {
+                let n = f.name.to_lowercase();
+                if n.contains("emplate") || n.contains("filter") || n.contains("hidden") || n.contains("hide") || n.contains("discipline") || n.contains("categor") || n.contains("visib") {
+                    println!("   {} : {} = {}", f.name, f.ty, format!("{:?}", o.get(&f.name)).chars().take(160).collect::<String>());
+                }
+            }
+            for f in o.get("m_oaDrawFilters").and_then(|v| v.as_list()).unwrap_or(&[]) {
+                let Some(df) = o.deref(f) else { continue };
+                let ids = df.get("m_categoryIds").and_then(|v| v.as_list()).map_or(0, |l| l.len());
+                println!("   draw filter {} ({} category ids; fields {:?})", df.class, ids, df.fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>());
+            }
+        }
+    }
+    /// Which categories a view named in `O3V_VIEW` (of the file in `O3V_RVT`) switches off, and
+    /// what the elements the model draws are, by category, with whether the view leaves them out.
+    #[test]
+    #[ignore]
+    fn what_a_3d_view_leaves_out_by_category() {
+        let (Ok(path), Ok(name)) = (std::env::var("O3V_RVT"), std::env::var("O3V_VIEW")) else { return };
+        let doc = rvt_read::Document::open(&path).expect("rvt");
+        let Some(view) = doc.object_ids_of_class("DBView3d").into_iter().find(|id| doc.object(*id).is_some_and(|o| o.get("m_viewName").and_then(|v| v.as_str()) == Some(name.as_str()))) else { panic!("no view {name}") };
+        let o = doc.object(view).unwrap();
+        println!("view {view}: template {:?}", o.get("m_viewTemplateId").and_then(|v| v.element()));
+        let mut off = std::collections::HashSet::new();
+        for f in o.get("m_oaDrawFilters").and_then(|v| v.as_list()).unwrap_or(&[]) {
+            let Some(df) = o.deref(f) else { continue };
+            if df.class.starts_with("IckyExcludedCategories") {
+                off.extend(df.get("m_categoryIds").and_then(|v| v.as_list()).unwrap_or(&[]).iter().filter_map(|c| c.element()));
+                println!("   models excluded {:?} imports {:?} annotations {:?}", df.get("m_modelsExcluded"), df.get("m_importsExcluded"), df.get("m_annotationsExcluded"));
+            }
+        }
+        println!("   {} categories off", off.len());
+        // the elements with a shape, by the category in their record
+        let scene = rvt_export::mesh::scene(&doc);
+        let mut by: std::collections::BTreeMap<i64, (usize, String)> = std::collections::BTreeMap::new();
+        for batch in &scene.batches {
+            for id in batch.elements.iter().map(|e| e.0) {
+                let Some(e) = doc.element(id) else { continue };
+                let entry = by.entry(e.category as i64).or_insert((0, batch.name.clone()));
+                entry.0 += 1;
+            }
+        }
+        for (category, (count, layer)) in by {
+            println!("   {} category {category} ({layer}): {count} elements", if off.contains(&category) { "off" } else { "ON " });
+        }
+    }
+    /// The filters of a view (`O3V_VIEW` of `O3V_RVT`) as its record holds them, and the filter
+    /// elements they name: for finding out how they are stored.
+    #[test]
+    #[ignore]
+    fn how_a_view_keeps_its_filters() {
+        let (Ok(path), Ok(name)) = (std::env::var("O3V_RVT"), std::env::var("O3V_VIEW")) else { return };
+        let doc = rvt_read::Document::open(&path).expect("rvt");
+        let Some(view) = doc.object_ids_of_class("DBView3d").into_iter().find(|id| doc.object(*id).is_some_and(|o| o.get("m_viewName").and_then(|v| v.as_str()) == Some(name.as_str()))) else { panic!("no view {name}") };
+        let o = doc.object(view).unwrap();
+        let short = |s: String, n: usize| s.chars().take(n).collect::<String>();
+        let over = o.get("m_oFilterOverrides").and_then(|v| o.deref(v)).expect("overrides");
+        println!("OVERRIDES {} {}", over.class, short(serde_json::to_string(over).unwrap(), 3000));
+        // every element id in it that is a filter
+        let settings: Vec<String> = over.get("m_oaSettings").and_then(|v| v.as_list()).unwrap_or(&[]).iter().filter_map(|s| o.deref(s)).map(|s| serde_json::to_string(s).unwrap()).collect();
+        for s in settings.iter().take(4) {
+            println!("SETTING {}", short(s.clone(), 1500));
+        }
+        let text = settings.join(" ");
+        let mut ids: Vec<u64> = text.split("\"element\":").skip(1).filter_map(|s| s.trim_start().split(|c: char| !c.is_ascii_digit() && c != '-').next()?.parse::<i64>().ok()).filter(|i| *i > 0).map(|i| i as u64).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        let hidden: Vec<bool> = over.get("m_oaSettings").and_then(|v| v.as_list()).unwrap_or(&[]).iter().filter_map(|s| o.deref(s)).map(|s| format!("{:?}", s.get("m_bVisibilityFlag")).contains("false")).collect();
+        println!("hidden flags {hidden:?}");
+        for id in ids {
+            let Some(f) = doc.object(id) else { continue };
+            let strip = |s: String| { let mut s = s; for cut in ["\"owner\":\"", "\"type\":\""] { while let Some(a) = s.find(cut) { let b = s[a + cut.len()..].find("\",").map_or(s.len(), |b| a + cut.len() + b + 2); s.replace_range(a..b, ""); } } s };
+            println!("ELEMENT {id} {:?}", f.get("m_name"));
+            println!("   OBJECTS {}", short(strip(serde_json::to_string(&f.objects).unwrap()), 1800));
+        }
+    }
+    /// What the model says of a few elements per layer (`O3V_RVT`): for finding out under what
+    /// names the values a filter asks for are kept.
+    #[test]
+    #[ignore]
+    fn what_elements_say_of_themselves() {
+        let Ok(path) = std::env::var("O3V_RVT") else { return };
+        let doc = rvt_read::Document::open(&path).expect("rvt");
+        let names = doc.parameter_names_global();
+        for id in [503389u64] {
+            println!("parameter {id}: {:?}", names.get(&id));
+        }
+        for id in [2292835u64, 2850051] {
+            let Some(o) = doc.object(id) else { continue };
+            for set in ["m_pParamValueSetInt", "m_pParamValueSetDouble", "m_pParamValueSetAString", "m_pParamValueSetElementId"] {
+                println!("{id} {set}: {}", o.get(set).and_then(|v| o.deref(v)).map_or("none".to_string(), |s| serde_json::to_string(s).unwrap().chars().take(900).collect()));
+            }
+            println!("record {id} {}: {:?}", o.class, o.fields.iter().map(|f| f.name.as_str()).filter(|n| { let n = n.to_lowercase(); n.contains("truct") || n.contains("bearing") || n.contains("usage") || n.contains("flags") }).map(|n| format!("{n}={:?}", o.get(n))).collect::<Vec<_>>());
+        }
+        let over = |name: &str| doc.object_ids_of_class("DBView3d").into_iter().find(|id| doc.object(*id).is_some_and(|o| o.get("m_viewName").and_then(|v| v.as_str()) == Some(name)));
+        if let Some(o) = over("3D Constructie").and_then(|id| doc.object(id)) {
+            for s in o.get("m_oFilterOverrides").and_then(|v| o.deref(v)).and_then(|f| f.get("m_oaSettings")).and_then(|v| v.as_list()).unwrap_or(&[]).iter().filter_map(|s| o.deref(s)) {
+                let id = s.get("m_filterElemId").and_then(|v| v.element()).unwrap_or(-1);
+                println!("filter {id} {:?} visible {:?} enabled {:?}", doc.object(id as u64).and_then(|f| f.get("m_name").and_then(|v| v.as_str()).map(str::to_string)), s.get("m_bVisibilityFlag"), s.get("m_bEnabledFlag"));
+            }
+        }
+        let scene = rvt_export::mesh::scene(&doc);
+        for batch in scene.batches.iter().take(0) {
+            for (id, json) in batch.props.iter().take(2) {
+                println!("{} #{id}: {}", batch.name, json.chars().take(1400).collect::<String>());
+            }
+        }
+    }
+    /// With `RVT_MATERIALS=<a Revit file>`: prints its materials, each with its class and its
+    /// colour, for `tools/revit-materials`.
+    #[test]
+    #[ignore]
+    fn print_the_materials_of_a_revit_file() {
+        let Some(path) = std::env::var_os("RVT_MATERIALS").map(std::path::PathBuf::from).filter(|p| p.exists()) else { return };
+        let doc = rvt_read::Document::open(&path).expect("rvt");
+        let mut first = true;
+        for id in doc.object_ids_of_class("MaterialElem") {
+            let Some(o) = doc.object(id) else { continue };
+            let Some(material) = o.get("m_pMaterial").and_then(|v| o.deref(v)) else { continue };
+            if first {
+                first = false;
+                println!("FIELDS {:?}", material.fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>());
+            }
+            let text = |field: &str| material.get(field).and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+            let colour = material.get("m_color").and_then(|v| v.as_i64()).map(rvt_read::materials::rgb).unwrap_or([0; 3]);
+            println!("MATERIAL\t{}\t{}\t{:?}", text("m_name"), text("m_sMaterialClass"), colour);
+        }
+    }
+
 }

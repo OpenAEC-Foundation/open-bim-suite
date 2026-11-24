@@ -1,10 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="0.3" y2="1">
-      <stop offset="0%" stop-color="#ffc820"/>
-      <stop offset="100%" stop-color="#f5960a"/>
-    </linearGradient>
-  </defs>
-  <rect width="512" height="512" rx="90" fill="url(#bg)"/>
-  <text x="256" y="256" text-anchor="middle" dominant-baseline="central" font-family="Impact,Arial Black,sans-serif" font-size="340" font-weight="900" fill="#281e0f" letter-spacing="-10">3D</text>
+  <title>Open BIM Suite</title>
+  <defs><linearGradient id="amber" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#F59E0B"/><stop offset="1" stop-color="#D97706"/></linearGradient></defs>
+  <rect width="512" height="512" rx="104" fill="url(#amber)"/>
+  <polygon points="124,322 256,398 256,432 124,356" fill="#2A2A32"/>
+  <polygon points="256,398 388,322 388,356 256,432" fill="#4A4A55"/>
+  <polygon points="256,246 388,322 256,398 124,322" fill="#FDE9C8"/>
+  <polygon points="124,250 256,326 256,360 124,284" fill="#2A2A32"/>
+  <polygon points="256,326 388,250 388,284 256,360" fill="#4A4A55"/>
+  <polygon points="256,174 388,250 256,326 124,250" fill="#FDE9C8"/>
+  <polygon points="124,178 256,254 256,288 124,212" fill="#2A2A32"/>
+  <polygon points="256,254 388,178 388,212 256,288" fill="#4A4A55"/>
+  <polygon points="256,102 388,178 256,254 124,178" fill="#FFFFFF"/>
 </svg>

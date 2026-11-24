@@ -4,6 +4,7 @@
 
 use super::{group_header, App, Message, FONT, FONT_BOLD};
 use crate::model::Schedule;
+use crate::selection::Pickable;
 use crate::theme::Palette;
 use iced::widget::operation::AbsoluteOffset;
 use iced::widget::scrollable::{Direction, RelativeOffset, Scrollbar, Viewport};
@@ -12,7 +13,7 @@ use iced::widget::{button, column, container, operation, row, rule, scrollable, 
 use iced::{Center, Element, Fill, FillPortion, Padding, Task};
 use openaec_ui::Language;
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 /// The document tab of the 3D view.
 pub const VIEW_3D: &str = "3d";
@@ -62,6 +63,38 @@ impl App {
         later_task(model.id, work)
     }
 
+    /// Writes the computed schedules to an Excel workbook: asks where, then writes it there (in
+    /// the browser: to the downloads).
+    pub(super) fn export_schedules(&self) -> Task<Message> {
+        let schedules: Vec<&Schedule> = self.schedules.iter().filter(|s| s.computed).collect();
+        let Some(model) = self.model.as_ref().filter(|_| !schedules.is_empty()) else { return Task::none() };
+        let name = format!("{}.xlsx", model.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "schedules".into()));
+        let workbook = crate::export::xlsx::workbook(&schedules).map_err(|e| format!("Cannot export {name}: {e}"));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut dialog = rfd::AsyncFileDialog::new().set_title("Export").set_file_name(name).add_filter("Excel", &["xlsx"]);
+            if let Some(folder) = model.path.parent().filter(|f| f.is_dir()) {
+                dialog = dialog.set_directory(folder);
+            }
+            Task::perform(
+                async move {
+                    let path = dialog.save_file().await?.path().to_path_buf();
+                    let start = web_time::Instant::now();
+                    // the dialog asked before replacing a file
+                    let written = workbook.and_then(|bytes| crate::export::write_file(&path, true, |out| std::io::Write::write_all(out, &bytes)).map_err(|e| format!("Cannot export {}: {e}", path.display())));
+                    Some(written.map(|()| (path, start.elapsed().as_secs_f32())))
+                },
+                Message::Exported,
+            )
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+            let done = workbook.and_then(|bytes| crate::web::download(&name, &bytes, mime));
+            Task::done(Message::Exported(Some(done.map(|()| (std::path::PathBuf::from(name), 0.0)))))
+        }
+    }
+
     /// Opens a schedule in its own tab, or shows its tab when it is open.
     pub(super) fn open_schedule(&mut self, i: usize) -> Task<Message> {
         if !self.open_schedules.contains(&i) {
@@ -72,9 +105,13 @@ impl App {
 
     /// Shows a schedule's tab, from its top (`None`: the 3D view alone).
     pub(super) fn show_schedule(&mut self, i: Option<usize>) -> Task<Message> {
-        // a schedule's tab replaces a shown sheet
+        // a schedule's tab replaces a shown sheet, under the 3D view
         if i.is_some() {
-            self.active_sheet = None;
+            self.active_sheet = None; self.active_draft = None;
+            self.active_doc_sheet = None;
+            self.ifc.shown = false;
+            self.docs.shown = false;
+            self.load_view(None);
         }
         if self.active_schedule == i {
             return Task::none();
@@ -99,17 +136,13 @@ impl App {
     /// Selects the drawn elements of a schedule row; the first of them shows its properties.
     pub(super) fn select_row(&mut self, schedule: usize, row: usize) {
         let Some(model) = self.model.clone() else { return };
+        self.set_structural_selection(Vec::new());
         let Some(r) = self.schedules.get(schedule).and_then(|s| s.rows.get(row)) else { return };
-        let ids: HashSet<u64> = r.elements.iter().copied().collect();
-        let mut layer_of = HashMap::new();
-        self.selection.clear();
-        for (l, layer) in model.layers.iter().enumerate() {
-            for &(id, first, count) in layer.elements.iter().filter(|e| ids.contains(&e.0)) {
-                self.selection.push((l, first, count));
-                layer_of.entry(id).or_insert(l);
-            }
-        }
-        self.selected = r.elements.iter().find_map(|id| Some((*layer_of.get(id)?, Some(*id))));
+        let drawn: HashSet<u64> = model.layers.iter().flat_map(|l| l.elements.iter().map(|e| e.0)).collect();
+        let items: Vec<Pickable> = r.elements.iter().filter(|id| drawn.contains(id)).map(|&id| Pickable::Element(id)).collect();
+        self.sel.clear();
+        self.sel.extend(items);
+        self.selection_changed();
     }
 
     /// The explorer group of the schedules, by name (Revit's "Schedules/Quantities").
@@ -145,12 +178,30 @@ impl App {
     /// The workspace: the shown sheet, or the viewport with the table of the shown schedule
     /// under it.
     pub fn workspace_view(&self, p: Palette, l: Language) -> Element<'_, Message> {
+        // Docs: the project folder fills the workspace, also without a model
+        if self.docs.shown {
+            return self.docs_page(p, l);
+        }
+        if let Some(sheet) = self.doc_sheet_workspace(p, l) {
+            return sheet;
+        }
+        if let Some(draft) = self.active_draft.and_then(|i| self.drafts().get(i)) {
+            return self.draft_view_element(p, l, draft);
+        }
         if let Some(sheet) = self.active_sheet.and_then(|i| self.sheets().get(i)) {
+            // the sheet alone: its export is in the right pane
             return self.sheet_view_element(p, l, sheet);
         }
         let viewport = self.viewport_view(p, l);
+        // nothing stands over the viewport: what a view or a tool offers is in the right pane
+        // the IFCX page: the file fills the workspace
+        if self.ifc.shown && self.ifc.full && self.ifc.structure.is_some() {
+            return container(self.ifc_panel(p, l)).width(iced::Fill).height(iced::Fill).style(move |_| p.panel()).into();
+        }
+        if self.ifc.shown && self.ifc.structure.is_some() {
+            return column![container(viewport).height(FillPortion(1)), rule::horizontal(1), container(self.ifc_panel(p, l)).height(FillPortion(1)).style(move |_| p.panel())].into();
+        }
         let Some((i, s)) = self.active_schedule.and_then(|i| Some((i, self.schedules.get(i)?))) else {
-
             return viewport;
         };
         column![
@@ -224,10 +275,13 @@ impl App {
             .padding([0, 6])
             .style(move |_, st| p.row_button(st))
             .on_press(Message::CloseSchedule(index));
+        // every schedule of the file, a sheet each
+        let excel = button(text("Excel").size(12)).padding([3, 8]).style(move |_, st| p.ribbon_button(false, st)).on_press(Message::ExportSchedules);
         let bar = row![
             text(s.title.as_str()).size(12).font(FONT_BOLD).color(p.text),
             text(info).size(11).color(p.text_muted),
             Space::new().width(Fill),
+            excel,
             close,
         ]
         .spacing(10)
@@ -288,8 +342,7 @@ impl App {
             Err(e) => return (Err(e), Task::none()),
         };
         let s = &self.schedules[i];
-        let offset = a.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
-        let limit = a.get("limit").and_then(Value::as_u64).unwrap_or(100) as usize;
+        let (offset, limit) = crate::remote::page(a, 100, 200);
         let rows: Vec<Value> = s
             .rows
             .iter()
@@ -364,7 +417,7 @@ mod tests {
         };
         let mut app = App::default();
         app.set_model(Arc::new(Model::new("doors.rvt".into(), "Revit", vec![layer])));
-        let row = |cells: &[&str], elements: Vec<u64>| ScheduleRow { cells: cells.iter().map(|c| Some(c.to_string())).collect(), elements, total: false };
+        let row = |cells: &[&str], elements: Vec<u64>| ScheduleRow { images: Vec::new(), cells: cells.iter().map(|c| Some(c.to_string())).collect(), elements, total: false };
         app.schedules = vec![Schedule {
             name: "Door Schedule".into(),
             columns: vec!["Mark".into()],

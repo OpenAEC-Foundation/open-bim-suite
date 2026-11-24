@@ -1,10 +1,12 @@
-//! DWG/DXF polygon geometry through Hakan's MPL-2.0 acadrust reader.
+//! DWG/DXF polygon geometry through Hakan's MPL-2.0 acadrust reader (the codec of the shared
+//! OpenCAD drawing model, which the drawing export writes with too).
 //!
 //! This importer deliberately renders model-space polygon geometry, not a complete CAD
 //! drawing. ACIS solids, annotations, curves and external references are counted as omitted.
 
 use super::{Loaded, Loader, Phase, Progress, Source, DEFAULT_COLOR};
 use crate::model::{Layer, ProjectData};
+use opencaddocument::acadrust;
 use acadrust::{CadDocument, Color, DwgReader, DxfReader, EntityType, Vector3};
 use glam::{DMat4, DVec3};
 use std::collections::{BTreeMap, BTreeSet};
@@ -78,7 +80,7 @@ fn convert(document: &CadDocument) -> Result<Loaded, String> {
         ("CAD world origin (metres)".into(), format!("{}, {}, {}", origin.x, origin.y, origin.z)),
         ("CAD omitted entities".into(), if omitted.is_empty() { "0".into() } else { omitted }),
     ];
-    Ok(Loaded { layers: builder.layers.into_values().collect(), views: Vec::new(), project })
+    Ok(Loaded { structural: Vec::new(), origin: None, layers: builder.layers.into_values().collect(), views: Vec::new(), project })
 }
 
 impl Builder<'_> {
@@ -256,7 +258,7 @@ fn triangulate(points: &[DVec3]) -> Result<Vec<[DVec3; 3]>, String> {
     }).collect())
 }
 
-fn metres_per_unit(unit: i16) -> f64 {
+pub(crate) fn metres_per_unit(unit: i16) -> f64 {
     match unit {
         1 => 0.0254, 2 => 0.3048, 3 => 1609.344, 4 => 0.001, 5 => 0.01, 6 => 1.0,
         7 => 1000.0, 8 => 0.0000000254, 9 => 0.0000254, 10 => 0.9144, 11 => 1e-10,

@@ -1,6 +1,9 @@
 //! The neutral scene model every loader produces: Z-up, metres (or file units), one
-//! triangle mesh per layer.
+//! triangle mesh or point cloud per layer.
 
+use crate::structural::display::StructuralDisplay;
+use crate::structural::{StructuralIndex, StructuralItem, StructuralPart};
+use glam::DVec3;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -28,6 +31,88 @@ pub struct Layer {
     pub props: Vec<(u64, String)>,
     /// Hidden in the file (a hidden SketchUp tag): starts switched off.
     pub hidden: bool,
+    /// A point cloud (LAS, LAZ, E57): every vertex is a point, drawn as a dot of a few pixels;
+    /// no `indices`, `normals` or `elements`.
+    pub points: bool,
+    /// Line segments (curves, text and hatch lines of CAD and NURBS models): pairs of vertex
+    /// indices, drawn unlit in their vertices' colours in every view mode. Their vertices are
+    /// not used by `indices`.
+    pub lines: Vec<u32>,
+    /// The curves among the line segments that are elements: (element id, first index into
+    /// `lines`, index count), as `elements` for the triangles.
+    pub line_elements: Vec<(u64, u32, u32)>,
+    /// Images on the surfaces (textured materials and decals), when any vertex shows one.
+    pub texturing: Option<Box<Texturing>>,
+    /// A splat scene (3D Gaussian splatting): with `points`, every vertex is the centre of a
+    /// splat and its colour the splat's base colour with its opacity in the fourth byte; drawn
+    /// as sorted, blended Gaussians rather than dots.
+    pub splats: Option<Arc<SplatData>>,
+}
+
+/// The images on a layer's surfaces: per vertex what it shows of which image, and the images.
+#[derive(Debug, Clone, Default)]
+pub struct Texturing {
+    /// One per vertex, as `positions`; drawn without images when the lengths differ.
+    pub vertices: Vec<TexVertex>,
+    pub images: Vec<Arc<TextureImage>>,
+}
+
+/// What a vertex shows of the images of its layer: the material's image repeats across the
+/// surface; a decal's shows only within 0..1 of its coordinates.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct TexVertex {
+    /// u, v in the material's image, then u, v in the decal's.
+    pub uv: [f32; 4],
+    /// The material's image and the decal's, by index + 1 into [`Texturing::images`] (0 none).
+    pub image: [u16; 2],
+    /// How much the material's image replaces the surface colour, and the decal's opacity
+    /// (255 all); then whether the material's image also gives transparency (1).
+    pub amount: [u8; 4],
+}
+
+/// An image a surface shows: straight sRGB pixels, row by row from the top.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TextureImage {
+    /// The image file as the model names it.
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    /// RGBA8, `width * height * 4` bytes.
+    pub rgba: Vec<u8>,
+}
+
+/// What a splat layer has beyond its centres and base colours.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SplatData {
+    /// The covariance of every splat (xx, xy, xz, yy, yz, zz), in the axes of the layer.
+    pub covariances: Vec<[f32; 6]>,
+    /// The degree of the view-dependent colour: 0 to 3.
+    pub sh_degree: u8,
+    /// Its coefficients beyond degree 0, `((degree + 1)^2 - 1) * 3` per splat (each as red,
+    /// green, blue).
+    pub sh: Vec<f32>,
+    /// The turn from the axes of the layer to the axes of the coefficients, row by row.
+    pub sh_frame: [[f32; 3]; 3],
+    /// The base colours are linear, not sRGB.
+    pub linear: bool,
+}
+
+impl SplatData {
+    /// Turns the splats about the vertical (with their layer's centres turned the same way).
+    pub fn turn_z(&mut self, sin: f32, cos: f32) {
+        let r = [[cos, -sin, 0.0], [sin, cos, 0.0], [0.0, 0.0, 1.0]];
+        for c in &mut self.covariances {
+            let m = [[c[0], c[1], c[2]], [c[1], c[3], c[4]], [c[2], c[4], c[5]]];
+            // R M R^T
+            let rm: Vec<[f32; 3]> = (0..3).map(|i| [0, 1, 2].map(|j| (0..3).map(|k| r[i][k] * m[k][j]).sum())).collect();
+            let out = |i: usize, j: usize| (0..3).map(|k| rm[i][k] * r[j][k]).sum::<f32>();
+            *c = [out(0, 0), out(0, 1), out(0, 2), out(1, 1), out(1, 2), out(2, 2)];
+        }
+        // a direction of the turned layer is turned back before the old frame
+        let f = self.sh_frame;
+        self.sh_frame = [0, 1, 2].map(|i| [0, 1, 2].map(|j| (0..3).map(|k| f[i][k] * r[j][k]).sum()));
+    }
 }
 
 impl Layer {
@@ -37,6 +122,11 @@ impl Layer {
 
     pub fn triangle_count(&self) -> usize {
         self.indices.len() / 3
+    }
+
+    /// The points of a point cloud layer (0 for a mesh).
+    pub fn point_count(&self) -> usize {
+        if self.points { self.vertex_count() } else { 0 }
     }
 
     /// The triangles of the elements (or the whole layer) that enclose volume, for the cut fill.
@@ -99,8 +189,17 @@ impl Bounds {
     }
 }
 
+/// An element as its own file names it: the index of its model among the open ones and its id
+/// in that file. It stays the same when another model is added; the id in the shown model
+/// ([`Model::combine`] renumbers) does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ElementKey {
+    pub model: u32,
+    pub source: u64,
+}
+
 /// A loaded model.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Model {
     /// Unique id, used by the GPU cache to know when to upload.
     pub id: u64,
@@ -114,29 +213,259 @@ pub struct Model {
     pub source_y_up: bool,
     /// Element properties (flat JSON object per element id).
     pub props: HashMap<u64, String>,
+    /// For a combined model ([`Model::combine`]): the key of every element and back; empty for
+    /// a model of one file, whose ids are the keys.
+    pub keys: HashMap<u64, ElementKey>,
+    pub ids: HashMap<ElementKey, u64>,
     /// Views saved in the file (Revit), in world coordinates.
     pub views: Vec<SavedView>,
     /// What the file says about the project besides geometry (Revit).
     pub project: ProjectData,
+    /// Structural analysis models (nodes, members, supports, ...): typed document objects with
+    /// element ids, drawn from the document rather than from layer triangles. Set with
+    /// [`Model::set_structural`].
+    pub structural: Vec<StructuralPart>,
+    /// Element id → structural object, built by [`Model::set_structural`].
+    pub structural_index: StructuralIndex,
+    /// What the renderer draws of the structural parts (member axes, node glyphs), derived with
+    /// them by [`Model::set_structural`]: on the load worker for a loaded file, never per frame.
+    pub structural_display: Option<Arc<StructuralDisplay>>,
+    /// Where each source model sits in the world (f64, Z up, metres); index = the `model` of a
+    /// [`StructuralPart`]. One entry for a loaded file, one per file for a combined model.
+    pub origins: Vec<Origin>,
 }
+
+/// Where a source model's display coordinates sit in the world, in f64 (Z up, metres).
+///
+/// A display point `q` (the f32 positions of the layers, relative to the model's anchor) is the
+/// world point `anchor + q - shift`. `shift` is the translation [`Model::combine`] applied to
+/// align the model with the first one (display alignment on Add, under 10 km).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Origin {
+    /// The anchor the loader subtracted; `None` when the format has none (the display
+    /// coordinates are the file's own).
+    pub anchor: Option<DVec3>,
+    /// The translation applied to the display coordinates by [`Model::combine`].
+    pub shift: DVec3,
+}
+
+impl Origin {
+    /// The display coordinates of a world point, in f64.
+    pub fn display(&self, world: DVec3) -> DVec3 {
+        world - self.anchor.unwrap_or(DVec3::ZERO) + self.shift
+    }
+
+    /// The world point of display coordinates.
+    pub fn world(&self, display: DVec3) -> DVec3 {
+        display - self.shift + self.anchor.unwrap_or(DVec3::ZERO)
+    }
+}
+
+/// Above this distance between two models' anchors, [`Model::combine`] does not align them: the
+/// f32 display would lose millimetres.
+pub const ALIGN_LIMIT: f64 = 10_000.0;
 
 /// Project data besides geometry (Revit): project information, levels, phases, grids, rooms,
 /// sheets.
 #[derive(Debug, Clone, Default)]
 pub struct ProjectData {
+    /// How the file's browser can order its views (Revit): each of its organizations, with the
+    /// folders of each of [`Model::views`] of this file; and the one it is taken to show.
+    pub view_orders: Vec<ViewOrder>,
+    pub view_order: Option<usize>,
     /// Sheets (Revit, beta): the paper and the views placed on it.
     pub sheets: Vec<Sheet>,
+    /// Drawings without a model (Revit, beta): legends and drafting views, with their lines,
+    /// texts and dimensions.
+    pub drafts: Vec<Draft>,
+    /// The cut the file opens with, in display coordinates (Rhino: the clipping plane that clips
+    /// its perspective view).
+    pub section: Option<crate::section::SectionPlane>,
+    /// Labels on points of the model, a fixed size on the screen whatever the distance, as
+    /// Rhino draws its text dots: display coordinates, text, background colour and the layer
+    /// (by name) whose visibility they follow.
+    pub dots: Vec<ModelDot>,
+    /// The cut patterns of the materials (Revit), by the material's name: how a cut through an
+    /// element of that material is hatched.
+    pub cut_patterns: std::collections::HashMap<String, crate::hatching::Pattern>,
+    /// The parts elements are made of, where they are of several materials (a modelled wall's
+    /// layers): the layer of the model, the first index and the index count of the part's
+    /// triangles, and its material in `part_materials`; sorted by layer and first index. A cut
+    /// through such an element is a face per part, each hatched as its material.
+    pub parts: Vec<(usize, u32, u32, u32)>,
+    /// The assemblies elements are made of (the prefab units of a modelled timber frame): where
+    /// each is drawn within its element; sorted by layer and first index. An export writes each
+    /// as an assembly of its own under its element.
+    pub assemblies: Vec<Assembly>,
+    /// The reinforcing bars modelled elements carry in their concrete: the layer of the model,
+    /// the first vertex and the vertex count of each run of them; sorted. They show in 3D and
+    /// are left out of the cut drawings, where a reinforcement drawing has its own signs for them.
+    pub bars: Vec<(usize, u32, u32)>,
+    /// What the parts are made of: each material with how a cut through it is hatched.
+    pub part_materials: Vec<crate::hatching::PartMaterial>,
+    /// The earth under the terrain a section cuts (Revit, the settings of the site): the height
+    /// down to which it is filled (metres) and the name of the material it is hatched as.
+    pub earth: Option<(f32, Option<String>)>,
+    /// The phases of the elements and of the views (Revit): what a view leaves out or draws in
+    /// halftone.
+    pub phasing: crate::phasing::Phasing,
+    /// Per view (its path) the elements it leaves out because their family shows none of their
+    /// solids as the view looks at them (Revit): a pile in a plan that draws only its symbol.
+    pub switched_off: std::collections::HashMap<String, std::collections::HashSet<u64>>,
+    /// Per view (its path) how it draws elements otherwise than their materials say (Revit: the
+    /// filters of the view or of its template), by element.
+    pub looks: std::collections::HashMap<String, std::sync::Arc<std::collections::HashMap<u64, crate::hatching::Look>>>,
+    /// The pairs of elements joined in the file (Revit), the smaller id first: a drawing leaves
+    /// out the line between two of them of one material.
+    pub joins: std::collections::HashSet<(u64, u64)>,
+    /// The properties of what the legends and drafting views draw, by its element in the file.
+    pub drawn: crate::app::drawn_props::Drawn,
+    /// What a reader knows of the parts of its drawings, by the element their lines and texts
+    /// carry: a JSON array of `[name, value]` pairs as the reader wrote it, read when the part
+    /// is picked.
+    pub drawn_pairs: std::collections::HashMap<u64, String>,
     /// Project information: (key, value). Built-in keys: `number`, `name`, `client`, `status`;
     /// other keys are the captions of the project's own parameters.
     pub info: Vec<(String, String)>,
+    /// Values a simulation file gives at the points or cells of its mesh, and where the vertices
+    /// of its layers come from (VTK).
+    pub fields: Option<std::sync::Arc<crate::fields::Fields>>,
     /// Levels: name and elevation (metres), low to high.
     pub levels: Vec<(String, f32)>,
+    /// The path the file gives a level, by its name: what its elements and plans name it by. A
+    /// level without one gets a path of its name and elevation.
+    pub level_paths: Vec<(String, String)>,
     /// Phases in the order of the project.
     pub phases: Vec<String>,
     pub grids: Vec<GridLine>,
     pub rooms: Vec<Room>,
+    /// The drawings of an IFCX file this viewer wrote: floor plans, sections and sheets as its
+    /// `o3v::` nodes (path, attributes), in file order; the project document takes them over.
+    pub drawings: Vec<(String, serde_json::Value)>,
+    /// The definitions of elements this viewer modelled, as an IFCX file it wrote holds them
+    /// (`openaec::element`); the modeller takes them over.
+    pub elements: Vec<serde_json::Value>,
+    /// The library of the modelled project as IFCX nodes (its materials and types): an IFCX file
+    /// written from the model holds them, and the reader gives the library back.
+    pub types: Vec<serde_json::Value>,
+    /// The walls of the file the Modeller can take over as editable walls (Revit), by element id.
+    pub walls: HashMap<u64, SourceWall>,
     /// Schedules: computed after the model shows, as they take seconds on a large project.
     pub schedules: Later<Vec<Schedule>>,
+    /// The drawings of the file (Revit), read after the model shows: on a large project they
+    /// take far longer than the model itself. [`ProjectData::take_over`] puts them in.
+    pub later: Later<Drawings>,
+}
+
+/// What the drawings of a file add to its project: the parts of [`ProjectData`] a loader may
+/// leave for after the model shows.
+#[derive(Debug, Clone, Default)]
+pub struct Drawings {
+    pub sheets: Vec<Sheet>,
+    pub drafts: Vec<Draft>,
+    pub phasing: crate::phasing::Phasing,
+    pub switched_off: std::collections::HashMap<String, std::collections::HashSet<u64>>,
+    pub looks: std::collections::HashMap<String, std::sync::Arc<std::collections::HashMap<u64, crate::hatching::Look>>>,
+    pub joins: std::collections::HashSet<(u64, u64)>,
+    pub drawn: crate::app::drawn_props::Drawn,
+    pub drawings: Vec<(String, serde_json::Value)>,
+}
+
+impl ProjectData {
+    /// Whether vertex `v` of `layer` is of a reinforcing bar (see `bars`).
+    pub fn bar_at(&self, layer: usize, v: u32) -> bool {
+        let Some(k) = self.bars.partition_point(|b| (b.0, b.1) <= (layer, v)).checked_sub(1) else { return false };
+        let (of, first, count) = self.bars[k];
+        of == layer && v < first + count
+    }
+
+    /// Puts in the drawings that were read after the model.
+    pub fn take_over(&mut self, drawings: Drawings) {
+        self.sheets = drawings.sheets;
+        self.drafts = drawings.drafts;
+        self.phasing = drawings.phasing;
+        self.switched_off = drawings.switched_off;
+        self.looks = drawings.looks;
+        self.joins = drawings.joins;
+        self.drawn = drawings.drawn;
+        self.drawings = drawings.drawings;
+    }
+}
+
+/// An assembly of an element: a prefab unit of a framed system, as the model draws it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Assembly {
+    /// The layer of the model, the first index and the index count of its triangles.
+    pub layer: usize,
+    pub first: u32,
+    pub count: u32,
+    /// The element it is of, which of that element's assemblies it is (from 1) and how many
+    /// that element has.
+    pub element: u64,
+    pub number: u32,
+    pub of: u32,
+    /// Its mark, as its element drawings carry it.
+    pub mark: String,
+    /// How long it is (metres) and how many parts it is made of.
+    pub length: f64,
+    pub parts: u32,
+}
+
+impl ProjectData {
+    /// The assemblies of element `id` drawn in `layer`, in order.
+    pub fn assemblies_of(&self, layer: usize, id: u64) -> impl Iterator<Item = &Assembly> {
+        self.assemblies.iter().filter(move |a| a.layer == layer && a.element == id)
+    }
+
+    /// The material (in `part_materials`) of the part that triangle `tri` of `layer` draws,
+    /// when the triangle is of a part.
+    pub fn part_at(&self, layer: usize, tri: usize) -> Option<u32> {
+        if self.parts.is_empty() {
+            return None;
+        }
+        let at = (3 * tri) as u32;
+        let k = self.parts.partition_point(|p| (p.0, p.1) <= (layer, at)).checked_sub(1)?;
+        let (of, first, count, material) = self.parts[k];
+        (of == layer && at < first + count).then_some(material)
+    }
+}
+
+impl Model {
+    /// Reads now what the loader left for after the model shows (its drawings), if anything.
+    pub fn complete(&mut self) {
+        if let Some(work) = self.project.later.take() {
+            self.project.take_over(work());
+        }
+    }
+}
+
+/// A wall of an opened file that the Modeller can take over as an editable wall (Revit), in the
+/// model's display coordinates (metres, Z up): the file's location line as its axis, its base and
+/// height, its type's total thickness, the doors and windows in it as openings, and the name of
+/// its base level.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceWall {
+    pub start: glam::DVec2,
+    pub end: glam::DVec2,
+    pub base: f64,
+    pub height: f64,
+    pub thickness: f64,
+    pub openings: Vec<bim_core::Opening>,
+    pub level: Option<String>,
+    /// Its type's layers, from its exterior face in; empty when the file gives none.
+    pub layers: Vec<SourceLayer>,
+    /// Its exterior face is on the left, walking from `start` to `end`.
+    pub exterior_left: bool,
+}
+
+/// A layer of a wall of an opened file: its material as the file names it (empty: none), its
+/// thickness in metres, what the file says it is for, and its material's colour.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceLayer {
+    pub material: String,
+    pub thickness: f64,
+    pub function: String,
+    pub colour: Option<[u8; 3]>,
 }
 
 /// Work a loader leaves for after the model shows; whoever takes it runs it (once).
@@ -208,6 +537,8 @@ pub struct Schedule {
 #[derive(Debug, Clone, Default)]
 pub struct ScheduleRow {
     pub cells: Vec<Option<String>>,
+    /// The image a cell shows instead of a text, per column; empty when the row has none.
+    pub images: Vec<Option<iced::widget::image::Handle>>,
 
     /// The elements of the row: one when itemized, the group's otherwise.
     pub elements: Vec<u64>,
@@ -226,17 +557,163 @@ pub struct Sheet {
     /// The paper, when the title block tells its size.
     pub paper: Option<SheetRect>,
     pub viewports: Vec<SheetViewport>,
+    /// The lines of its title block.
+    pub lines: Vec<[[f32; 2]; 2]>,
+    /// The texts of its title block: its fixed ones and its labels, filled in.
+    pub texts: Vec<DraftText>,
+    /// The schedules placed on it.
+    pub tables: Vec<SheetTable>,
+    /// The images of its title block, such as a logo.
+    pub images: Vec<SheetImage>,
+    /// The regions of its title block filled in one colour.
+    pub fills: Vec<DraftFill>,
+    /// The colour of each line of its title block that has one of its own: as many as `lines`,
+    /// or none.
+    pub line_colors: Vec<Option<[u8; 3]>>,
+}
+
+/// A label on a point of the model (see [`ProjectData::dots`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelDot {
+    pub at: [f32; 3],
+    pub text: String,
+    pub color: [u8; 3],
+    pub layer: String,
+}
+
+/// An image on a sheet (sheet metres).
+#[derive(Debug, Clone)]
+pub struct SheetImage {
+    pub center: [f32; 2],
+    /// Its width and height.
+    pub size: [f32; 2],
+    /// How it is turned (radians, counterclockwise).
+    pub angle: f32,
+    pub image: iced::widget::image::Handle,
 }
 
 impl Sheet {
     pub fn new(number: String, name: String, paper: Option<SheetRect>, viewports: Vec<SheetViewport>) -> Self {
         let title = [number.as_str(), name.as_str()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(" ");
-        Self { number, name, title, paper, viewports }
+        Self { number, name, title, paper, viewports, lines: Vec::new(), texts: Vec::new(), tables: Vec::new(), images: Vec::new(), fills: Vec::new(), line_colors: Vec::new() }
     }
 
-    /// What the sheet covers: the paper and every viewport.
+    /// What the sheet covers: the paper, every viewport and every schedule, and what its title
+    /// block draws.
     pub fn extent(&self) -> Option<SheetRect> {
-        self.paper.iter().chain(self.viewports.iter().map(|v| &v.rect)).copied().reduce(SheetRect::union)
+        let tables = self.tables.iter().map(SheetTable::rect);
+        let images = self.images.iter().map(|i| SheetRect::around(i.center, i.size));
+        let points = self.lines.iter().flatten().copied().chain(self.texts.iter().flat_map(|t| [t.at, [t.at[0] + t.width, t.at[1] + t.height]]));
+        let block = points.map(|p| SheetRect { min: p, max: p });
+        self.paper.iter().copied().chain(self.viewports.iter().map(|v| v.rect)).chain(tables).chain(images).chain(block).reduce(SheetRect::union)
+    }
+}
+
+/// A schedule placed on a sheet, as the table the file stores for it (sheet metres).
+#[derive(Debug, Clone, Default)]
+pub struct SheetTable {
+    /// The name of its schedule.
+    pub schedule: String,
+    /// Its upper left corner.
+    pub origin: [f32; 2],
+    /// The widths of its columns.
+    pub columns: Vec<f32>,
+    /// Its rows, from the top.
+    pub rows: Vec<TableRow>,
+}
+
+/// A row of a [`SheetTable`].
+#[derive(Debug, Clone, Default)]
+pub struct TableRow {
+    pub height: f32,
+    /// Its cells, from the left; a cell another one covers is left out.
+    pub cells: Vec<TableCell>,
+    /// The title above the columns: its cell runs over the full width.
+    pub title: bool,
+    /// A blank line or a footer: no borders between its cells.
+    pub plain: bool,
+}
+
+/// A cell of a [`SheetTable`].
+#[derive(Debug, Clone, Default)]
+pub struct TableCell {
+    /// The column it starts in, and how many it covers.
+    pub column: u16,
+    pub span: u16,
+    pub text: String,
+    /// The height of its letters (metres on paper).
+    pub size: f32,
+    /// 0 left, 1 centre, 2 right.
+    pub align: u8,
+    /// 0 top, 1 middle, 2 foot.
+    pub vertical: u8,
+    /// It shows a value of the row's elements that the file does not store.
+    pub open: bool,
+    /// The image it shows, once the computed schedule gives it.
+    pub image: Option<iced::widget::image::Handle>,
+}
+
+impl SheetTable {
+    pub fn width(&self) -> f32 {
+        self.columns.iter().sum()
+    }
+
+    /// What it covers on the sheet.
+    pub fn rect(&self) -> SheetRect {
+        let height: f32 = self.rows.iter().map(|r| r.height).sum();
+        SheetRect { min: [self.origin[0], self.origin[1] - height], max: [self.origin[0] + self.width(), self.origin[1]] }
+    }
+
+    /// The table with its open cells filled from the computed schedule. A row of the table takes
+    /// the one computed row that agrees with every text the file stores for it; where no text
+    /// tells them apart, the rows go by their order when there are as many of each.
+    pub fn filled(&self, computed: Option<&Schedule>) -> SheetTable {
+        let mut table = self.clone();
+        let Some(s) = computed.filter(|s| s.computed && s.columns.len() == self.columns.len()) else { return table };
+        let values: Vec<&ScheduleRow> = s.rows.iter().filter(|r| !r.total).collect();
+        let open = |r: &TableRow| !r.title && r.cells.iter().any(|c| c.open);
+        let rows: Vec<usize> = (0..table.rows.len()).filter(|&k| open(&table.rows[k])).collect();
+        // how a computed row stands to a row of the table: the texts they both have, and whether
+        // all of those are the same
+        let agrees = |row: &TableRow, value: &ScheduleRow| {
+            let both = row.cells.iter().filter(|c| !c.text.trim().is_empty()).filter_map(|c| Some((c.text.trim(), value.cells.get(c.column as usize)?.as_deref()?.trim()))).filter(|(_, v)| !v.is_empty());
+            let (mut compared, mut same) = (0, true);
+            for (text, value) in both {
+                compared += 1;
+                same &= text == value;
+            }
+            (compared > 0).then_some(same)
+        };
+        let mut taken = vec![false; values.len()];
+        let mut of: Vec<Option<usize>> = rows
+            .iter()
+            .map(|&k| {
+                let mut candidates = (0..values.len()).filter(|&v| agrees(&table.rows[k], values[v]) == Some(true));
+                let first = candidates.next()?;
+                candidates.next().is_none().then_some(first)
+            })
+            .collect();
+        // a computed row is one row of the table only
+        for v in of.iter_mut() {
+            if let Some(k) = *v {
+                if std::mem::replace(&mut taken[k], true) {
+                    *v = None;
+                }
+            }
+        }
+        if of.iter().all(Option::is_none) && rows.len() == values.len() {
+            of = (0..rows.len()).map(Some).collect();
+        }
+        for (&k, value) in rows.iter().zip(of).filter_map(|(k, v)| Some((k, values[v?]))) {
+            for cell in table.rows[k].cells.iter_mut().filter(|c| c.open) {
+                let column = cell.column as usize;
+                if let Some(Some(text)) = value.cells.get(column) {
+                    cell.text.clone_from(text);
+                }
+                cell.image = value.images.get(column).cloned().flatten();
+            }
+        }
+        table
     }
 }
 
@@ -278,6 +755,125 @@ pub struct SheetViewport {
     /// "1:50".
     pub scale: String,
     pub detail: Option<String>,
+    /// Where its title stands on the sheet (metres), when the sheet tells.
+    pub label: Option<[f32; 2]>,
+    /// Where the origin of the view's own drawing lies on the sheet (metres).
+    pub origin: [f32; 2],
+    /// What a metre of the view is on the sheet: 0.02 at 1:50.
+    pub ratio: f32,
+    /// The path of the document's view (plan, section or elevation) it shows, when it is one.
+    pub drawing: Option<String>,
+    /// The point of that view's drawing that lies at `origin` (metres), when the view tells.
+    pub anchor: Option<[f64; 2]>,
+    /// The direction of the view's own x on its drawing (unit): `[1, 0]` unless the view is turned
+    /// on the sheet, as a plan whose crop is turned a quarter.
+    pub turn: [f64; 2],
+    /// The legend or drafting view in [`ProjectData::drafts`] it shows, when it is one.
+    pub draft: Option<usize>,
+    /// Its title as the type of its viewport writes it (its name and scale in one line; empty: the
+    /// type shows none), when the file tells.
+    pub written: Option<String>,
+    /// The typeface its type writes that title in (bold, italic, its family).
+    pub face: crate::typeface::Face,
+    /// Its crop split in pieces, when the view's is: parts left out and the pieces moved together.
+    pub split: Option<CropSplit>,
+}
+
+/// A crop split in pieces along one of the drawing's axes (0: across, 1: up): per piece the part
+/// of the crop it shows (from and to, as fractions of the crop along that axis) and how far it is
+/// moved along it (metres of the drawing).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CropSplit {
+    pub axis: u8,
+    pub pieces: Vec<[f64; 3]>,
+}
+
+/// The kinds of drawing without a model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DraftKind {
+    Legend,
+    Drafting,
+    /// A drawing of a project that is no view of a model: a sheet, a section, a floor or panel
+    /// drawing as its file keeps it.
+    Drawing,
+}
+
+/// A drawing without a model (Revit, beta: a legend or a drafting view): what is drawn in it, in
+/// its own plane (metres at full size, x right, y up). On paper it is `scale` times smaller.
+#[derive(Debug, Clone)]
+pub struct Draft {
+    /// The view's element in its file.
+    pub id: u64,
+    pub name: String,
+    pub kind: DraftKind,
+    /// 1 : `scale`.
+    pub scale: f32,
+    pub lines: Vec<DraftLine>,
+    pub texts: Vec<DraftText>,
+    pub dimensions: Vec<DraftDimension>,
+    /// Per line of `lines` its colour (red, green, blue), when its line style or its fill pattern
+    /// has one that is not black.
+    pub line_colors: Vec<Option<[u8; 3]>>,
+    /// The regions filled in one colour, drawn under the lines.
+    pub fills: Vec<DraftFill>,
+}
+
+/// A region of a drawing filled in one colour (red, green, blue): its outlines, the first its
+/// outer one and the others its holes. `element` is the element of the file it belongs to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DraftFill {
+    pub element: u64,
+    pub loops: Vec<Vec<[f32; 2]>>,
+    pub color: [u8; 3],
+}
+
+impl Draft {
+    /// What it covers: lower left and upper right, `None` when it is empty.
+    pub fn extent(&self) -> Option<SheetRect> {
+        let lines = self.lines.iter().flat_map(|l| [l.a, l.b]);
+        let texts = self.texts.iter().flat_map(|t| [t.at, [t.at[0] + t.width, t.at[1] + t.height]]);
+        let dimensions = self.dimensions.iter().flat_map(|d| [d.from, d.to, d.measured[0], d.measured[1]]);
+        lines.chain(texts).chain(dimensions).map(|p| SheetRect { min: p, max: p }).reduce(SheetRect::union)
+    }
+}
+
+/// A line of a drawing: a detail line, or a piece of a curved one. `element` is the element of
+/// the file it belongs to, which a click picks.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DraftLine {
+    pub element: u64,
+    pub a: [f32; 2],
+    pub b: [f32; 2],
+}
+
+/// A text of a drawing: its box from its lower left corner, and the size of its letters.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DraftText {
+    pub element: u64,
+    pub at: [f32; 2],
+    pub width: f32,
+    pub height: f32,
+    /// The height of a line of letters (the font size).
+    pub size: f32,
+    /// Where its lines start in its box: 0 left, 1 middle, 2 right.
+    pub align: u8,
+    /// How it is turned about the foot of its box where its lines start (radians,
+    /// counter-clockwise).
+    pub angle: f32,
+    pub text: String,
+    /// The typeface of its letters: the app's own unless its file names one.
+    pub face: crate::typeface::Face,
+}
+
+/// A dimension of a drawing: its line from `from` to `to`, and the two points it measures.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DraftDimension {
+    pub element: u64,
+    pub from: [f32; 2],
+    pub to: [f32; 2],
+    pub measured: [[f32; 2]; 2],
+    /// How it looks: the style of its type (sizes on paper).
+    pub style: std::sync::Arc<crate::document::DimensionStyle>,
 }
 
 /// The kind of a saved view.
@@ -321,56 +917,197 @@ pub struct SavedView {
     pub clip: Option<crate::section::SectionBox>,
     pub plan: Option<PlanRange>,
     pub level: Option<String>,
+    /// The folders it lies in where its file orders its views in folders, the outer one first.
+    pub folder: Vec<String>,
+    /// How it draws the model, where its file says (a 3D view's visual style).
+    pub style: Option<ViewStyle>,
+    /// Its drawing in the project document, where the file's drawings are read: a floor plan,
+    /// section, elevation or detail then opens as that drawing, as its sheets show it.
+    pub drawing: Option<String>,
+}
+
+/// A way the browser of a file orders its views: its name and, for each view of the file in
+/// order, the folders it lies in (outer first), or none where the organization leaves it out.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ViewOrder {
+    pub name: String,
+    pub folders: Vec<Option<Vec<String>>>,
+}
+
+/// How a saved view draws the model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewStyle {
+    Wireframe,
+    /// White surfaces that hide what lies behind them, and their edges.
+    HiddenLine,
+    Shaded,
+    /// Shaded, with the edges drawn over it.
+    ShadedEdges,
+}
+
+/// Under what name what belongs to a 3D view of the file is kept beside that of the document's
+/// views (its hidden lines, the elements it leaves out): by its place among [`Model::views`].
+pub fn view3d_key(view: usize) -> String {
+    format!("view3d/{view}")
 }
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
+/// An id no model has yet: a model changed in place (its points recoloured) is drawn again.
+pub fn fresh_id() -> u64 {
+    NEXT_ID.fetch_add(1, Ordering::Relaxed)
+}
+
 impl Model {
-    /// Compose loaded files in the app, giving each source's element IDs a unique
-    /// namespace. Original IDs remain in their source properties.
+    /// Compose loaded files in the app. The first file keeps its element ids; the elements of
+    /// the others are numbered after the highest id so far that a JSON number holds exactly
+    /// ([`crate::structural::MAX_SAFE_ID`]), so adding a file changes no id and the new ids stay
+    /// compact. [`Model::element_key`] names every element by its file and its own id.
+    ///
+    /// Structural parts come along with their documents untouched (source ids stay in the
+    /// documents; [`StructuralPart::element_id`] gives the new element id), and the origins of
+    /// every source model are kept. When the model or the first anchored model has structural
+    /// parts, a model whose anchor lies within [`ALIGN_LIMIT`] of the first anchored model's is
+    /// moved by the f64 difference (rounded once to f32), so both draw in one frame; a farther
+    /// model stays where it is, with a note in the project information. Models without an anchor
+    /// are never moved, and models without structural parts (an IFC with another IFC) combine as
+    /// they always have.
     pub fn combine(models: &[std::sync::Arc<Model>]) -> Self {
+        Self::combine_moved(models, &[])
+    }
+
+    /// As [`Model::combine`], each model moved by its entry in `moves` (metres; none: not moved):
+    /// its layers, views, levels and grids move, and its origin's shift takes the move, so world
+    /// coordinates stay those of its file.
+    pub fn combine_moved(models: &[std::sync::Arc<Model>], moves: &[DVec3]) -> Self {
+        Self::combine_placed(models, moves, &[])
+    }
+
+    /// As [`Model::combine_moved`], each model also turned about its zero point by its entry in
+    /// `turns` (degrees, anticlockwise seen from above; none: not turned), before it is moved:
+    /// its layers and grids turn, and where its views look from. A turned model's world
+    /// coordinates are no longer those of its file; the clip boxes of its views do not turn.
+    pub fn combine_placed(models: &[std::sync::Arc<Model>], moves: &[DVec3], turns: &[f64]) -> Self {
         let mut layers = Vec::new();
         let mut props = HashMap::new();
         let mut views = Vec::new();
         let mut project = ProjectData::default();
+        let mut origins = Vec::new();
+        let mut parts = Vec::new();
         let mut next_id = 1u64;
-        for model in models {
+        let (mut keys, mut ids) = (HashMap::new(), HashMap::new());
+        // display alignment: to the first model that knows its anchor (and whether it has
+        // structural parts)
+        let reference = models.iter().find_map(|m| Some((m.origins.iter().find_map(|o| o.anchor)?, !m.structural.is_empty())));
+        for (m, model) in models.iter().enumerate() {
             let source = model.file_name();
-            let ids: std::collections::BTreeSet<_> = model.props.keys().copied()
-                .chain(model.layers.iter().flat_map(|layer| layer.elements.iter().map(|e| e.0))).collect();
-            let remap: HashMap<_, _> = ids.into_iter().map(|id| {
-                let mapped = next_id;
-                next_id += 1;
+            let sources: std::collections::BTreeSet<_> = model.props.keys().copied()
+                .chain(model.layers.iter().flat_map(|layer| layer.elements.iter().map(|e| e.0)))
+                .chain(model.structural_index.element_ids()).collect();
+            // the first model keeps its own ids, the others follow after the highest JSON-safe id
+            // so far, so no id changes when another model is added and the new ids stay compact
+            let remap: HashMap<_, _> = sources.into_iter().map(|id| {
+                let mapped = if m == 0 { id } else { next_id };
+                if mapped <= crate::structural::MAX_SAFE_ID {
+                    next_id = next_id.max(mapped + 1);
+                }
+                let key = ElementKey { model: m as u32, source: id };
+                keys.insert(mapped, key);
+                ids.insert(key, mapped);
                 (id, mapped)
             }).collect();
+            // the shift that aligns this model, and the translation that takes it there
+            let anchor = model.origins.iter().find_map(|o| o.anchor);
+            // only where an analysis model takes part: meshes alone combine as they always have
+            let aligns = !model.structural.is_empty() || reference.is_some_and(|(_, structural)| structural);
+            let (shift, far) = match (anchor, reference) {
+                (Some(_), Some(_)) if !aligns => (None, None),
+                (Some(a), Some((r, _))) if (a - r).length() < ALIGN_LIMIT => (Some(a - r), None),
+                (Some(a), Some((r, _))) => (None, Some((a - r).length())),
+                _ => (None, None),
+            };
+            let current = model.origins.first().map_or(DVec3::ZERO, |o| o.shift);
+            let by = moves.get(m).copied().unwrap_or(DVec3::ZERO);
+            let moved = Some(shift.unwrap_or(current) + by - current).filter(|t| *t != DVec3::ZERO);
+            // the turn about the model's zero point, where the scene draws it
+            let turn = turns.get(m).copied().filter(|degrees| *degrees != 0.0).map(|degrees| (degrees.to_radians().sin_cos(), current));
+            let first_origin = origins.len() as u32;
+            origins.extend(model.origins.iter().map(|o| Origin { anchor: o.anchor, shift: shift.unwrap_or(o.shift) + by }));
+            if model.origins.is_empty() {
+                origins.push(Origin::default());
+            }
+            if let Some(d) = far {
+                project.info.push((format!("{source} / Not aligned"), format!(
+                    "its origin is {d:.0} m from the first model's, more than {:.0} km: drawn in its own coordinates",
+                    ALIGN_LIMIT / 1000.0
+                )));
+            }
             for layer in &model.layers {
                 let mut layer = layer.clone();
                 layer.name = format!("{source} / {}", layer.name);
                 for element in &mut layer.elements { element.0 = remap[&element.0]; }
+                if let Some(((sin, cos), pivot)) = turn {
+                    turn_about(&mut layer.positions, &mut layer.normals, sin, cos, pivot);
+                    if let Some(splats) = &mut layer.splats {
+                        Arc::make_mut(splats).turn_z(sin as f32, cos as f32);
+                    }
+                }
+                if let Some(t) = moved {
+                    translate(&mut layer.positions, t);
+                }
                 layers.push(layer);
             }
             props.extend(model.props.iter().map(|(id, value)| (remap[id], value.clone())));
+            parts.extend(model.structural.iter().map(|part| part.renumbered(first_origin + part.model, |id| remap[&id])));
             let first_view = views.len();
             project.sheets.extend(model.project.sheets.iter().cloned().map(|mut sheet| {
                 sheet.viewports.iter_mut().for_each(|v| v.view = v.view.map(|i| i + first_view));
                 Sheet::new(format!("{source} / {}", sheet.number), sheet.name, sheet.paper, sheet.viewports)
             }));
+            let t = moved.map_or(glam::Vec3::ZERO, |t| t.as_vec3());
             views.extend(model.views.iter().cloned().map(|mut view| {
                 view.name = format!("{source} / {}", view.name);
+                if let Some(c) = &mut view.camera {
+                    if let Some(((sin, cos), pivot)) = turn {
+                        turn_about(&mut c.eye, &mut [], sin, cos, pivot);
+                    }
+                    c.eye = (glam::Vec3::from_array(c.eye) + t).to_array();
+                }
+                if let Some(c) = &mut view.clip {
+                    // the box frame turns about its pivot: moving pivot and limits moves the box
+                    c.pivot += t;
+                    c.min += t;
+                    c.max += t;
+                }
                 view
             }));
             project.info.extend(model.project.info.iter().map(|(key, value)| (format!("{source} / {key}"), value.clone())));
-            project.levels.extend(model.project.levels.iter().cloned());
+            project.levels.extend(model.project.levels.iter().map(|(name, z)| (name.clone(), z + t.z)));
             project.phases.extend(model.project.phases.iter().cloned());
-            project.grids.extend(model.project.grids.iter().cloned());
+            project.grids.extend(model.project.grids.iter().cloned().map(|mut g| {
+                if let Some(((sin, cos), pivot)) = turn {
+                    turn_about(&mut g.a, &mut [], sin, cos, pivot);
+                    turn_about(&mut g.b, &mut [], sin, cos, pivot);
+                }
+                g.a = (glam::Vec3::from_array(g.a) + t).to_array();
+                g.b = (glam::Vec3::from_array(g.b) + t).to_array();
+                g
+            }));
             project.rooms.extend(model.project.rooms.iter().cloned());
+            project.types.extend(model.project.types.iter().cloned());
+            project.drawings.extend(model.project.drawings.iter().cloned());
+            project.drafts.extend(model.project.drafts.iter().cloned());
         }
         project.levels.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
         project.levels.dedup();
         let mut combined = Self::new(format!("{} models", models.len()).into(), "Multiple models", layers);
         combined.props = props;
+        combined.keys = keys;
+        combined.ids = ids;
         combined.views = views;
         combined.project = project;
+        combined.origins = origins;
+        combined.set_structural(parts);
         combined.file_size = models.iter().map(|m| m.file_size).sum();
         combined.load_time = models.iter().map(|m| m.load_time).sum();
         combined
@@ -379,9 +1116,12 @@ impl Model {
     /// Builds a model from layers: drops empty layers and computes the bounds.
     pub fn new(path: PathBuf, format: impl Into<String>, mut layers: Vec<Layer>) -> Self {
         let props: HashMap<u64, String> = layers.iter_mut().flat_map(|l| std::mem::take(&mut l.props)).collect();
-        layers.retain(|l| !l.indices.is_empty() && !l.positions.is_empty());
+        layers.retain(|l| (l.points || !l.indices.is_empty() || !l.lines.is_empty()) && !l.positions.is_empty());
         layers.iter_mut().for_each(unshare_element_vertices);
-        let layers: Vec<Layer> = layers.into_iter().flat_map(|l| split_layer(l, MAX_PART_VERTICES, MAX_PART_TRIANGLES)).collect();
+        let layers: Vec<Layer> = layers
+            .into_iter()
+            .flat_map(|l| if l.points { split_points(l, MAX_PART_POINTS) } else { split_layer(l, MAX_PART_VERTICES, MAX_PART_TRIANGLES) })
+            .collect();
         let mut bounds = Bounds::empty();
         for layer in &layers {
             for p in layer.positions.chunks_exact(3) {
@@ -401,9 +1141,77 @@ impl Model {
             bounds,
             source_y_up: false,
             props,
+            keys: HashMap::new(),
+            ids: HashMap::new(),
             views: Vec::new(),
             project: ProjectData::default(),
+            structural: Vec::new(),
+            structural_index: StructuralIndex::default(),
+            structural_display: None,
+            origins: vec![Origin::default()],
         }
+    }
+
+    /// Installs structural parts: indexes their objects by element id (compact ids after the
+    /// model's own, see [`StructuralIndex::build`]) and adds their units (nodes, members with the
+    /// bulge of their arcs, surfaces) to the bounds. A model of only places-less objects
+    /// (sections, materials, load cases) gets a small box around the origin, so the camera, grid
+    /// and section box have something to frame. `origins` must cover the `model` of every part.
+    pub fn set_structural(&mut self, parts: Vec<StructuralPart>) {
+        if parts.is_empty() {
+            self.structural = Vec::new();
+            self.structural_index = StructuralIndex::default();
+            self.structural_display = None;
+            return;
+        }
+        // compact structural ids start after every element id the model has
+        let first_free = self
+            .layers
+            .iter()
+            .flat_map(|l| l.elements.iter().map(|e| e.0))
+            .chain(self.props.keys().copied())
+            .filter(|&id| id <= crate::structural::MAX_SAFE_ID)
+            .max()
+            .map_or(1, |id| id + 1);
+        let (parts, index) = StructuralIndex::build(parts, first_free);
+        self.structural = parts;
+        self.structural_index = index;
+        self.structural_display = Some(Arc::new(StructuralDisplay::build(&self.structural, &self.origins)));
+        for (_, b) in self.structural_index.unit_bounds(&self.structural, &self.origins) {
+            self.bounds.extend(b.min);
+            self.bounds.extend(b.max);
+        }
+        if !self.bounds.is_valid() {
+            self.bounds = Bounds { min: [-1.0; 3], max: [1.0; 3] };
+        }
+    }
+
+    /// The structural object with element id `id`.
+    pub fn structural_item(&self, id: u64) -> Option<StructuralItem<'_>> {
+        self.structural_index.get(&self.structural, id)
+    }
+
+    /// The display position (model space, f32) of world point `world` of source model `model`.
+    pub fn display_point(&self, model: u32, world: DVec3) -> [f32; 3] {
+        self.origins.get(model as usize).copied().unwrap_or_default().display(world).as_vec3().to_array()
+    }
+
+    /// The bounds of an element at rest (model space): a structural object's point, segment or
+    /// target box, else the box of its triangles.
+    pub fn element_bounds(&self, id: u64) -> Option<Bounds> {
+        if let Some(item) = self.structural_item(id) {
+            return item.bounds(&self.origins);
+        }
+        let mut b = Bounds::empty();
+        for (l, first, count) in self.element_ranges(id) {
+            let layer = &self.layers[l];
+            for &i in layer.indices.get(first as usize..(first + count) as usize).unwrap_or(&[]) {
+                if let Some(p) = layer.positions.get(3 * i as usize..3 * i as usize + 3) {
+                    b.extend([p[0], p[1], p[2]]);
+                }
+            }
+        }
+        b.is_valid().then_some(b)
     }
 
     pub fn file_name(&self) -> String {
@@ -418,6 +1226,119 @@ impl Model {
         self.layers.iter().map(Layer::triangle_count).sum()
     }
 
+    /// The points of the point cloud layers.
+    pub fn point_count(&self) -> usize {
+        self.layers.iter().map(Layer::point_count).sum()
+    }
+
+    /// The elements whose property `key` is `value`, both ignoring case, in layer order and each
+    /// once. `category` falls back to the element's first layer name, as the remote
+    /// `find_elements` does.
+    pub fn elements_with(&self, key: &str, value: &str) -> Vec<u64> {
+        let (key, value) = (key.to_lowercase(), value.to_lowercase());
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for layer in &self.layers {
+            for &(id, ..) in &layer.elements {
+                if !seen.insert(id) {
+                    continue;
+                }
+                let found = self.element_props(id).into_iter().find(|(k, _)| k.to_lowercase() == key).map(|(_, v)| v.to_lowercase());
+                let found = found.or_else(|| (key == "category").then(|| layer.name.to_lowercase()));
+                if found.as_deref() == Some(value.as_str()) {
+                    out.push(id);
+                }
+            }
+        }
+        out
+    }
+
+    /// The key of element `id`: its model and its id in that model's file.
+    pub fn element_key(&self, id: u64) -> ElementKey {
+        self.keys.get(&id).copied().unwrap_or(ElementKey { model: 0, source: id })
+    }
+
+    /// The element with `key`, as this model numbers it.
+    pub fn element_with_key(&self, key: ElementKey) -> Option<u64> {
+        if self.keys.is_empty() {
+            return (key.model == 0).then_some(key.source);
+        }
+        self.ids.get(&key).copied()
+    }
+
+    /// This model without the elements `gone`: their triangles, properties and walls left out, and
+    /// a layer left empty by them too; the rest as it was. It is a model of its own (a new id).
+    pub fn without_elements(&self, gone: &std::collections::HashSet<u64>) -> Self {
+        let layers: Vec<Layer> = self
+            .layers
+            .iter()
+            .map(|layer| {
+                let mut layer = layer.clone();
+                if layer.elements.iter().any(|e| gone.contains(&e.0)) {
+                    let mut indices = Vec::with_capacity(layer.indices.len());
+                    let mut elements = Vec::with_capacity(layer.elements.len());
+                    // the triangles of no element stay where they are among the others
+                    let mut at = 0usize;
+                    for &(id, first, count) in &layer.elements {
+                        let (first, end) = (first as usize, (first + count) as usize);
+                        indices.extend_from_slice(&layer.indices[at.min(first)..first]);
+                        if !gone.contains(&id) {
+                            elements.push((id, indices.len() as u32, count));
+                            indices.extend_from_slice(&layer.indices[first..end]);
+                        }
+                        at = at.max(end);
+                    }
+                    indices.extend_from_slice(&layer.indices[at.min(layer.indices.len())..]);
+                    layer.indices = indices;
+                    layer.elements = elements;
+                }
+                if layer.line_elements.iter().any(|e| gone.contains(&e.0)) {
+                    // the curves of the elements gone; segments of no element stay
+                    let mut lines = Vec::with_capacity(layer.lines.len());
+                    let mut elements = Vec::with_capacity(layer.line_elements.len());
+                    let mut at = 0usize;
+                    for &(id, first, count) in &layer.line_elements {
+                        let (first, end) = ((first as usize).min(layer.lines.len()), ((first + count) as usize).min(layer.lines.len()));
+                        lines.extend_from_slice(&layer.lines[at.min(first)..first]);
+                        if !gone.contains(&id) {
+                            elements.push((id, lines.len() as u32, (end - first) as u32));
+                            lines.extend_from_slice(&layer.lines[first..end]);
+                        }
+                        at = at.max(end);
+                    }
+                    lines.extend_from_slice(&layer.lines[at.min(layer.lines.len())..]);
+                    layer.lines = lines;
+                    layer.line_elements = elements;
+                }
+                layer
+            })
+            .filter(|l| l.points || !l.indices.is_empty() || !l.lines.is_empty())
+            .collect();
+        let mut project = self.project.clone();
+        project.walls.retain(|id, _| !gone.contains(id));
+        let mut model = Self {
+            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+            path: self.path.clone(),
+            format: self.format.clone(),
+            file_size: self.file_size,
+            load_time: self.load_time,
+            layers,
+            bounds: self.bounds,
+            source_y_up: self.source_y_up,
+            props: self.props.iter().filter(|(id, _)| !gone.contains(id)).map(|(id, p)| (*id, p.clone())).collect(),
+            keys: self.keys.clone(),
+            ids: self.ids.clone(),
+            views: self.views.clone(),
+            project,
+            structural: Vec::new(),
+            structural_index: StructuralIndex::default(),
+            structural_display: None,
+            origins: self.origins.clone(),
+        };
+        model.set_structural(self.structural.clone());
+        model
+    }
+
     /// Where an element is drawn: (layer, first index, index count) per range.
     pub fn element_ranges(&self, id: u64) -> Vec<(usize, u32, u32)> {
         let mut out = Vec::new();
@@ -428,8 +1349,11 @@ impl Model {
     }
 
     /// The properties of an element as (key, value) pairs in file order.
+    /// Structural objects keep no stored properties: theirs are built from the document.
     pub fn element_props(&self, id: u64) -> Vec<(String, String)> {
-        let Some(json) = self.props.get(&id) else { return Vec::new() };
+        let Some(json) = self.props.get(&id) else {
+            return self.structural_item(id).map(|item| item.props()).unwrap_or_default();
+        };
         match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(json) {
             Ok(map) => map
                 .into_iter()
@@ -440,10 +1364,57 @@ impl Model {
     }
 }
 
+/// Moves xyz triples by `t`, each coordinate rounded once from f64.
+/// Turns points about the vertical through `pivot`, and their normals along.
+fn turn_about(positions: &mut [f32], normals: &mut [f32], sin: f64, cos: f64, pivot: DVec3) {
+    for p in positions.chunks_exact_mut(3) {
+        let (x, y) = (f64::from(p[0]) - pivot.x, f64::from(p[1]) - pivot.y);
+        p[0] = (pivot.x + x * cos - y * sin) as f32;
+        p[1] = (pivot.y + x * sin + y * cos) as f32;
+    }
+    for n in normals.chunks_exact_mut(3) {
+        let (x, y) = (f64::from(n[0]), f64::from(n[1]));
+        n[0] = (x * cos - y * sin) as f32;
+        n[1] = (x * sin + y * cos) as f32;
+    }
+}
+
+fn translate(positions: &mut [f32], t: DVec3) {
+    for p in positions.chunks_exact_mut(3) {
+        for k in 0..3 {
+            p[k] = (p[k] as f64 + t[k]) as f32;
+        }
+    }
+}
+
 /// GPU buffer limits (wgpu default `max_buffer_size` is 256 MiB): at 32 bytes per vertex and up
 /// to 6 line indices per triangle, parts stay below that.
 pub const MAX_PART_VERTICES: usize = 8_000_000;
 pub const MAX_PART_TRIANGLES: usize = 10_000_000;
+/// Points per GPU buffer: 16 bytes each (position and colour).
+pub const MAX_PART_POINTS: usize = 12_000_000;
+
+/// Splits a point cloud layer into parts of at most `max` points, named as [`split_layer`] does.
+pub fn split_points(mut layer: Layer, max: usize) -> Vec<Layer> {
+    let n = layer.vertex_count();
+    // a splat scene stays whole: its loader keeps it within the limit
+    if n <= max || layer.splats.is_some() {
+        return vec![layer];
+    }
+    let count = n.div_ceil(max);
+    let mut parts = Vec::with_capacity(count);
+    // from the back, so the source shrinks as the parts grow
+    for k in (0..count).rev() {
+        let mut part = empty_like(&layer);
+        part.points = true;
+        part.name = format!("{} (part {}/{count})", layer.name, k + 1);
+        part.positions = layer.positions.split_off(3 * k * max);
+        part.colors = layer.colors.as_mut().map(|c| c.split_off((k * max).min(c.len())));
+        parts.push(part);
+    }
+    parts.reverse();
+    parts
+}
 
 /// Splits a layer that is too big for one GPU buffer into parts named "Name (part n)".
 pub fn split_layer(layer: Layer, max_vertices: usize, max_triangles: usize) -> Vec<Layer> {
@@ -623,6 +1594,74 @@ pub fn smooth_normals(positions: &[f32], indices: &[u32]) -> Vec<f32> {
 mod tests {
     use super::*;
 
+    /// A model of one square, element `id`, at x.
+    fn square(name: &str, id: u64, x: f32) -> std::sync::Arc<Model> {
+        let layer = Layer {
+            name: "Walls".into(),
+            positions: vec![x, 0.0, 0.0, x + 1.0, 0.0, 0.0, x + 1.0, 1.0, 0.0, x, 1.0, 0.0],
+            indices: vec![0, 1, 2, 0, 2, 3],
+            elements: vec![(id, 0, 6)],
+            props: vec![(id, format!(r#"{{"Name":"{name}"}}"#))],
+            ..Layer::default()
+        };
+        std::sync::Arc::new(Model::new(PathBuf::from(format!("{name}.rvt")), "Revit", vec![layer]))
+    }
+
+    #[test]
+    fn a_model_is_turned_about_its_zero_point_before_it_is_moved() {
+        // the second square, from x 2 to 3, a quarter turn anticlockwise and then 10 m east
+        let models = [square("a", 1, 0.0), square("b", 1, 2.0)];
+        let scene = Model::combine_placed(&models, &[DVec3::ZERO, DVec3::new(10.0, 0.0, 0.0)], &[0.0, 90.0]);
+        let corners = |layer: &Layer| layer.positions.chunks_exact(3).map(|p| [p[0].round(), p[1].round()]).collect::<Vec<_>>();
+        assert_eq!(corners(&scene.layers[0]), [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
+        // (2, 0) turns to (0, 2); (3, 1) to (-1, 3)
+        assert_eq!(corners(&scene.layers[1]), [[10.0, 2.0], [10.0, 3.0], [9.0, 3.0], [9.0, 2.0]]);
+        // no turn is what moving alone gives
+        let moved = Model::combine_moved(&models, &[DVec3::ZERO, DVec3::new(10.0, 0.0, 0.0)]);
+        assert_eq!(Model::combine_placed(&models, &[DVec3::ZERO, DVec3::new(10.0, 0.0, 0.0)], &[0.0, 0.0]).layers[1].positions, moved.layers[1].positions);
+    }
+
+    #[test]
+    fn elements_with_matches_exactly_ignoring_case() {
+        let walls = Layer {
+            name: "Walls".into(),
+            positions: vec![0.0; 18],
+            indices: vec![0, 1, 2, 3, 4, 5],
+            elements: vec![(1, 0, 3), (2, 3, 3)],
+            props: vec![(1, r#"{"level":"00"}"#.into()), (2, r#"{"category":"Wall","level":"01"}"#.into())],
+            ..Layer::default()
+        };
+        let m = Model::new(PathBuf::from("x.rvt"), "Revit", vec![walls]);
+        assert_eq!(m.elements_with("category", "walls"), vec![1], "falls back to the layer name");
+        assert_eq!(m.elements_with("Category", "WALL"), vec![2]);
+        assert_eq!(m.elements_with("level", "0"), Vec::<u64>::new(), "exact, not a part");
+        assert_eq!(m.elements_with("LEVEL", "01"), vec![2]);
+    }
+
+    #[test]
+    fn combine_keeps_source_ids_as_keys() {
+        let m = Model::combine(&[square("a", 7, 0.0), square("b", 7, 2.0)]);
+        let ids: Vec<u64> = m.layers.iter().map(|l| l.elements[0].0).collect();
+        assert_ne!(ids[0], ids[1]);
+        assert_eq!(m.element_key(ids[0]), ElementKey { model: 0, source: 7 });
+        assert_eq!(m.element_key(ids[1]), ElementKey { model: 1, source: 7 });
+    }
+
+    #[test]
+    fn element_with_key_inverts_element_key() {
+        let m = Model::combine(&[square("a", 7, 0.0), square("b", 9, 2.0)]);
+        for id in m.layers.iter().flat_map(|l| l.elements.iter().map(|e| e.0)) {
+            assert_eq!(m.element_with_key(m.element_key(id)), Some(id));
+        }
+    }
+
+    #[test]
+    fn single_model_keys_are_identity() {
+        let m = square("a", 42, 0.0);
+        assert_eq!(m.element_key(42), ElementKey { model: 0, source: 42 });
+        assert_eq!(m.element_with_key(ElementKey { model: 0, source: 42 }), Some(42));
+    }
+
     #[test]
     fn y_up_conversion() {
         let mut v = vec![1.0, 2.0, 3.0];
@@ -648,6 +1687,25 @@ mod tests {
         assert_eq!(parts[1].triangle_count(), 1);
         assert_eq!(parts[1].name, "L (part 2/2)");
         assert!(parts.iter().all(|p| p.indices.iter().all(|&i| (i as usize) < p.vertex_count())));
+    }
+
+    #[test]
+    fn point_layers_are_kept_and_split() {
+        let layer = Layer {
+            name: "Ground".into(),
+            positions: (0..15).map(|v| v as f32).collect(),
+            colors: Some((0..5).map(|i| [i, 0, 0, 255]).collect()),
+            points: true,
+            ..Layer::default()
+        };
+        let parts = split_points(layer.clone(), 2);
+        assert_eq!(parts.iter().map(Layer::point_count).collect::<Vec<_>>(), [2, 2, 1]);
+        assert_eq!(parts[1].positions, [6.0, 7.0, 8.0, 9.0, 10.0, 11.0]);
+        assert_eq!(parts[2].colors, Some(vec![[4, 0, 0, 255]]));
+        assert_eq!(parts[0].name, "Ground (part 1/3)");
+        let model = Model::new(PathBuf::from("cloud.las"), "LAS", vec![layer]);
+        assert_eq!((model.layers.len(), model.point_count(), model.triangle_count()), (1, 5, 0));
+        assert_eq!(model.bounds.max, [12.0, 13.0, 14.0]);
     }
 
     #[test]

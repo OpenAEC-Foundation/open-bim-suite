@@ -1,12 +1,115 @@
 //! Application state, messages and the main window layout:
-//! ribbon on top, layers left, 3D viewport centre, properties right, status bar bottom.
+//! ribbon on top, explorer left, 3D viewport centre, properties and layers right, status bar
+//! bottom.
 
+mod analysis_props;
+mod caps;
+#[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
+mod cloud;
+mod export_drawing;
+pub mod fields;
+#[cfg(all(feature = "pointcloud", not(target_arch = "wasm32")))]
+pub mod pointcloud;
+#[cfg(all(feature = "pointcloud", not(target_arch = "wasm32")))]
+pub mod scan_project;
+mod grids;
+mod hatch;
+mod ifc;
+mod ifc_graph;
+#[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
+mod inform;
+#[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
+mod clash_words;
+#[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
+mod room_checks;
+#[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
+mod shape_checks;
+#[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
+mod reports;
+mod layers;
+#[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
+pub mod collab;
+pub mod work_packages;
+mod docs;
+mod drawing_kinds;
+mod solid_view;
+mod drafts;
+pub mod drawn_edit;
+mod element_drawings;
+pub mod drawn_props;
+mod edit;
+mod element_drawing;
+mod element_props;
+pub(crate) mod rebar;
+mod grips;
+mod openings;
+#[cfg(test)]
+pub(crate) use take_over::{across_mesh, house as revit_house};
+mod join_marks;
+mod later;
+mod precut;
+mod levels;
+pub mod buildups;
+pub mod codes;
+pub mod drawing_sets;
+pub mod view_templates;
+pub mod house;
+pub mod connections;
+pub mod services;
+pub mod objects;
+pub mod online;
+pub mod libraries;
+pub mod library;
+pub mod materials;
+pub mod profiles;
+pub mod standards;
+pub mod systems;
+pub mod type_follow;
+mod marks;
+mod navigation;
+mod gis;
+mod geo;
+mod map;
+mod terrain;
+pub use geo::Message as GeoMessage;
+pub use gis::Message as GisMessage;
+pub use map::{Message as MapMessage, Source as MapSource};
+pub use terrain::Message as TerrainMessage;
+mod origin;
+pub mod project_file;
+mod origin_map;
+pub mod modeller;
+mod paper;
+mod placement;
+mod placing;
+pub mod reinforcement;
 mod schedules;
+mod take_over;
+pub mod transform;
+mod undo;
+mod viewer;
+mod view_props;
+mod views;
 mod sheets;
+mod structural;
+mod underlays;
+mod views_in_3d;
+
+pub use docs::{DocsMessage, DocsTab};
+pub use libraries::LibrariesMessage;
+pub use ifc::{IfcTab, IfcView};
+pub use marks::DrawKind;
+#[cfg(test)]
+pub use edit::{press as edit_press, release as edit_release};
+pub use layers::SideTab;
+pub use view_props::ViewField;
+pub use levels::{ExplorerTab, LevelForm};
+pub use views::{DocTab, OpenPlan, ViewSlot};
 
 pub use schedules::{tab_id, tab_schedule, VIEW_3D};
 
-use crate::explode::{ExplodeIndex, ExplodeMode};
+use crate::document::Document;
+use crate::explode::{ExplodeIndex, ExplodeMode, UnitOwner};
 use crate::export;
 use crate::icons;
 use crate::loaders;
@@ -19,6 +122,9 @@ use crate::viewport::camera::{Camera, ViewPreset};
 use crate::viewport::render::{transform_bounds, RenderMode, RenderSettings};
 use crate::model::{Bounds, ViewKind};
 use crate::section::{PlaneMove, PlaneOverlay, SectionBox, SectionEvent, SectionOverlay, SectionPlane};
+use crate::history::History;
+use crate::selection::{Pickable, Selection};
+use crate::units::{unit_state, UnitKey, UnitKeySet, UNIT_HIDDEN, UNIT_SELECTED};
 use crate::view_cube::{view_from, CubeEvent, CubeOverlay, CubeTarget};
 use crate::viewport::{Navigate, Viewport3D};
 use glam::{Mat4, Vec2, Vec3};
@@ -30,6 +136,7 @@ use iced::widget::{
     button, canvas, center, column, container, row, rule, scrollable, shader, slider, stack, svg, text, text_input, Space,
 };
 use iced::{event, keyboard, window, Center, Element, Fill, Font, Length, Subscription, Task, Theme};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use web_time::Instant;
@@ -42,13 +149,15 @@ pub struct ModelEntry {
     pub visible: bool,
     pub layers: std::ops::Range<usize>,
     layer_visibility: Vec<bool>,
+    /// Where it was moved to and where its zero point lies in it.
+    pub placed: origin::Placed,
 }
 
 impl ModelEntry {
     fn new(model: Arc<Model>, first_layer: usize) -> Self {
         let layers = first_layer..first_layer + model.layers.len();
         let layer_visibility = model.layers.iter().map(|layer| !layer.hidden).collect();
-        Self { model, visible: true, layers, layer_visibility }
+        Self { model, visible: true, layers, layer_visibility, placed: origin::Placed::default() }
     }
 }
 
@@ -73,6 +182,21 @@ pub struct App {
     pub model: Option<Arc<Model>>,
     pub models: Vec<ModelEntry>,
     adding_model: bool,
+    /// The files still to add after the one loading, when several are added at once: each is
+    /// read, and the scene is built once, after the last.
+    add_queue: Vec<loaders::Source>,
+    work_packages: work_packages::Register,
+    /// The project whose files are loading: its set-up is put back when the last is in.
+    project_opening: Option<project_file::Opening>,
+    /// Models read from the queue that the scene does not show yet.
+    scene_stale: bool,
+    /// What laying the added models on the first by their grids did, for the status bar.
+    aligned: Vec<String>,
+    /// The files of the last model when they layer over each other (IFCX) and that model: a
+    /// file of the same kind added next composes with them into that model.
+    layer_stack: (Vec<loaders::Source>, Option<u64>),
+    /// The files of the load running now, and whether it replaces the last model (a restack).
+    loading_stack: (Vec<loaders::Source>, bool),
     pub visible: Vec<bool>,
     pub camera: Camera,
     pub mode: RenderMode,
@@ -81,9 +205,44 @@ pub struct App {
     pub tab: RibbonTab,
     pub show_layers: bool,
     pub show_properties: bool,
+    /// What the explorer's search field holds.
     pub layer_filter: String,
+    /// The tab of the right pane shown.
+    pub side_tab: SideTab,
+    /// The model picked in the explorer: its project data show in the properties.
+    pub picked_model: Option<usize>,
+    /// The folders of views in the explorer that are not as they start: an outer folder starts
+    /// open, the folders in it closed. A folder is named by its path, its parts joined by U+001F.
+    pub folded: std::collections::BTreeSet<String>,
+    /// How the views of a file are ordered in the explorer: by the browser organization of this
+    /// name where the file has it, by their kinds (an empty name), or (none) as the file's browser
+    /// is taken to show them.
+    pub view_order: Option<String>,
+    /// The views (by path) laid in the 3D view in full: their lines and texts on their plane.
+    pub projected: std::collections::BTreeSet<String>,
+    /// The models whose content is folded away in the explorer.
+    pub closed_models: std::collections::BTreeSet<usize>,
+    /// Something was selected after the last message: the right pane follows the selection.
+    had_selection: bool,
+    /// What the Layers tab's search field holds.
+    pub layers_query: String,
+    /// What is being typed in a field of the right pane's View section: the view's path, the
+    /// field and the text.
+    pub view_typing: Option<(String, ViewField, String)>,
+    /// The 3D view's layer switches while another view shows: every layer's, and per model its
+    /// own.
+    parked_layers: Option<(Vec<bool>, Vec<Vec<bool>>)>,
+    /// The elements hidden in the 3D view while another view shows.
+    parked_hidden: Option<Arc<UnitKeySet>>,
+    /// The undo histories of the views not shown, by view path (the 3D view: "").
+    parked_histories: std::collections::HashMap<String, History<ViewState>>,
     pub status: Status,
+    /// The schema the next save writes a `.ifc` in (Export IFC 4x3, `save_file` with a schema);
+    /// back to IFC 4 once that save starts.
+    pub(crate) save_schema: export::IfcSchema,
     pub viewport_size: (f32, f32),
+    /// The last press was a finger's, not the mouse's: the hint shows the touch gestures.
+    pub fingers: bool,
     /// View preset to apply when the next model arrives (command line).
     pub initial_view: Option<ViewPreset>,
     /// `--window-screenshot`: capture the real window once the model is shown, then exit.
@@ -92,7 +251,10 @@ pub struct App {
     pub pending_open: Option<PathBuf>,
     /// The picked layer and, for BIM formats, the element in it.
     pub selected: Option<(usize, Option<u64>)>,
-    /// Index ranges of the selection, for the highlight: (layer, first index, index count).
+    /// What is selected, in pick order; `selected` and `selection` follow it (see
+    /// [`App::selection_changed`]).
+    pub sel: Selection,
+    /// Index ranges of the selection: (layer, first index, index count).
     pub selection: Vec<(usize, u32, u32)>,
     /// A running camera transition: from, to, start.
     pub anim: Option<(Camera, Camera, Instant)>,
@@ -107,24 +269,200 @@ pub struct App {
     pub plane_placed: Option<SectionPlane>,
     /// Waiting for a click on a face to place the section plane.
     pub plane_picking: bool,
+    /// Moving a model by two points picked in the 3D view: the model, and how many measurements
+    /// there were when it began (the line drawn between the two points is not kept).
+    pub moving_model: Option<(usize, usize)>,
     /// The saved view last shown.
     pub active_view: Option<usize>,
     /// Show the model's grid lines with their bubbles.
     pub show_grids: bool,
+    /// The grid line picked with a click (index into the model's grids), shown in the properties.
+    pub picked_grid: Option<usize>,
+    /// The grid lines picked beside `picked_grid` (a box drawn over several, Shift and a click):
+    /// they count only while that one is picked (see `App::grids_picked`).
+    pub more_grids: Vec<usize>,
     /// Explorer groups opened: views, rooms, layers, schedules, sheets.
-    pub explorer_open: [bool; 5],
+    pub explorer_open: [bool; 7],
+    /// The explorer's tab shown.
+    pub explorer_tab: ExplorerTab,
+    /// The project's library: materials, layered build-ups and linear types.
+    pub library: bim_library::Library,
+    /// The Library tab's open groups and pick.
+    pub library_view: library::LibraryView,
+    /// The BIM Validator's issues, checks and clashes of this project.
+    #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
+    pub collab: collab::State,
+    /// The project document (IfcX): the levels of the model and those added.
+    pub document: Document,
+    /// The form of a new level, while it is open.
+    pub level_form: Option<LevelForm>,
+    /// The floor plan whose tab shows (its path); `None`: the 3D view.
+    pub active_plan: Option<String>,
+    /// Floor plans open in a document tab, in tab order, each with its own camera and section.
+    pub open_plans: Vec<views::OpenPlan>,
+    /// The kind of plan whose New in the Views tab lists the levels to make one of.
+    pub views_picker: Option<crate::document::PlanKind>,
+    /// Per unit, whether a structural plan leaves it out, and the explode index it was worked
+    /// out for.
+    structure_units: Option<(Arc<ExplodeIndex>, Arc<Vec<bool>>)>,
+    /// The 3D view's camera and section box while a floor plan's tab shows.
+    model_view: Option<views::ViewSlot>,
+    /// Sheets of the document open in a document tab (paths), and the one shown.
+    pub open_doc_sheets: Vec<String>,
+    pub active_doc_sheet: Option<String>,
+    sheet_zoom: f64,
+    sheet_pan: [f64; 2],
+    /// The cut of every floor plan placed on a sheet, by the plan's path.
+    pub cuts: std::collections::HashMap<String, Arc<crate::drawing::Cut>>,
+    /// The drawings laid on the levels.
+    pub underlays: Vec<crate::underlay::Underlay>,
+    /// The lines the 3D view draws over the model, with their colours: the underlays' and the
+    /// views' in 3D (world), made again when they change.
+    overlay_lines: Arc<Vec<crate::views3d::Colored>>,
+    /// The filled triangles drawn with them: the arrow heads, supports and deformed profiles of
+    /// a structural analysis model.
+    overlay_faces: Arc<Vec<crate::structural::diagrams::Face>>,
+    /// The cut faces of the section box and plane in their hatches, and what they were made from.
+    cut_faces: Arc<crate::caps::CutFaces>,
+    cut_faces_key: Option<caps::CutFacesKey>,
+    /// The cut faces are being made on a worker thread (see `caps`).
+    cut_faces_running: bool,
+    /// What the faces of the section box cut before: moving one face cuts that one again alone.
+    kept_faces: caps::KeptCutFaces,
+    /// The views stand in the 3D view on their planes; what they were drawn from, and their names.
+    pub views_in_3d: bool,
+    /// The 3D view draws ambient shadows (in its shaded styles).
+    pub ambient: bool,
+    /// What a drag with each mouse button does in the viewport (kept between sessions).
+    pub mouse_buttons: crate::viewport::MouseButtons,
+    /// The size a point of a cloud is drawn at (pixels).
+    pub point_size: f32,
+    /// Shade the points of a cloud by depth (eye-dome lighting).
+    pub cloud_depth: bool,
+    /// What of a structural analysis model's loads and results the 3D view draws.
+    pub analysis: crate::structural::diagrams::Shown,
+    /// What is being typed in the scale field of the Analysis section, until Enter.
+    pub analysis_scale: Option<String>,
+    /// How the points of a cloud are coloured.
+    pub cloud_color: crate::cloud_color::CloudColor,
+    /// Which field of a simulation file colours its mesh, at which time step.
+    pub field: fields::FieldView,
+    /// A cloud is being meshed.
+    pub meshing: bool,
+    /// What the Pointcloud product keeps: its settings, the mesh made last, the details read.
+    #[cfg(all(feature = "pointcloud", not(target_arch = "wasm32")))]
+    pub cloud: pointcloud::State,
+    /// In the 3D view: the heads of the grid lines that stand behind the model are left out;
+    /// the distances between the grid lines are drawn; the levels are drawn as outlines with
+    /// their marks.
+    pub grid_heads_hidden: bool,
+    pub grid_dims: bool,
+    pub levels_3d: bool,
+    /// Which heads are seen (per grid, its two ends), and for what view they were worked out.
+    pub(crate) heads_seen: (Option<(Camera, u64, (f32, f32), usize, usize)>, Vec<[bool; 2]>),
+    /// As seen: each dimension between the grids, and each level's two marks.
+    pub(crate) marks_seen: (Vec<bool>, Vec<[bool; 2]>),
+    views_3d_key: Vec<u64>,
+    views_3d_labels: Vec<(String, [f32; 3])>,
+    /// The bar's Export button is open: the formats to export the drawing shown in follow it.
+    pub export_menu: bool,
+    /// The dimension tool of the sheets is on.
+    pub dimension_tool: bool,
+    reference_target: Option<(Arc<str>, usize)>,
+    /// The view's bar offers its tools to dimension, write and cut (the Modeller and the
+    /// Validator; the Viewer only looks).
+    pub annotates: bool,
+    /// A view's tab draws it as a sheet does: on paper, its cut in ink (else over the model
+    /// as the 3D view shows it).
+    pub drawing_on_paper: bool,
+    /// The section tool of the sheets is on: two clicks on a floor plan draw a section.
+    pub section_tool: bool,
+    /// What is picked on the sheet shown: a placed view or a dimension.
+    pub sheet_pick: Option<paper::SheetPick>,
+    /// The cut height being typed for a floor plan: its path and the text.
+    pub cut_edit: Option<(String, String)>,
+    /// The view taken from the Views list while the mouse button is down, to drop on a sheet.
+    pub dragging_view: Option<Arc<str>>,
+    /// The text tool is on: a click on a view (its tab, or placed on a sheet) puts a text there.
+    pub note_tool: bool,
+    /// The text tool places level marks (the Level mark tool): only with `note_tool` on.
+    pub level_tool: bool,
+    /// The drawing tool that is on: lines, rectangles or circles on the view shown.
+    pub draw_tool: Option<marks::DrawKind>,
+    /// The wording of the next text placed, or of the picked text.
+    pub note_text: String,
+    /// What is picked on the view shown in its tab: a dimension or a text.
+    pub mark_pick: Option<marks::MarkPick>,
+    /// The lines drawn on the view picked beside `mark_pick` (a box drawn over several): they
+    /// count only while that one is a line (see `App::lines_picked`).
+    pub more_marks: Vec<usize>,
+    /// Groups of layers opened in the explorer (closed by default).
+    pub open_layer_groups: HashSet<String>,
+    collapsed_view_groups: HashSet<&'static str>,
     /// Sheets open in a document tab, in tab order, and the one shown in the workspace.
     pub open_sheets: Vec<usize>,
     pub active_sheet: Option<usize>,
+    /// The legends and drafting views open in tabs, the one shown and what is picked in it.
+    pub open_drafts: Vec<usize>,
+    pub active_draft: Option<usize>,
+    pub draft_pick: Option<(u64, drafts::DraftPick)>,
     /// Schedules open in a document tab, in tab order, and the one shown under the viewport.
     pub open_schedules: Vec<usize>,
     pub active_schedule: Option<usize>,
     /// The table of the shown schedule: scrolled offset and height (logical pixels).
     pub schedule_scroll: (f32, f32),
+    /// The IFC tab: how the model's IFCX file is built up.
+    pub ifc: IfcTab,
+    /// Docs: the documents of the project folder.
+    pub docs: DocsTab,
+    /// Library, the product: the source and the country its page shows.
+    pub libraries: libraries::LibrariesView,
+    /// The project's drawing standard: its kinds of drawing and their settings. The Dutch one
+    /// until it is changed or a project's file brings its own.
+    pub standard: bim_library::drawing::Standard,
+    /// What is picked of the standard on the Library page.
+    pub standard_view: standards::StandardView,
+    /// The build-up edited on the Library page, and the role whose build-ups show.
+    pub buildup_view: buildups::BuildUpView,
+    /// The material edited on the Library page, and what is being typed of it.
+    pub material_view: materials::MaterialView,
+    pub code_view: codes::CodeView,
+    pub object_view: objects::ObjectView,
+    pub connection_view: connections::ConnectionView,
+    pub service_view: services::ServiceView,
+    /// The online libraries: the place, its index once fetched, and what was added from it.
+    pub online: online::OnlineView,
+    pub drawing_set_view: drawing_sets::DrawingSetView,
+    pub view_template_view: view_templates::ViewTemplateView,
+    /// The house style the project follows: how its sheets and documents look.
+    pub house: bim_library::house::HouseStyle,
+    pub house_view: house::HouseView,
+    /// The linear type edited on the Library page, the role whose types show and what of the
+    /// steel table shows.
+    pub profile_view: profiles::ProfileView,
+    /// The system type edited on the Library page, the group whose types show and the part of it
+    /// whose fields show.
+    pub system_view: systems::SystemView,
+    /// The elements the kernel refused to make as their type is now, when a type was last
+    /// changed on the Library page, each with why (see `type_follow`).
+    pub follow_refused: Vec<(bim_core::ElementId, bim_core::Refusal)>,
+    /// The GIS tab: the place of the project and what was fetched around it.
+    pub gis: gis::Gis,
     /// The schedules of the model, once computed (they follow the model), and whether they are
     /// being computed.
     pub schedules: Vec<crate::model::Schedule>,
     pub schedules_pending: bool,
+    /// The models (by id) whose drawings are still being read (see `later`).
+    pub drawings_pending: std::collections::HashSet<u64>,
+    /// The window cuts the views of the drawings ahead, on worker threads (see `precut`); off
+    /// where nothing runs the tasks (a screenshot without a window, a test): views are then cut
+    /// when they are asked for.
+    pub background_cuts: bool,
+    /// The views waiting to be cut ahead, those being cut, and a count that goes up whenever what
+    /// views show changes: a cut started before is not kept.
+    pub cut_queue: std::collections::VecDeque<String>,
+    pub cutting: std::collections::HashSet<String>,
+    pub cut_epoch: u64,
     /// Measurements shown in the viewport (made through remote control).
     pub measurements: Vec<crate::annotations::Measurement>,
     /// Where the viewport sits in the window (logical pixels), to cut it out of screenshots.
@@ -141,6 +479,29 @@ pub struct App {
     /// The offset (world) of every unit as drawn, and the world bounds while apart; shared with
     /// the renderer, replaced when they change.
     pub explode_offsets: Arc<Vec<[f32; 4]>>,
+    /// What the renderer gets per unit: the explode offset and the flags (`crate::units`).
+    pub units: Arc<Vec<[f32; 4]>>,
+    /// How the renderer draws each unit otherwise than its material: as the 3D view of the file
+    /// shown says (`crate::units::unit_look`); empty: all as their materials.
+    pub unit_looks: Arc<Vec<[f32; 4]>>,
+    /// Elements (and the rest of layers) hidden with Hide or Isolate, by keys that stay when a
+    /// model is added.
+    pub hidden: Arc<UnitKeySet>,
+    /// Undo and redo of what is shown: hidden elements and layer and model switches.
+    pub history: History<ViewState>,
+    /// Which history each step went into, in the order they were made (true: the modelled
+    /// elements', false: the view's), and the same for the steps taken back.
+    undo_trail: Vec<bool>,
+    redo_trail: Vec<bool>,
+    /// The field of a Library editor the message being handled types into, if it does; and the
+    /// one the last step of the history was typed into: typing on in it is the same step (see
+    /// `undo`).
+    step_typing: Option<undo::Typing>,
+    last_typing: Option<undo::Typing>,
+    /// The selection box while it is dragged: from, to (viewport pixels).
+    pub box_select: Option<(Vec2, Vec2)>,
+    /// The right-click menu, open at this viewport point (logical pixels).
+    pub context_menu: Option<Vec2>,
     pub explode_bounds: Option<Bounds>,
     /// The measure tools and their results.
     pub measure: MeasureState,
@@ -153,23 +514,87 @@ pub struct App {
     hover_scene: Option<HoverScene>,
     /// Boxes around blocks of triangles of the model, for the ray of a click or hover.
     pick_index: Option<PickIndex>,
+    /// The navigation under way: the point a drag orbits about, the depth it pans at, the
+    /// point the wheel moves towards.
+    nav: navigation::Navigation,
+    /// The selection and hover of structural nodes and members.
+    pub(crate) structural: structural::StructuralView,
+    /// The modelled elements and the tool placing them.
+    pub modeller: modeller::Modeller,
 }
 
-type HoverScene = (Option<SectionBox>, Option<SectionPlane>, Vec<bool>);
+/// Width of the right-click menu (logical pixels), and about its height, to keep it inside the
+/// viewport.
+const MENU_WIDTH: f32 = 230.0;
+const MENU_HEIGHT: f32 = 292.0;
+
+type HoverScene = (Option<SectionBox>, Option<SectionPlane>, Vec<bool>, Arc<UnitKeySet>);
+
+/// The items of the right-click menu in the viewport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuItem {
+    Hide,
+    Isolate,
+    ShowAll,
+    SelectLayer,
+    ClearSelection,
+    /// The point under the menu is the one to orbit about (shown) until let go.
+    PivotHere,
+    ClearPivot,
+    Undo,
+    /// The selected modelled elements and the picked grid lines go, as Delete.
+    Delete,
+}
 
 #[derive(Debug, Clone)]
 pub enum Message {
     OpenDialog,
+    /// Choose a model kept as a folder (a Tekla model folder, an Allplan project) to open.
+    OpenFolderDialog,
     AddDialog,
     Open(PathBuf),
     Picked(Option<loaders::Source>),
     AddPicked(Option<loaders::Source>),
+    /// Several files to add at once: read one after the other, shown together.
+    AddSeveral(Vec<loaders::Source>),
     ModelVisible(usize, bool),
+    /// Pick a model in the explorer (its project data show); picked already: fold or unfold it.
+    PickModel(usize),
+    /// Move the picked model by two points picked in the 3D view: from, then to.
+    MoveModelByPoints,
+    /// Open or close a folder of views in the explorer (by its path).
+    ToggleFolder(String),
+    /// Order the views of the files in the explorer: see [`App::view_order`].
+    ViewOrder(Option<String>),
+    /// The place of the picked model or of its zero point, typed in.
+    Origin(origin::Message),
+    /// The GIS tab: a place searched or chosen, the surroundings fetched.
+    Gis(gis::Message),
+    /// Lay a view (by path) in the 3D view in full, or take it out again.
+    ProjectView(Arc<str>),
     Loaded(Result<Arc<Model>, String>),
     SaveDialog,
+    /// File > Export IFC 4x3: ask where, then save the model as a `.ifc` in that schema.
+    SaveIfcDialog(export::IfcSchema),
     SavePicked(Option<PathBuf>),
+    /// Save the set-up of the session as a project file: asks where.
+    SaveProjectDialog,
+    SaveProjectPicked(Option<PathBuf>),
+    /// The film of how the model is built: asking where to write it, where that is, and what
+    /// came of it (what was written, or why not).
+    BuildFilmDialog,
+    BuildFilmPicked(Option<PathBuf>),
+    BuildFilmDone(Result<(PathBuf, String), String>),
+    /// A still of the model as the view shows it, rendered by Blender: asking where to write it
+    /// and where that is (its outcome comes as that of the film does).
+    RenderDialog,
+    RenderPicked(Option<PathBuf>),
     /// A save finished: the file written and how long it took, or the error.
     Saved(Result<(PathBuf, f32), String>),
+    /// Lets Blender in the environment render the file opened from Docs (the web app); and its
+    /// answer, the name of the picture.
+    BlenderRender,
+    BlenderRendered(Result<String, String>),
     Mode(RenderMode),
     ToggleGrid,
     ToggleFlipUp,
@@ -178,11 +603,32 @@ pub enum Message {
     Preset(ViewPreset),
     Ortho(bool),
     Fit,
+    NavigateSheet { zoom: f64, pan: [f64; 2] },
     ToggleLayersPanel,
     TogglePropertiesPanel,
     Layer(usize, bool),
     AllLayers(bool),
+    /// Open or close a group of layers in the explorer (see [`LAYER_GROUP`]).
+    ToggleLayerGroup(String),
+    /// Show or hide every layer of a group.
+    LayerGroup(String, bool),
     LayerFilter(String),
+    /// Show a tab of the right pane.
+    SideTab(SideTab),
+    /// What the Layers tab's search field holds.
+    LayersQuery(String),
+    /// Typed in a field of the right pane's View section.
+    ViewField(ViewField, String),
+    PileLegendField(Arc<str>, crate::document::PileLegendField, String),
+    /// Enter in a field of the View section: it shows the value in use again.
+    ViewFieldDone,
+    /// The kind of drawing picked for the view the right pane shows: a key of the drawing
+    /// standard.
+    ViewKind(String),
+    /// The scale picked for that view in its own tab (1 : this).
+    ViewScale(u32),
+    /// Open the fields of that view's kind of drawing under its own, or close them.
+    ViewKindEdit(bool),
     Navigate(Navigate),
     Cube(CubeEvent),
     /// Show a view saved in the file.
@@ -190,8 +636,208 @@ pub enum Message {
     ToggleGrids,
     /// Open or close an explorer group (0 views, 1 rooms, 2 layers, 3 schedules, 4 sheets).
     ToggleExplorer(usize),
+    ToggleViewGroup(&'static str),
+    /// Show a tab of the explorer.
+    ExplorerTab(ExplorerTab),
+    /// The Library tab.
+    Library(library::LibraryMessage),
+    /// Docs: the documents of the project folder.
+    Docs(docs::DocsMessage),
+    /// Library, the product: the source or the country to show.
+    Libraries(libraries::LibrariesMessage),
+    /// The drawing standard on the Library page: picking and setting its kinds and settings.
+    Standard(standards::StandardMessage),
+    /// The build-ups of the project on the Library page: picking and editing one.
+    BuildUp(buildups::BuildUpMessage),
+    /// The materials of the project on the Library page: picking and editing one.
+    Material(materials::MaterialMessage),
+    Code(codes::CodeMessage),
+    Object(objects::ObjectMessage),
+    Connection(connections::ConnectionMessage),
+    Service(services::ServiceMessage),
+    /// The selected join takes the type of the project's library with this key.
+    JoinType(String),
+    Online(online::OnlineMessage),
+    DrawingSet(drawing_sets::DrawingSetMessage),
+    ViewTemplate(view_templates::ViewTemplateMessage),
+    House(house::HouseMessage),
+    /// The linear types of the project on the Library page: picking one and editing its profile.
+    Profile(profiles::ProfileMessage),
+    /// The system types of the project on the Library page: picking one and editing its parts.
+    SystemType(systems::SystemMessage),
+    #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
+    Collab(collab::Event),
+    #[cfg(all(feature = "pointcloud", not(target_arch = "wasm32")))]
+    Pointcloud(pointcloud::Event),
+    /// Open the form of a new level, named after this word ("Level") and a number.
+    NewLevel(&'static str),
+    LevelName(String),
+    LevelElevation(String),
+    /// Add the level of the form.
+    AddLevel,
+    CancelLevel,
+    /// Remove an added level (its IfcX path).
+    RemoveLevel(Arc<str>),
+    /// Make a floor plan of a level (its path) and show it.
+    NewPlan(Arc<str>),
+    /// Make a plan of a kind of a level (its path), named with the word after the level, and
+    /// show it.
+    NewPlanOf(Arc<str>, crate::document::PlanKind, &'static str),
+    /// List the levels under a kind of plan in the Views tab, to make one of (`None`: close).
+    PickLevelFor(Option<crate::document::PlanKind>),
+    /// Show a view of the document (its path) in its tab.
+    OpenPlan(Arc<str>),
+    RemovePlan(Arc<str>),
+    /// Make a 3D view of what the 3D tab shows, named with this and a number, and show it.
+    NewView3d(&'static str),
+    RemoveView3d(Arc<str>),
+    /// Make a sheet of the document, named this, and show it.
+    NewSheet(&'static str),
+    /// Lay the views of a sheet (its path) out: one scale, in rows, centred.
+    ArrangeSheet(Arc<str>),
+    /// Put the views on no sheet on new sheets, named for floor plans and for sections.
+    FillSheets([&'static str; 2]),
+    /// Show a sheet of the document (its path) in its tab.
+    OpenDocSheet(Arc<str>),
+    RemoveSheet(Arc<str>),
+    /// Place a floor plan on a sheet: sheet, plan.
+    PlaceOnSheet(Arc<str>, Arc<str>),
+    /// Move a placed view: sheet, its index on the sheet, its new middle (paper metres).
+    MoveOnSheet(Arc<str>, usize, [f64; 2]),
+    /// Switch the dimension tool of the sheets on or off.
+    DimensionTool(bool),
+    /// A step through the model as the camera looks (W, A, S, D; Q and E down and up):
+    /// forward, to the right and up, in steps; `fast` with Shift.
+    Walk { forward: f32, right: f32, up: f32, fast: bool },
+    /// A view's tab draws it as on a sheet, or over the model.
+    DrawingOnPaper(bool),
+    /// Crop a floor plan (its path) to a rectangle in plan, or show all of it (`None`).
+    CropPlan(Arc<str>, Option<([f64; 2], [f64; 2])>),
+    /// Pick a placed view or a dimension on the sheet shown (`None`: nothing).
+    PickOnSheet(Option<paper::SheetPick>),
+    /// Pressed on a view in the Views list: it can be dragged onto the sheet shown.
+    GrabView(Arc<str>),
+    /// Let go over a view in the Views list: it opens (a click), unless another was carried.
+    ReleaseView(Arc<str>),
+    /// A view let go over the sheet shown, at a paper point: placed there, its middle on it.
+    DropOnSheet(Arc<str>, [f64; 2]),
+    /// The mouse button went up: the view carried, if any, is let go.
+    LetGoView,
+    /// Switch the text tool on or off.
+    NoteTool(bool),
+    /// The Level mark tool: a click in a section or an elevation marks the height there.
+    LevelTool(bool),
+    AddLevelMark(Arc<str>, [f64; 2]),
+    /// The wording typed for the next text, or for the picked one.
+    NoteText(String),
+    /// Put a text on a view: the view, the point of its drawing, the wording.
+    AddNote(Arc<str>, [f64; 2], String),
+    /// Move a view's text (its index) to a point of its drawing.
+    MoveNote(Arc<str>, usize, [f64; 2]),
+    /// A drawing tool on (or off): lines, rectangles and circles drawn on the view shown.
+    DrawTool(Option<marks::DrawKind>),
+    /// Lines drawn on a view (its own points).
+    AddLines(Arc<str>, Vec<[[f64; 2]; 2]>),
+    /// What a drawing tool drew on a view: its lines, one shape together.
+    AddShape(Arc<str>, marks::DrawKind, Vec<[[f64; 2]; 2]>),
+    /// Pick a dimension or text on the view shown in its tab (`None`: nothing).
+    PickMark(Option<marks::MarkPick>),
+    /// Remove what is picked on the view shown in its tab.
+    RemoveMark,
+    /// The shape picked on the floor plan shown becomes loose lines.
+    ExplodeDrawn,
+    /// Offset on or off, and the distance typed for it.
+    OffsetTool,
+    OffsetText(String),
+    /// Trim, Extend, Fillet or Chamfer on or off, and the size typed for it.
+    PairEdit(drawn_edit::PairKind),
+    PairSize(String),
+    /// Put the picked dimension on the other side of what it measures.
+    FlipDimension,
+    ArmDimensionReference(Option<(Arc<str>, usize)>),
+    InsertDimensionReference(Arc<str>, usize, [f64; 2]),
+    RemoveDimensionReference(Arc<str>, usize, usize),
+    AddChainTotal(Arc<str>, usize),
+    /// The picked dimension looks otherwise: another style, or its style changed.
+    DimensionLook(marks::LookEdit),
+    /// Give a view (its path) its standard dimensions.
+    StandardDimensions(Arc<str>),
+    /// Lay a drawing on a level (its path): asks for the file.
+    AddUnderlay(Arc<str>),
+    /// A drawing (its name) read to lay on a level (its path): its lines and how many entities it
+    /// left out, or why not.
+    UnderlayRead(Arc<str>, String, underlays::UnderlayRead),
+    /// Switch an underlay (its index) on or off.
+    ToggleUnderlay(usize),
+    /// Take an underlay (its index) away.
+    RemoveUnderlay(usize),
+    /// Lay a PDF underlay (its index) at the next scale.
+    UnderlayScale(usize),
+    /// Show the views in the 3D view on their planes, or not.
+    ToggleViewsIn3d,
+    /// Ambient shadows in the 3D view on or off.
+    ToggleAmbient,
+    /// What a drag with each mouse button does in the viewport.
+    MouseButtons(crate::viewport::MouseButtons),
+    /// Colour the points of the clouds another way.
+    CloudColor(crate::cloud_color::CloudColor),
+    /// Colour the mesh of a simulation file by another field, or show another time step.
+    Field(fields::FieldChange),
+    /// Shade the points of a cloud by depth, or not.
+    ToggleCloudDepth,
+    /// What of a structural analysis model's loads and results is drawn.
+    Analysis(crate::structural::diagrams::Change),
+    /// Typed in the scale field of the Analysis section, and Enter there.
+    AnalysisScale(String),
+    AnalysisScaleDone,
+    ToggleGridHeadsHidden,
+    ToggleGridDims,
+    ToggleLevels3d,
+    /// Open or close the bar's Export button.
+    ExportMenu(bool),
+    /// Export the drawing of the view or sheet shown in this format.
+    ExportDrawing(crate::export::drawing::DrawingFormat),
+    /// The drawing was exported (where, in how many seconds), or not; `None`: the dialog was
+    /// cancelled.
+    Exported(Option<Result<(PathBuf, f32), String>>),
+    /// Delete was pressed (not in a text field): remove what is picked, on a sheet or a view.
+    DeletePicked,
+    DesignatePiles,
+    DesignateReinforcement,
+    PlacePileLegend(Arc<str>, &'static str),
+    NewPileSchedule(Arc<str>, &'static str),
+    /// Remove what is picked on the sheet shown.
+    RemovePicked,
+    /// Set the scale of a placed view: sheet, index, 1 : scale.
+    SetScale(Arc<str>, usize, f64),
+    SetPlacedTitle(Arc<str>, usize, Option<bool>),
+    /// Give a sheet another paper (width, height in metres).
+    SetPaper(Arc<str>, [f64; 2]),
+    SheetField(Arc<str>, bim_library::house::Field, String),
+    ProjectAddress(String),
+    SheetRevision(Arc<str>, usize, bool, String),
+    /// The cut height being typed, and its use.
+    CutText(String),
+    ApplyCut,
+    /// Add a dimension to a floor plan: plan, from, to (model x, y).
+    AddDimension(Arc<str>, [f64; 2], [f64; 2]),
+    /// Show a document tab ([`App::doc_tabs`]).
+    SelectTab(usize),
+    /// Close a document tab; the 3D view's stays.
+    CloseTab(usize),
+    /// Remove a section or elevation (its path).
+    RemoveSection(Arc<str>),
+    /// Make the four elevations of the model, named so (north, east, south, west).
+    MakeElevations([&'static str; 4]),
+    /// Make a section along a line drawn on a floor plan (plan x, y), named after this word.
+    NewSection([f64; 2], [f64; 2], &'static str),
+    /// Switch the section tool of the sheets on or off.
+    SectionTool(bool),
     /// Open a sheet in its document tab.
     OpenSheet(usize),
+    /// A legend or drafting view opened in its tab; what a click picked in the one shown.
+    OpenDraft(usize),
+    PickDraft(Option<(u64, drafts::DraftPick)>),
     /// Show a sheet's tab (`None`: not a sheet).
     ShowSheet(Option<usize>),
     CloseSheet(usize),
@@ -202,11 +848,33 @@ pub enum Message {
     /// Show a schedule's tab (`None`: the 3D view alone).
     ShowSchedule(Option<usize>),
     CloseSchedule(usize),
+    /// Writes the schedules to an Excel workbook, asked where.
+    ExportSchedules,
     /// Select the elements of a schedule row: schedule, row.
     ScheduleRow(usize, usize),
     ScheduleScroll(scrollable::Viewport),
     /// The schedules of a model (by id), computed.
     Schedules(u64, Vec<crate::model::Schedule>),
+    /// The drawings of a model (by its id) are read: they were left for after the model showed.
+    Drawings(u64, Box<crate::model::Drawings>),
+    /// A view cut ahead (see `precut`): the count of when it was started, its path and its cut.
+    CutAhead(u64, String, Option<Arc<crate::drawing::Cut>>),
+    /// The cut faces of the section were made (see `caps`): what they were made from, and they.
+    CutFaces(Box<Option<caps::CutFacesKey>>, Arc<crate::caps::CutFaces>),
+    /// Open the IFC tab (the IFCX file of the model, read again), close it, pick what it shows.
+    OpenIfc,
+    CloseIfc,
+    IfcView(IfcView),
+    IfcScroll(IfcView, scrollable::Viewport),
+    /// Pick a node of the IFC tab (its index): its elements are selected.
+    IfcPick(u32),
+    /// Open or close a row of the IFC tab's tree (its key).
+    IfcToggle(String),
+    /// The relation the IFC tab's Relations view shows (all: `None`).
+    IfcRelation(Option<crate::ifcx_structure::Relation>),
+    /// Search the IFC tab; jump to the next (or the previous) line found in its text.
+    IfcQuery(String),
+    IfcNext(bool),
     ToggleSection,
     ResetSection,
     SectionToSelection,
@@ -237,15 +905,140 @@ pub enum Message {
     MeasureFinish,
     /// The edges of layers, built in the background for snapping.
     MeasureEdges(crate::measure::Edges),
+    /// A structural hover grid built off the UI thread (`None`: the build was dropped).
+    StructuralGrid(Option<structural::BuiltGrid>),
     MeasureDelete(usize),
+    /// The text the next remark in the model gets.
+    MeasureNote(String),
     MeasureClear,
     MeasureLength(LengthUnit),
     MeasureArea(AreaUnit),
     MeasureVolume(VolumeUnit),
     /// Decimals shown for a category.
     MeasureDecimals(Category, u8),
-    /// Esc: stop placing the section plane, else stop measuring, else clear the selection.
+    /// Go back to the visibility before the last change (layers, models, hidden elements).
+    Undo,
+    Redo,
+    /// Select every element whose property (key, value) has this value.
+    SelectWhere(String, String),
+    /// Select everything on the layers the selection touches.
+    SelectLayerOfSelection,
+    /// Hide the selected elements; the selection empties.
+    HideSelection,
+    /// Hide every element but the selected ones.
+    IsolateSelection,
+    /// Show every element that Hide or Isolate hid.
+    ShowAllElements,
+    /// An item of the right-click menu; the menu closes.
+    ContextMenu(MenuItem),
+    /// A click beside the right-click menu: it closes.
+    CloseContextMenu,
+    /// Esc: stop placing the section plane, else stop modelling or measuring, else clear the
+    /// selection.
     Escape,
+    /// Start an empty model to model in, its first level named so.
+    NewModel(&'static str),
+    /// Switch a modelling tool on (what it places named so), or off (`None`).
+    ModelTool(Option<(modeller::ModelTool, &'static str)>),
+    /// Join the two linear elements selected (the first is the primary), the joint named so.
+    Connect(bim_core::ConnectionKind, &'static str),
+    /// Move, copy, turn or mirror the selected modelled elements with the next clicks.
+    Transform(transform::TransformKind),
+    /// Tab: into edit mode on the selected modelled element, or out of it.
+    EditMode,
+    /// What the edit overlay reports: a point pressed, dragged, let go.
+    Edit(edit::EditEvent),
+    /// A key in edit mode: G grabs, X, Y and Z hold to an axis, A picks every point.
+    EditKey(char),
+    /// A length typed for the picked dimension, and Enter there: the element its last end holds
+    /// on to moves (see `modeller::dim_refs`).
+    DimensionValue(String),
+    DimensionValueApply,
+    /// A field of a temporary dimension in the Modeller.
+    TempDim(modeller::temp_dims::TempDimMessage),
+    /// Cancel in a floor's sketch: it leaves with the floor unchanged.
+    SketchCancel,
+    Reinforcement(reinforcement::Action),
+    /// Shift+C in the Modeller: the 3D cursor goes home.
+    Cursor3dHome,
+    /// Typed in a field of the selected modelled element's Definition section.
+    ElementField(element_props::ElementField, String),
+    /// Enter in such a field: it shows the value in use again.
+    ElementFieldDone,
+    /// A character of the length typed for what a tool draws.
+    ToolDigit(char),
+    /// The series field of the picked grid line.
+    GridSeries(modeller::grids::SeriesMessage),
+    /// A tool on the grid of curtain walls: on, or off when it is on.
+    CurtainTool(modeller::curtain::CurtainTool),
+    /// Grid line `index` of the selected curtain wall goes: an upright one (true) or a level one.
+    RemoveGridLine(bool, usize),
+    /// The selected curtain wall gets its equal grid back.
+    EqualGrid,
+    /// The Roof tool, named as its roofs are: the Slab tool making a roof, its sketch open.
+    RoofTool(&'static str),
+    /// The angle typed for the picked line of a roof's sketch.
+    SketchSlope(String),
+    /// The Stair tool's Sketch: opens the sketch of a new stair, or closes it.
+    StairSketch,
+    /// The angle typed for the turn under way (degrees), and Enter: the turn is made by it.
+    TurnTyped(String),
+    TurnApply,
+    /// A snap switched on or off at the right of the status bar.
+    SnapToggle(modeller::snaps::Snap),
+    /// The name typed for the space selected, and Enter in its field.
+    SpaceName(String),
+    SpaceNameDone,
+    /// Something the placement strip over the view sends.
+    Place(placement::PlaceMessage),
+    /// Add a door (`true`) or a window to the selected wall.
+    AddOpening(bool),
+    /// Make the element drawing of the element selected, on a sheet of its own, and show it.
+    ElementDrawing(Language),
+    /// Give the selected member its reinforcement (true), or take it away.
+    Reinforce(bool),
+    /// Remove an opening (its index) of the selected wall.
+    RemoveOpening(usize),
+    /// Give an opening (its index) of the selected timber frame its type's framing again.
+    ResetOpeningFraming(usize),
+    /// Ask for a joint between two prefab units of the selected timber frame, and take one (its
+    /// index) back.
+    AddBreak,
+    RemoveBreak(usize),
+    /// An opening more in the selected floor system: rectangular, or round.
+    AddRecess(bool),
+    SetDivision(bim_core::Division),
+    /// The element drawings of the selected system: ask for a folder, then write them there.
+    ElementDrawings(openaec_ui::Language),
+    ElementDrawingsTo(Option<std::path::PathBuf>, openaec_ui::Language),
+    /// The rows of an element's top in the Modeller's properties.
+    Top(modeller::tops::TopMessage),
+    /// A row of the Modeller's model explorer.
+    Explorer(modeller::explorer::ExplorerMessage),
+    /// A row of the Modeller's project browser.
+    Browser(modeller::browser::BrowserMessage),
+    /// The form of a level being edited in the Modeller.
+    LevelEdit(modeller::levels::LevelEditMessage),
+    /// Switch the Modeller's Grid tool on or off.
+    GridTool,
+    /// Switches a reinforcement tool on or off.
+    RebarTool(rebar::RebarTool),
+    /// Takes away one of the selected element's extras (stirrups or bars over a stretch, bars
+    /// along a line), or makes it the next of its forms (below or on top, or hairpins).
+    ExtraRemove(usize),
+    ExtraForm(usize),
+    /// The Modeller's Select tool: every other tool off.
+    SelectTool,
+    /// A key of the Modeller (see modeller::keys), with the interface language its tools are named in.
+    ModelKey(modeller::keys::ModelKey, openaec_ui::Language),
+    /// Give the selected join another kind.
+    JoinKind(bim_core::ConnectionKind),
+    /// Turn the selected join round: its other member runs through.
+    SwapJoin,
+    /// A click on a join's mark: it is selected.
+    PickJoin(bim_core::ElementId),
+    /// A finger (`true`) or a mouse button (`false`) went down.
+    Pressed(bool),
     /// A frame while loading (animates the loading card).
     Tick,
     TakeShot,
@@ -281,16 +1074,52 @@ impl From<CubeEvent> for Message {
     }
 }
 
+/// The choice of how the model is drawn under the view cube: its width, its top (under the
+/// cube's lens button) and the distance of the cube's middle from the right edge
+/// ([`crate::view_cube`]), in logical pixels.
+const STYLE_WIDTH: f32 = 116.0;
+const STYLE_TOP: f32 = 150.0;
+const CUBE_RIGHT: f32 = 73.0;
+
+/// A way of drawing the model, named in the interface language, as the view cube offers it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Look(RenderMode, &'static str);
+
+/// A way to order the views in the explorer: its label and the name of its browser organization
+/// (empty: by kind).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OrderChoice(String, String);
+
+impl std::fmt::Display for OrderChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::fmt::Display for Look {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.1)
+    }
+}
+
 /// Length of a camera transition (view cube, presets).
 const ANIM_SECONDS: f32 = 0.45;
 
 impl Default for App {
     fn default() -> Self {
+        crate::i18n::install();
         Self {
             theme: ThemeKind::Light,
             model: None,
             models: Vec::new(),
             adding_model: false,
+            add_queue: Vec::new(),
+            work_packages: Default::default(),
+            project_opening: None,
+            scene_stale: false,
+            aligned: Vec::new(),
+            layer_stack: (Vec::new(), None),
+            loading_stack: (Vec::new(), false),
             visible: Vec::new(),
             camera: Camera::default(),
             mode: RenderMode::Solid,
@@ -300,13 +1129,28 @@ impl Default for App {
             show_layers: true,
             show_properties: true,
             layer_filter: String::new(),
+            side_tab: SideTab::default(),
+            picked_model: None,
+            folded: std::collections::BTreeSet::new(),
+            view_order: None,
+            projected: std::collections::BTreeSet::new(),
+            closed_models: std::collections::BTreeSet::new(),
+            had_selection: false,
+            layers_query: String::new(),
+            view_typing: None,
+            parked_layers: None,
+            parked_hidden: None,
+            parked_histories: Default::default(),
             status: Status::Ready,
+            save_schema: export::IfcSchema::default(),
             viewport_size: (1000.0, 700.0),
+            fingers: false,
             initial_view: None,
             window_shot: None,
             pending_open: None,
             selected: None,
             selection: Vec::new(),
+            sel: Selection::default(),
             anim: None,
             section: None,
             section_on: false,
@@ -314,16 +1158,107 @@ impl Default for App {
             plane: None,
             plane_placed: None,
             plane_picking: false,
+            moving_model: None,
             active_view: None,
             show_grids: true,
-            explorer_open: [false, false, true, false, false],
+            picked_grid: None,
+            more_grids: Vec::new(),
+            explorer_open: [false, false, true, false, false, false, false],
+            explorer_tab: ExplorerTab::Model,
+            library: bim_library::Library::starter(),
+            library_view: library::LibraryView::default(),
+            #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
+            collab: collab::State::default(),
+            document: Document::default(),
+            level_form: None,
+            active_plan: None,
+            open_plans: Vec::new(),
+            views_picker: None,
+            structure_units: None,
+            model_view: None,
+            open_doc_sheets: Vec::new(),
+            active_doc_sheet: None,
+            sheet_zoom: 1.0,
+            sheet_pan: [0.; 2],
+            cuts: Default::default(),
+            underlays: Vec::new(),
+            overlay_lines: Arc::new(Vec::new()),
+            overlay_faces: Arc::new(Vec::new()),
+            cut_faces: Default::default(),
+            cut_faces_key: None,
+            cut_faces_running: false,
+            kept_faces: Default::default(),
+            views_in_3d: false,
+            ambient: false,
+            mouse_buttons: Default::default(),
+            point_size: 2.5,
+            cloud_depth: true,
+            analysis: crate::structural::diagrams::Shown { scale: 1.0, ..Default::default() },
+            analysis_scale: None,
+            cloud_color: Default::default(),
+            field: Default::default(),
+            meshing: false,
+            #[cfg(all(feature = "pointcloud", not(target_arch = "wasm32")))]
+            cloud: pointcloud::State::default(),
+            grid_heads_hidden: true,
+            grid_dims: false,
+            levels_3d: false,
+            heads_seen: (None, Vec::new()),
+            marks_seen: (Vec::new(), Vec::new()),
+            views_3d_key: Vec::new(),
+            views_3d_labels: Vec::new(),
+            export_menu: false,
+            dimension_tool: false,
+            reference_target: None,
+            annotates: true,
+            drawing_on_paper: true,
+            section_tool: false,
+            sheet_pick: None,
+            cut_edit: None,
+            dragging_view: None,
+            note_tool: false,
+            level_tool: false,
+            draw_tool: None,
+            note_text: String::new(),
+            mark_pick: None,
+            more_marks: Vec::new(),
+            open_layer_groups: HashSet::new(),
+            collapsed_view_groups: HashSet::new(),
             open_sheets: Vec::new(),
             active_sheet: None,
+            open_drafts: Vec::new(),
+            active_draft: None,
+            draft_pick: None,
             open_schedules: Vec::new(),
             active_schedule: None,
             schedule_scroll: (0.0, 0.0),
+            ifc: IfcTab::default(),
+            docs: DocsTab::default(),
+            libraries: libraries::LibrariesView::default(),
+            standard: bim_library::drawing::Standard::netherlands(),
+            standard_view: standards::StandardView::default(),
+            buildup_view: buildups::BuildUpView::default(),
+            material_view: materials::MaterialView::default(),
+            code_view: codes::CodeView::default(),
+            object_view: objects::ObjectView::default(),
+            connection_view: connections::ConnectionView::default(),
+            service_view: services::ServiceView::default(),
+            online: online::OnlineView::default(),
+            drawing_set_view: drawing_sets::DrawingSetView::default(),
+            view_template_view: view_templates::ViewTemplateView::default(),
+            house: bim_library::house::HouseStyle::starter(),
+            house_view: house::HouseView::default(),
+            profile_view: profiles::ProfileView::default(),
+            system_view: systems::SystemView::default(),
+            follow_refused: Vec::new(),
+            gis: gis::Gis::default(),
             schedules: Vec::new(),
             schedules_pending: false,
+            drawings_pending: Default::default(),
+            background_cuts: false,
+            cut_queue: Default::default(),
+            cutting: Default::default(),
+            cut_epoch: 0,
             measurements: Vec::new(),
             viewport_origin: (0.0, 0.0),
             remote: Default::default(),
@@ -332,24 +1267,38 @@ impl Default for App {
             explode: [0.0; 3],
             explode_index: None,
             explode_offsets: Arc::default(),
+            units: Arc::default(),
+            unit_looks: Arc::default(),
+            hidden: Arc::default(),
+            history: History::new(),
+            undo_trail: Vec::new(),
+            redo_trail: Vec::new(),
+            step_typing: None,
+            last_typing: None,
+            box_select: None,
+            context_menu: None,
             explode_bounds: None,
             measure: MeasureState::default(),
             hover_request: None,
             hover_last: None,
             hover_scene: None,
             pick_index: None,
+            nav: Default::default(),
+            structural: Default::default(),
+            modeller: Default::default(),
         }
     }
 }
 
-/// Loads a file on a worker thread.
+/// Loads a file (or files that layer into one model) on a worker thread.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn load_task(source: loaders::Source, progress: Arc<loaders::Progress>) -> Task<Message> {
+pub fn load_task(sources: Vec<loaders::Source>, progress: Arc<loaders::Progress>) -> Task<Message> {
     Task::perform(
         async move {
             let (tx, rx) = iced::futures::channel::oneshot::channel();
             std::thread::spawn(move || {
-                let _ = tx.send(loaders::load_with(&source, &progress).map(Arc::new));
+                // the model first: its drawings are read while it shows (`later`)
+                let _ = tx.send(loaders::load_first(&sources, &progress).map(Arc::new));
             });
             rx.await.unwrap_or_else(|_| Err("loader thread stopped".to_string()))
         },
@@ -389,11 +1338,11 @@ fn edges_task(model: Arc<Model>, layers: Vec<usize>) -> Task<Message> {
 /// Loads a file in the browser (no threads there): after the next frame, so the loading card
 /// shows first.
 #[cfg(target_arch = "wasm32")]
-pub fn load_task(source: loaders::Source, progress: Arc<loaders::Progress>) -> Task<Message> {
+pub fn load_task(sources: Vec<loaders::Source>, progress: Arc<loaders::Progress>) -> Task<Message> {
     Task::perform(
         async move {
             crate::web::next_frame().await;
-            loaders::load_with(&source, &progress).map(Arc::new)
+            loaders::load_stack(&sources, &progress).map(Arc::new)
         },
         Message::Loaded,
     )
@@ -406,6 +1355,9 @@ fn pick_model_task(add: bool) -> Task<Message> {
     exts.sort_unstable();
     Task::perform(
         async move {
+            // a scan project file opens as the scans it lists
+            #[cfg(all(feature = "pointcloud", not(target_arch = "wasm32")))]
+            exts.push(scan_project::PROJECT_EXTENSION);
             let dialog = rfd::AsyncFileDialog::new()
                 .set_title(if add { "Add 3D model" } else { "Open 3D model" })
                 .add_filter("3D models", &exts)
@@ -415,20 +1367,122 @@ fn pick_model_task(add: bool) -> Task<Message> {
                 Some(work) => dialog.set_directory(work),
                 None => dialog,
             };
-            let file = dialog.pick_file().await?;
-            #[cfg(not(target_arch = "wasm32"))]
-            return Some(loaders::Source::File(file.path().to_path_buf()));
-            #[cfg(target_arch = "wasm32")]
-            return Some(loaders::Source::Bytes { name: file.file_name(), data: Arc::new(file.read().await) });
+            // adding: several files at once
+            let files = if add { dialog.pick_files().await.unwrap_or_default() } else { dialog.pick_file().await.into_iter().collect() };
+            let mut sources = Vec::new();
+            for file in files {
+                #[cfg(not(target_arch = "wasm32"))]
+                sources.push(loaders::Source::File(file.path().to_path_buf()));
+                #[cfg(target_arch = "wasm32")]
+                sources.push(loaders::Source::Bytes { name: file.file_name(), data: Arc::new(file.read().await) });
+            }
+            sources
         },
-        move |source| if add { Message::AddPicked(source) } else { Message::Picked(source) },
+        move |mut sources: Vec<loaders::Source>| match (add, sources.len()) {
+            (true, 2..) => Message::AddSeveral(sources),
+            (true, _) => Message::AddPicked(sources.pop()),
+            (false, _) => Message::Picked(sources.pop()),
+        },
     )
+}
+
+/// "Open folder": a model kept as a folder, such as a Tekla model folder (desktop only).
+fn pick_folder_task() -> Task<Message> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        Task::perform(
+            async move {
+                let dialog = rfd::AsyncFileDialog::new().set_title("Open model folder");
+                let dialog = match crate::managed::work_folder() {
+                    Some(work) => dialog.set_directory(work),
+                    None => dialog,
+                };
+                dialog.pick_folder().await.map(|f| loaders::Source::File(f.path().to_path_buf()))
+            },
+            Message::Picked,
+        )
+    }
+    #[cfg(target_arch = "wasm32")]
+    Task::none()
 }
 
 /// The file name offered for "Save as": the model's name in the first writer's format.
 fn save_name(model: &Model) -> String {
     let stem = model.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "model".into());
     format!("{stem}.{}", export::registry()[0].extensions()[0])
+}
+
+/// Asks where to write the film of how the model is built: a video, or its USD stage alone.
+#[cfg(not(target_arch = "wasm32"))]
+fn build_film_dialog_task(model: &Model) -> Task<Message> {
+    let name = model.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "model".into());
+    let mut dialog = rfd::AsyncFileDialog::new().set_title("Build film").set_file_name(format!("{name}.mp4")).add_filter("Video (MP4)", &["mp4"]).add_filter("USD", &["usda"]);
+    if let Some(dir) = crate::managed::dialog_folder(model.path.parent().map(PathBuf::from), crate::managed::work_folder()) {
+        dialog = dialog.set_directory(dir);
+    }
+    Task::perform(async move { dialog.save_file().await.map(|f| f.path().to_path_buf()) }, Message::BuildFilmPicked)
+}
+
+/// Asks where to write the still.
+#[cfg(not(target_arch = "wasm32"))]
+fn render_dialog_task(model: &Model) -> Task<Message> {
+    let name = model.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "model".into());
+    let mut dialog = rfd::AsyncFileDialog::new().set_title("Render").set_file_name(format!("{name}.png")).add_filter("PNG", &["png"]);
+    if let Some(dir) = crate::managed::dialog_folder(model.path.parent().map(PathBuf::from), crate::managed::work_folder()) {
+        dialog = dialog.set_directory(dir);
+    }
+    Task::perform(async move { dialog.save_file().await.map(|f| f.path().to_path_buf()) }, Message::RenderPicked)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn render_dialog_task(_model: &Model) -> Task<Message> {
+    Task::done(Message::BuildFilmDone(Err("Rendering needs the desktop app".into())))
+}
+
+/// Renders the still on a worker thread.
+#[cfg(not(target_arch = "wasm32"))]
+fn render_task(model: Arc<Model>, path: PathBuf, shot: crate::build_film::Shot) -> Task<Message> {
+    Task::perform(
+        async move {
+            let (tx, rx) = iced::futures::channel::oneshot::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(crate::build_film::still(&model, &path, Some(shot)).map(|said| (path, said)));
+            });
+            rx.await.unwrap_or_else(|_| Err("render thread stopped".to_string()))
+        },
+        Message::BuildFilmDone,
+    )
+}
+
+#[cfg(target_arch = "wasm32")]
+fn render_task(_model: Arc<Model>, _path: PathBuf, _shot: crate::build_film::Shot) -> Task<Message> {
+    Task::none()
+}
+
+/// A browser cannot start the program that renders the film.
+#[cfg(target_arch = "wasm32")]
+fn build_film_dialog_task(_model: &Model) -> Task<Message> {
+    Task::done(Message::BuildFilmDone(Err("The build film needs the desktop app".into())))
+}
+
+/// Writes the film on a worker thread: rendering takes minutes.
+#[cfg(not(target_arch = "wasm32"))]
+fn build_film_task(model: Arc<Model>, path: PathBuf) -> Task<Message> {
+    Task::perform(
+        async move {
+            let (tx, rx) = iced::futures::channel::oneshot::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(crate::build_film::render(&model, &path, crate::build_film::SECONDS).map(|said| (path, said)));
+            });
+            rx.await.unwrap_or_else(|_| Err("film thread stopped".to_string()))
+        },
+        Message::BuildFilmDone,
+    )
+}
+
+#[cfg(target_arch = "wasm32")]
+fn build_film_task(_model: Arc<Model>, _path: PathBuf) -> Task<Message> {
+    Task::none()
 }
 
 /// Asks where to save the model, one filter per writer.
@@ -450,15 +1504,39 @@ fn save_dialog_task(model: &Model) -> Task<Message> {
     Task::done(Message::SavePicked(Some(PathBuf::from(save_name(model)))))
 }
 
-/// Saves the model on a worker thread.
+/// The model's name as a `.ifc`.
+fn ifc_name(model: &Model) -> String {
+    let stem = model.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "model".into());
+    format!("{stem}.ifc")
+}
+
+/// Asks where to save the model as a `.ifc` in `schema` (the dialog shows that schema's name).
 #[cfg(not(target_arch = "wasm32"))]
-pub fn save_task(model: Arc<Model>, path: PathBuf) -> Task<Message> {
+fn ifc_dialog_task(model: &Model, schema: export::IfcSchema) -> Task<Message> {
+    let mut dialog = rfd::AsyncFileDialog::new().set_title(format!("Export {}", schema.label())).set_file_name(ifc_name(model));
+    if let Some(dir) = crate::managed::dialog_folder(model.path.parent().map(PathBuf::from), crate::managed::work_folder()) {
+        dialog = dialog.set_directory(dir);
+    }
+    dialog = dialog.add_filter(schema.label(), &["ifc"]);
+    Task::perform(async move { dialog.save_file().await.map(|f| f.path().to_path_buf()) }, Message::SavePicked)
+}
+
+/// The browser: the `.ifc` goes to the downloads.
+#[cfg(target_arch = "wasm32")]
+fn ifc_dialog_task(model: &Model, _schema: export::IfcSchema) -> Task<Message> {
+    Task::done(Message::SavePicked(Some(PathBuf::from(ifc_name(model)))))
+}
+
+/// Saves the model with the document on a worker thread; an existing file is only replaced when
+/// `replace`.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn save_task(model: Arc<Model>, document: Document, path: PathBuf, replace: bool, ifc: export::IfcSchema) -> Task<Message> {
     Task::perform(
         async move {
             let (tx, rx) = iced::futures::channel::oneshot::channel();
             std::thread::spawn(move || {
                 let start = Instant::now();
-                let _ = tx.send(export::save(&model, &path).map(|()| (path, start.elapsed().as_secs_f32())));
+                let _ = tx.send(export::save_schema(&model, &document, &path, replace, ifc).map(|()| (path, start.elapsed().as_secs_f32())));
             });
             rx.await.unwrap_or_else(|_| Err("save thread stopped".to_string()))
         },
@@ -466,16 +1544,21 @@ pub fn save_task(model: Arc<Model>, path: PathBuf) -> Task<Message> {
     )
 }
 
-/// Saves the model in the browser: written in memory and handed over as a download.
+/// Saves the model in the browser: written in memory and handed over as a download, or stored
+/// in Docs when the app runs in an environment.
 #[cfg(target_arch = "wasm32")]
-pub fn save_task(model: Arc<Model>, path: PathBuf) -> Task<Message> {
+pub fn save_task(model: Arc<Model>, document: Document, path: PathBuf, _replace: bool, ifc: export::IfcSchema) -> Task<Message> {
     Task::perform(
         async move {
             crate::web::next_frame().await;
             let start = Instant::now();
             let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            let bytes = export::to_bytes(&model, &name)?;
-            crate::web::download(&name, &bytes, export::writer_for(&name)?.mime())?;
+            let bytes = export::to_bytes_schema(&model, &document, &name, ifc)?;
+            if crate::host::present() {
+                crate::host::save(&name, &bytes).await?;
+            } else {
+                crate::web::download(&name, &bytes, export::writer_for(&name)?.mime())?;
+            }
             Ok((path, start.elapsed().as_secs_f32()))
         },
         Message::Saved,
@@ -485,13 +1568,30 @@ pub fn save_task(model: Arc<Model>, path: PathBuf) -> Task<Message> {
 impl App {
     pub fn title(&self) -> String {
         match &self.model {
-            Some(m) => format!("{} - Open 3D Viewer Studio", m.file_name()),
-            None => "Open 3D Viewer Studio".to_string(),
+            Some(m) => format!("{} - Open BIM Suite", m.file_name()),
+            None => "Open BIM Suite".to_string(),
         }
     }
 
     pub fn theme(&self) -> Theme {
         self.theme.theme()
+    }
+
+    /// Starts saving the model to `path` (Save as, or `save_file`). One save at a time: a dialog
+    /// that was open before another save started gets nothing, so the `Saved` that follows is
+    /// always the answer to the save that is running.
+    pub(crate) fn start_save(&mut self, mut path: PathBuf, replace: bool) -> Task<Message> {
+        let Some(model) = self.model.clone() else { return Task::none() };
+        if matches!(self.status, Status::Loading { .. } | Status::Saving { .. }) {
+            return Task::none();
+        }
+        if path.extension().is_none() {
+            path.set_extension(export::registry()[0].extensions()[0]);
+        }
+        let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        self.status = Status::Saving { file, since: Instant::now() };
+        let schema = std::mem::take(&mut self.save_schema);
+        save_task(model, self.document_now(), path, replace, schema)
     }
 
     pub(crate) fn model_matrix(&self) -> Mat4 {
@@ -507,23 +1607,41 @@ impl App {
     }
 
     pub fn fit(&mut self) {
+        if self.active_doc_sheet.is_some() {
+            self.sheet_zoom = 1.;
+            self.sheet_pan = [0.; 2];
+            return;
+        }
         self.anim = None;
         self.camera = self.fitted(self.camera);
     }
 
     /// `camera` framing the whole model.
     fn fitted(&self, mut camera: Camera) -> Camera {
-        if let Some(b) = self.world_bounds() {
+        if let Some(b) = self.framing_bounds() {
             camera.fit(&b, self.aspect());
         }
         camera
+    }
+
+    /// What fitting the view frames (world space): the model, without a few small things that
+    /// stand far from the rest of it at rest (`ExplodeIndex::framed`). They stay in the model;
+    /// zooming to them shows them.
+    fn framing_bounds(&self) -> Option<Bounds> {
+        let at_rest = self.explode_bounds.is_none();
+        let current = |i: &&Arc<ExplodeIndex>| self.model.as_ref().is_some_and(|m| i.rest() == m.bounds);
+        match self.explode_index.as_ref().filter(|_| at_rest).filter(current).and_then(|i| i.framed()) {
+            Some(framed) => Some(transform_bounds(&framed, &self.model_matrix())),
+            None => self.world_bounds(),
+        }
     }
 
     /// The model's bounds in world space (after the up-axis override), as drawn: pulled apart
     /// by the exploded view.
     pub(crate) fn world_bounds(&self) -> Option<Bounds> {
         let model = self.model.as_ref()?;
-        self.explode_bounds.or_else(|| Some(transform_bounds(&model.bounds, &self.model_matrix())))
+        // an empty model (one to model in) has no bounds yet
+        self.explode_bounds.or_else(|| model.bounds.is_valid().then(|| transform_bounds(&model.bounds, &self.model_matrix())))
     }
 
     /// The offset (world) of vertex `i` of layer `l` in the exploded view.
@@ -543,6 +1661,7 @@ impl App {
         if let Some(b) = self.world_bounds() {
             self.camera.scene_radius = self.camera.scene_radius.max(b.radius());
         }
+        self.update_units();
     }
 
     /// World bounds of the selected triangles.
@@ -559,7 +1678,37 @@ impl App {
                 }
             }
         }
+        // structural objects: their point or segment box (a load's: its member's), moved with
+        // their unit
+        for &id in &self.structural.selected {
+            let Some(item) = model.structural_item(id) else { continue };
+            let Some(at_rest) = item.bounds(&model.origins) else { continue };
+            let unit = item.unit_key().and_then(|u| self.explode_index.as_ref()?.structural_unit(u));
+            let o = unit.and_then(|u| self.explode_offsets.get(u as usize)).map_or(Vec3::ZERO, |o| Vec3::new(o[0], o[1], o[2]));
+            let w = transform_bounds(&at_rest, &mm);
+            b.extend((Vec3::from(w.min) + o).to_array());
+            b.extend((Vec3::from(w.max) + o).to_array());
+        }
         b.is_valid().then_some(b)
+    }
+
+    /// The world bounds of what is shown when some of the model is hidden; None when nothing is.
+    fn shown_bounds(&self) -> Option<Bounds> {
+        let index = self.explode_index.as_ref()?;
+        let hidden = |u: usize| self.units.get(u).is_some_and(|s| (s[3] as u8) & UNIT_HIDDEN != 0);
+        if !(1..index.len()).any(hidden) {
+            return None;
+        }
+        let m = self.model_matrix();
+        let mut out = Bounds::empty();
+        for u in (1..index.len()).filter(|&u| !hidden(u)) {
+            if let Some(b) = index.unit_bounds(u as u32) {
+                let w = transform_bounds(&b, &m);
+                out.extend(w.min);
+                out.extend(w.max);
+            }
+        }
+        out.is_valid().then_some(out)
     }
 
     /// The section box when it is on.
@@ -572,8 +1721,44 @@ impl App {
     /// a section's crop, a plan's range from the view depth up to the cut plane) as the section
     /// box.
     pub fn apply_view(&mut self, i: usize) {
-        let Some(model) = self.model.clone() else { return };
-        let Some(view) = model.views.get(i).cloned() else { return };
+        let Some(view) = self.model.as_ref().and_then(|m| m.views.get(i).cloned()) else { return };
+        // a plan, section, elevation or detail whose drawing is read opens as that drawing, as
+        // its sheets show it (until then, and for a 3D view: the model as the view cuts it)
+        if let Some(path) = view.drawing.as_deref().filter(|p| self.document.plan(p).is_some() || self.document.section(p).is_some()) {
+            self.active_view = Some(i);
+            self.open_plan(path);
+            return;
+        }
+        // the view shown chosen again: the whole model again, as its materials draw it
+        if self.active_view == Some(i) && self.active_plan.is_none() {
+            self.active_view = None;
+            self.update_units();
+            return;
+        }
+        // a saved view of the model shows in the 3D view's tab, with what it leaves out (so
+        // the camera frames what it shows)
+        self.load_view(None);
+        let before = self.active_view.replace(i);
+        self.update_units();
+        if !self.show_view(&view) {
+            self.active_view = before;
+            self.update_units();
+        } else {
+            // in its visual style
+            if let Some(style) = view.style {
+                self.mode = match style {
+                    crate::model::ViewStyle::Wireframe => RenderMode::Wireframe,
+                    crate::model::ViewStyle::HiddenLine => RenderMode::HiddenLine,
+                    crate::model::ViewStyle::Shaded => RenderMode::Solid,
+                    crate::model::ViewStyle::ShadedEdges => RenderMode::SolidEdges,
+                };
+            }
+        }
+    }
+
+    /// Shows a view: its section box or plan range and its camera, animated; false without a
+    /// model to show.
+    fn show_view(&mut self, view: &crate::model::SavedView) -> bool {
         // views are in the file's coordinates, of the model at rest
         if self.flip_up {
             self.flip_up = false;
@@ -583,11 +1768,11 @@ impl App {
             self.explode_on = false;
             self.update_explode();
         }
-        let Some(world) = self.world_bounds() else { return };
-        self.active_view = Some(i);
+        let Some(world) = self.world_bounds() else { return false };
         let clip = match (view.plan, view.clip) {
-            (Some(plan), _) => {
-                let mut b = SectionBox::around(&world);
+            (Some(plan), crop) => {
+                // within its crop, where it has one
+                let mut b = crop.unwrap_or_else(|| SectionBox::around(&world));
                 b.min.z = plan.low;
                 b.max.z = plan.high.max(plan.low + 0.01);
                 Some(b)
@@ -599,7 +1784,8 @@ impl App {
             self.section = clip;
         }
         self.section_on = clip.is_some();
-        let frame = clip.map(|c| c.world_bounds()).unwrap_or(world);
+        // what it shows: its box, else what it does not leave out
+        let frame = clip.map(|c| c.world_bounds()).or_else(|| self.shown_bounds()).unwrap_or(world);
 
         let max_pitch = 89.9f32.to_radians();
         let (yaw, pitch) = match (view.plan, view.camera) {
@@ -634,6 +1820,24 @@ impl App {
             }
         }
         self.anim = Some((self.camera, to, Instant::now()));
+        true
+    }
+
+    /// A step through the model in the 3D view: level, the way the camera looks (`forward`) and
+    /// to its right, or straight up. The camera turns to perspective, as one walks in a
+    /// building; the eye and what it looks at move together, so the view keeps its direction.
+    fn walk(&mut self, forward: f32, right: f32, up: f32, fast: bool) {
+        if self.model.is_none() || self.shown_view().is_some() || self.active_sheet.is_some() || self.active_doc_sheet.is_some() {
+            return;
+        }
+        self.anim = None;
+        self.camera.ortho = false;
+        // a pace, or three with Shift
+        let step = if fast { 1.8 } else { 0.6 };
+        let (sin, cos) = self.camera.yaw.sin_cos();
+        let ahead = Vec3::new(-cos, -sin, 0.0);
+        let aside = Vec3::new(-sin, cos, 0.0);
+        self.camera.target += (ahead * forward + aside * right + Vec3::Z * up) * step;
     }
 
     /// Turns the camera to (yaw, pitch) and frames the model, animated.
@@ -646,9 +1850,84 @@ impl App {
     }
 
     /// Installs a freshly loaded model (also used by the headless screenshot path).
+    /// A new, empty project for another tab, with this one's window settings, ribbon tab,
+    /// explorer groups and measuring units.
+    pub fn new_project(&self) -> App {
+        let mut app = App::default();
+        app.take_window_settings(self);
+        app.tab = self.tab;
+        app.show_layers = self.show_layers;
+        app.show_properties = self.show_properties;
+        app.explorer_open = self.explorer_open;
+        app.measure.units = self.measure.units.clone();
+        // how the 3D view draws is set for the app, not for a project
+        (app.ambient, app.grid_heads_hidden, app.grid_dims, app.levels_3d) = (self.ambient, self.grid_heads_hidden, self.grid_dims, self.levels_3d);
+        app.point_size = self.point_size;
+        app.cloud_depth = self.cloud_depth;
+        app.cloud_color = self.cloud_color;
+        #[cfg(all(feature = "pointcloud", not(target_arch = "wasm32")))]
+        {
+            app.cloud.settings = self.cloud.settings;
+        }
+        app
+    }
+
+    /// What belongs to the window, not to a project, from the project shown before: the theme,
+    /// the viewport's size and place, touch input and the remote control.
+    pub fn take_window_settings(&mut self, from: &App) {
+        self.annotates = from.annotates;
+        self.theme = from.theme;
+        self.viewport_size = from.viewport_size;
+        self.viewport_origin = from.viewport_origin;
+        self.fingers = from.fingers;
+        self.remote.enabled = from.remote.enabled;
+        self.mouse_buttons = from.mouse_buttons;
+    }
+
+    /// Whether this project has a model or is loading one: a new file then opens in a tab of its
+    /// own.
+    pub fn busy(&self) -> bool {
+        self.model.is_some() || matches!(self.status, Status::Loading { .. })
+    }
+
+    /// The right pane follows what is picked: a selection shows its properties, and a model picked
+    /// in the explorer gives way to it.
+    fn follow_selection(&mut self) {
+        let selected = self.selected.is_some() || !self.structural.selected.is_empty() || self.picked_grid.is_some();
+        if selected && !self.had_selection {
+            self.picked_model = None;
+            self.side_tab = SideTab::Properties;
+        }
+        self.had_selection = selected;
+    }
+
     pub fn set_model(&mut self, model: Arc<Model>) {
+        self.work_packages = Default::default();
+        #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
+        { self.collab.packages = Default::default(); }
+        // a point marked to orbit about belonged to the model before
+        self.nav.marked = None;
+        self.picked_model = None;
+        self.folded.clear();
+        self.projected.clear();
+        self.closed_models.clear();
+        self.hidden = Arc::default();
+        self.history.clear();
+        self.parked_layers = None;
+        self.parked_hidden = None;
+        self.parked_histories.clear();
+        self.new_document();
         self.models = vec![ModelEntry::new(model.clone(), 0)];
-        self.set_scene(model);
+        // a simulation file opens coloured by its first field, at its first step
+        self.field = fields::FieldView::of(&model);
+        // the product shown stays the one it was
+        self.modeller = modeller::Modeller { in_modeller: self.modeller.in_modeller, ..modeller::Modeller::default() };
+        self.set_scene(model.clone());
+        // the cut the file opens with (Rhino: the clipping plane of its perspective view)
+        self.plane = model.project.section;
+        // the file with its levels is where the modelled project's history starts
+        self.settle_modelled();
+        self.adopt_elements(&model);
     }
 
     pub fn add_model(&mut self, model: Arc<Model>) {
@@ -658,9 +1937,71 @@ impl App {
         }
         let first = self.models.last().map_or(0, |entry| entry.layers.end);
         self.models.push(ModelEntry::new(model, first));
+        self.align_added();
+        self.combine_models();
+    }
+
+    /// Lays the model added last on the first by the grids they share (see [`crate::align`]): the
+    /// architect's and the structural engineer's model often each have their own zero point. The
+    /// move is the model's own, as when typed in the right pane, so it shows there and can be
+    /// changed.
+    fn align_added(&mut self) {
+        let [reference, .., added] = self.models.as_slice() else { return };
+        if reference.placed.turned != 0.0 || added.placed.moved != glam::DVec3::ZERO {
+            return;
+        }
+        let Some(aligned) = crate::align::on_grids(&reference.model.project.grids, &added.model.project.grids) else { return };
+        let by = aligned.by + reference.placed.moved;
+        if by.length() < 0.001 {
+            return;
+        }
+        let name = added.model.file_name();
+        self.aligned.push(format!("{name} laid on the first model by {} grids ({:.3}, {:.3} m)", aligned.grids, by.x, by.y));
+        if let Some(added) = self.models.last_mut() {
+            added.placed.moved = by;
+        }
+    }
+
+    /// Builds the scene of the open models, each at its place, and says what was aligned.
+    fn combine_models(&mut self) {
         let sources: Vec<_> = self.models.iter().map(|entry| entry.model.clone()).collect();
-        self.set_scene(Arc::new(Model::combine(&sources)));
+        let moves: Vec<glam::DVec3> = self.models.iter().map(|entry| entry.placed.moved).collect();
+        let turns: Vec<f64> = self.models.iter().map(|entry| entry.placed.turned).collect();
+        self.set_scene(Arc::new(Model::combine_placed(&sources, &moves, &turns)));
         self.restore_model_visibility();
+        if !self.aligned.is_empty() {
+            let said = std::mem::take(&mut self.aligned).join(" · ");
+            if let Status::Loaded(loaded) = &mut self.status {
+                loaded.push_str(" · ");
+                loaded.push_str(&said);
+            }
+        }
+    }
+
+    /// Files to add after the one that is loading (see `add_queue`).
+    pub(crate) fn queue_added(&mut self, sources: Vec<loaders::Source>) {
+        self.add_queue = sources;
+    }
+
+    /// Takes a model in among the open ones without building the scene: more follow, and the
+    /// scene is built once (`add_model` of the last, or `rebuild_scene`).
+    fn add_model_later(&mut self, model: Arc<Model>) {
+        if self.models.is_empty() {
+            if let Some(shown) = self.model.clone() {
+                self.models.push(ModelEntry::new(shown, 0));
+            }
+        }
+        let first = self.models.last().map_or(0, |entry| entry.layers.end);
+        self.models.push(ModelEntry::new(model, first));
+        self.align_added();
+        self.scene_stale = true;
+    }
+
+    /// Builds the scene again from the open models.
+    fn rebuild_scene(&mut self) {
+        if self.models.len() > 1 {
+            self.combine_models();
+        }
     }
 
     fn restore_model_visibility(&mut self) {
@@ -669,6 +2010,7 @@ impl App {
                 self.visible[layer] = entry.visible && *shown;
             }
         }
+        self.refresh_structural_visibility();
     }
 
     fn set_layer_visible(&mut self, layer: usize, shown: bool) {
@@ -683,30 +2025,60 @@ impl App {
             }
         }
         if let Some(value) = self.visible.get_mut(layer) { *value = shown; }
+        self.refresh_structural_visibility();
     }
 
     fn set_scene(&mut self, model: Arc<Model>) {
+        // its edges are found ahead, so wireframe and hidden lines show at once
+        crate::viewport::render::precompute_edges(&model);
+        // the views' tabs close: the 3D view's layers and undo come back first
+        self.load_view(None);
+        self.parked_histories.clear();
+        self.context_menu = None;
         self.visible = model.layers.iter().map(|l| !l.hidden).collect();
         self.status = Status::Loaded(format!(
             "Loaded {} in {:.2} s",
             model.file_name(),
             model.load_time.as_secs_f32()
         ));
+        self.document.recognise(&model);
         self.model = Some(model);
+        #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
+        {
+            self.collab.model_changed();
+            self.refresh_package_index();
+        }
         self.section = None;
         self.section_on = false;
         self.plane = None;
         self.plane_picking = false;
         self.active_view = None;
+        self.active_plan = None;
+        self.open_plans.clear();
+        self.model_view = None;
+        self.open_doc_sheets.clear();
+        self.active_doc_sheet = None;
+        self.cuts.clear();
+        self.cut_epoch += 1;
+        self.sheet_pick = None;
+        self.cut_edit = None;
+        self.view_typing = None;
+        self.mark_pick = None;
         self.open_schedules.clear();
         self.active_schedule = None;
+        self.close_ifc();
         self.schedules.clear();
         self.schedules_pending = false;
         self.open_sheets.clear();
-        self.active_sheet = None;
+        self.open_drafts.clear();
+        self.draft_pick = None;
+        self.active_sheet = None; self.active_draft = None;
         self.explorer_open[0] = false;
+        self.sel.clear();
         self.selected = None;
         self.selection.clear();
+        self.picked_grid = None;
+        self.structural.reset();
         self.measure.reset();
         self.measurements.clear();
         self.flip_up = false;
@@ -733,15 +2105,97 @@ impl App {
         if matches!(self.status, Status::Loading { .. }) {
             return Task::none();
         }
+        // a project file: the files it names, each put back where the project had it
+        #[cfg(not(target_arch = "wasm32"))]
+        if let (loaders::Source::File(path), false) = (&source, add) {
+            if let Some(project) = project_file::Project::peek(path) {
+                let path = path.clone();
+                return self.open_project(&path, project);
+            }
+        }
+        // a scan project file or a folder of scans: the scans it lists or holds, one after another
+        // (a folder that is a model of its own, such as a Tekla model folder, opens as that model)
+        #[cfg(all(feature = "pointcloud", not(target_arch = "wasm32")))]
+        if let loaders::Source::File(path) = &source {
+            if (path.is_dir() && !loaders::opens_folder(path)) || path.extension().is_some_and(|e| e.eq_ignore_ascii_case(scan_project::PROJECT_EXTENSION)) {
+                let open: Vec<PathBuf> = if add { self.models.iter().map(|entry| entry.model.path.clone()).collect() } else { Vec::new() };
+                let found = scan_project::expand(std::slice::from_ref(path), &open);
+                let mut scans = found.files.iter().cloned().map(loaders::Source::File);
+                let Some(first) = scans.next() else {
+                    self.status = Status::Error(found.summary());
+                    return Task::none();
+                };
+                self.add_queue.extend(scans);
+                if found.has_notes() {
+                    eprintln!("{}", found.summary());
+                }
+                return self.open(first, add);
+            }
+        }
+        // an IFCX file added to an IFCX model layers over it: the files load again as one model
+        let last = self.models.last().map(|entry| entry.model.id).or(self.model.as_ref().map(|m| m.id));
+        let composes = loaders::composes(&source);
+        let restack = add && composes && !self.layer_stack.0.is_empty() && last.is_some() && last == self.layer_stack.1;
+        let mut sources = if restack { self.layer_stack.0.clone() } else { Vec::new() };
+        sources.push(source.clone());
+        self.loading_stack = (sources.clone(), restack);
         self.adding_model = add;
         let progress = Arc::new(loaders::Progress::default());
         self.status = Status::Loading { file: source.name(), since: Instant::now(), progress: progress.clone() };
-        load_task(source, progress)
+        load_task(sources, progress)
+    }
+
+    /// Puts a model in the place of the last one (an IFCX stack with a file added).
+    fn replace_last_model(&mut self, model: Arc<Model>) {
+        if self.models.len() <= 1 {
+            // the same project: the levels added stay
+            let document = std::mem::take(&mut self.document);
+            self.set_model(model.clone());
+            self.document = document;
+            self.document.recognise(&model);
+        } else {
+            self.models.pop();
+            self.add_model(model);
+        }
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        if !self.annotates && !message.allowed_in_viewer() { return Task::none(); }
+        let before = changes_visibility(&message).then(|| self.view_state());
+        let shown = before.is_some() || matches!(message, Message::Undo | Message::Redo);
+        // typing in one field of a Library editor is one step to take back
+        self.step_typing = self.typing_of(&message);
+        self.look_at_setup();
         let task = self.handle(message);
+        if let Some(before) = before.filter(|b| *b != self.view_state()) {
+            self.history.record(before);
+            self.note_step(false);
+        }
+        if shown {
+            self.keep_view_layers();
+        }
+        // a step that changed the modelled elements can be taken back
+        self.keep_model_history();
+        self.keep_views_in_3d();
+        let faces = self.keep_cut_faces();
+        self.follow_selection();
+        // the view in its tab is cut, to show its cut faces in their hatch
+        if let Some(view) = self.shown_view().filter(|v| !self.cuts.contains_key(*v)).map(str::to_string) {
+            self.cut_view(&view);
+        }
+        // and the views of the sheet shown, cut again after the model changed
+        if let Some(sheet) = self.active_doc_sheet.as_ref().map(|s| s.to_string()) {
+            self.cut_placed_plans(&sheet);
+        }
         self.refresh_hover();
+        // the structural hover goes when the camera moves (it no longer lies under the cursor) and
+        // while measuring or placing a section plane
+        if self.structural.note_camera(self.camera) || self.measure.tool.is_some() || self.plane_picking {
+            self.set_structural_hover(None);
+        }
+        // the IFC tab follows the element selected in the model
+        let task = Task::batch([task, faces]);
+        let task = if self.ifc.shown { Task::batch([task, self.ifc_follow()]) } else { task };
         match self.build_edges() {
             Some(edges) => Task::batch([task, edges]),
             None => task,
@@ -764,12 +2218,12 @@ impl App {
     }
 
     fn hover_scene(&self) -> HoverScene {
-        (self.active_section(), self.plane, self.visible.clone())
+        (self.active_section(), self.plane, self.visible.clone(), self.hidden.clone())
     }
 
     fn hover_scene_holds(&self) -> bool {
-        self.hover_scene.as_ref().is_some_and(|(section, plane, visible)| {
-            *section == self.active_section() && *plane == self.plane && *visible == self.visible
+        self.hover_scene.as_ref().is_some_and(|(section, plane, visible, hidden)| {
+            *section == self.active_section() && *plane == self.plane && *visible == self.visible && Arc::ptr_eq(hidden, &self.hidden)
         })
     }
 
@@ -788,20 +2242,72 @@ impl App {
     fn handle(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::OpenDialog => return pick_model_task(false),
+            Message::OpenFolderDialog => return pick_folder_task(),
             Message::AddDialog => return pick_model_task(true),
             Message::Picked(None) => {}
             Message::AddPicked(None) => {}
             Message::Picked(Some(source)) => return self.open(source, false),
             Message::AddPicked(Some(source)) => return self.open(source, true),
+            Message::AddSeveral(mut sources) => {
+                if sources.is_empty() || matches!(self.status, Status::Loading { .. }) {
+                    return Task::none();
+                }
+                let first = sources.remove(0);
+                self.add_queue = sources;
+                return self.open(first, true);
+            }
             Message::Open(path) => return self.open(loaders::Source::File(path), false),
             Message::Loaded(Ok(model)) => {
-                if self.adding_model { self.add_model(model); } else { self.set_model(model); }
+                let drawings = self.read_drawings(&model);
+                let (mut stack, restack) = std::mem::take(&mut self.loading_stack);
+                if !stack.last().is_some_and(loaders::composes) {
+                    stack.clear();
+                }
+                let id = model.id;
+                // more files wait to be added: this one joins the models, and the scene is built
+                // once, after the last
+                if self.adding_model && !restack && !self.add_queue.is_empty() && self.model.is_some() {
+                    self.add_model_later(model);
+                    let next = self.add_queue.remove(0);
+                    self.status = Status::Loaded(String::new());
+                    return Task::batch([drawings, self.open(next, true)]);
+                }
+                self.scene_stale = false;
+                if restack {
+                    self.replace_last_model(model);
+                } else if self.adding_model {
+                    self.add_model(model);
+                } else {
+                    self.set_model(model);
+                }
+                self.layer_stack = (stack, Some(id));
                 self.adding_model = false;
+                // the first of several is in: the others are added after it
+                if !self.add_queue.is_empty() {
+                    let next = self.add_queue.remove(0);
+                    return Task::batch([drawings, self.open(next, true)]);
+                }
+                self.settle_project();
                 self.remote_loaded();
-                return Task::batch([self.compute_schedules(), self.shot_after_delay()]);
+                // the register of the project folder, so the elements say which documents are about them
+                let register = self.docs_register();
+                return Task::batch([drawings, self.compute_schedules(), self.shot_after_delay(), register]);
             }
             Message::Loaded(Err(e)) => {
+                // one of several files does not read: the others still come
+                if self.adding_model && !self.add_queue.is_empty() {
+                    eprintln!("not added: {e}");
+                    let next = self.add_queue.remove(0);
+                    self.status = Status::Loaded(String::new());
+                    return self.open(next, true);
+                }
+                if std::mem::take(&mut self.scene_stale) {
+                    self.rebuild_scene();
+                }
+                // the last file of a project did not read: the others are set up as it had them
+                self.settle_project();
                 self.adding_model = false;
+                self.loading_stack = (Vec::new(), false);
                 self.status = Status::Error(e);
                 self.remote_loaded();
                 return self.shot_after_delay();
@@ -809,29 +2315,162 @@ impl App {
             Message::Remote(call) => return self.remote(call),
             Message::RemoteShot(shot) => self.remote_shot(shot),
             Message::ClearMeasurements => self.measurements.clear(),
+            Message::NewModel(level) => self.new_model(level),
+            Message::Reinforcement(action) => self.rebar_action(action),
+            Message::ModelTool(tool) => self.start_model_tool(tool),
+            Message::GridTool => self.toggle_grid_tool(),
+            Message::RebarTool(tool) => self.toggle_rebar_tool(tool),
+            Message::ExtraRemove(k) => self.remove_extra(k),
+            Message::ExtraForm(k) => self.next_extra_form(k),
+            Message::SelectTool => self.select_tool(),
+            Message::ModelKey(key, l) => self.model_key(key, l),
+            Message::LevelEdit(message) => self.level_edit_message(message),
+            Message::Browser(message) => self.browser_message(message),
+            Message::Explorer(message) => self.explorer_message(message),
+            Message::Top(message) => self.top_message(message),
+            Message::Connect(kind, name) => self.connect_selected(kind, name),
+            Message::Transform(kind) => self.begin_transform(kind),
+            Message::EditMode => self.toggle_edit(),
+            Message::Edit(event) => self.edit_event(event),
+            Message::EditKey(key) => self.edit_key(key),
+            Message::Cursor3dHome => self.cursor3d_home(),
+            Message::SketchCancel => self.cancel_sketch(),
+            Message::TempDim(message) => self.temp_dim_message(message),
+            Message::ElementField(field, typed) => self.type_element_field(field, typed),
+            Message::ElementFieldDone => self.modeller.typing = None,
+            Message::ToolDigit(c) => {
+                self.tool_digit(c);
+            }
+            Message::GridSeries(message) => self.series_message(message),
+            Message::CurtainTool(tool) => self.toggle_curtain_tool(tool),
+            Message::RemoveGridLine(upright, index) => self.remove_grid_line(upright, index),
+            Message::EqualGrid => self.equal_grid(),
+            Message::StairSketch => self.toggle_stair_sketch(),
+            Message::RoofTool(name) => self.start_roof_tool(name),
+            Message::SketchSlope(typed) => self.sketch_slope_typed(typed),
+            Message::TurnTyped(typed) => self.modeller.turn_typed = typed,
+            Message::TurnApply => self.turn_by_typed(),
+            Message::SnapToggle(snap) => self.modeller.snaps.toggle(snap),
+            Message::SpaceName(typed) => self.type_space_name(typed),
+            Message::SpaceNameDone => self.modeller.space_typing = None,
+            Message::Place(message) => self.place_message(message),
+            Message::AddOpening(door) => self.add_opening(door),
+            Message::PlacePileLegend(sheet, name) => self.place_pile_legend(&sheet, name),
+            Message::NewPileSchedule(level, name) => self.new_pile_schedule_view(&level, name),
+            Message::DesignatePiles => self.designate_members(false),
+            Message::DesignateReinforcement => self.designate_members(true),
+            Message::ElementDrawing(l) => self.element_drawing(l),
+            Message::Reinforce(on) => self.reinforce(on),
+            Message::RemoveOpening(index) => self.remove_opening(index),
+            Message::ResetOpeningFraming(index) => self.reset_opening_framing(index),
+            Message::AddBreak => self.add_break(),
+            Message::AddRecess(round) => self.add_recess(round),
+            Message::SetDivision(division) => self.set_division(division),
+            Message::RemoveBreak(index) => self.remove_break(index),
+            Message::ElementDrawings(l) => return self.element_drawings_dialog(l),
+            Message::ElementDrawingsTo(folder, l) => {
+                if let Some(folder) = folder {
+                    self.element_drawings_to(&folder, l);
+                }
+            }
+            Message::JoinKind(kind) => self.set_join_kind(kind),
+            Message::SwapJoin => self.swap_join(),
+            Message::PickJoin(id) => self.select_modelled(id),
             Message::SaveDialog => {
                 let Some(model) = &self.model else { return Task::none() };
                 if matches!(self.status, Status::Loading { .. } | Status::Saving { .. }) {
                     return Task::none();
                 }
+                self.save_schema = export::IfcSchema::Ifc4;
                 return save_dialog_task(model);
             }
-            Message::SavePicked(None) => {}
-            Message::SavePicked(Some(mut path)) => {
+            Message::SaveIfcDialog(schema) => {
+                let Some(model) = &self.model else { return Task::none() };
+                if matches!(self.status, Status::Loading { .. } | Status::Saving { .. }) {
+                    return Task::none();
+                }
+                self.save_schema = schema;
+                return ifc_dialog_task(model, schema);
+            }
+            Message::SavePicked(None) => self.save_schema = export::IfcSchema::Ifc4,
+            Message::BuildFilmDialog => {
+                let Some(model) = &self.model else { return Task::none() };
+                if matches!(self.status, Status::Loading { .. } | Status::Saving { .. }) {
+                    return Task::none();
+                }
+                return build_film_dialog_task(model);
+            }
+            Message::BuildFilmPicked(None) | Message::RenderPicked(None) => {}
+            Message::RenderDialog => {
+                let Some(model) = &self.model else { return Task::none() };
+                if matches!(self.status, Status::Loading { .. } | Status::Saving { .. }) {
+                    return Task::none();
+                }
+                return render_dialog_task(model);
+            }
+            Message::RenderPicked(Some(mut path)) => {
                 let Some(model) = self.model.clone() else { return Task::none() };
                 if path.extension().is_none() {
-                    path.set_extension(export::registry()[0].extensions()[0]);
+                    path.set_extension("png");
                 }
                 let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 self.status = Status::Saving { file, since: Instant::now() };
-                return save_task(model, path);
+                // from where the view looks now
+                let shot = crate::build_film::Shot { eye: self.camera.eye().to_array(), target: self.camera.target.to_array(), fov: self.camera.fov_y.to_degrees() };
+                return render_task(model, path, shot);
             }
-            Message::Saved(Ok((path, secs))) => {
+            Message::BuildFilmPicked(Some(mut path)) => {
+                let Some(model) = self.model.clone() else { return Task::none() };
+                if path.extension().is_none() {
+                    path.set_extension("mp4");
+                }
                 let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                self.status = Status::Loaded(format!("Saved {file} in {secs:.2} s"));
+                self.status = Status::Saving { file, since: Instant::now() };
+                return build_film_task(model, path);
             }
-            Message::Saved(Err(e)) => {
-                self.status = Status::Error(e);
+            Message::BuildFilmDone(result) => {
+                self.status = match result {
+                    Ok((path, said)) => {
+                        let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        Status::Loaded(format!("{file}: {said}"))
+                    }
+                    Err(e) => Status::Error(e),
+                };
+            }
+            // the dialog asked before replacing a file
+            Message::SavePicked(Some(path)) => return self.start_save(path, true),
+            Message::SaveProjectDialog => {
+                if !self.models.is_empty() || self.model.is_some() {
+                    return project_file::save_dialog_task(self);
+                }
+            }
+            Message::SaveProjectPicked(None) => {}
+            Message::SaveProjectPicked(Some(path)) => self.save_project(path),
+            Message::Saved(result) => {
+                self.remote_saved(&result);
+                // a file saved into the project folder shows in Docs
+                let docs = result.as_ref().map_or_else(|_| Task::none(), |(path, _)| self.docs_saved(path));
+                self.status = match result {
+                    Ok((path, secs)) => {
+                        let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        Status::Loaded(format!("Saved {file} in {secs:.2} s"))
+                    }
+                    Err(e) => Status::Error(e),
+                };
+                return docs;
+            }
+            Message::BlenderRender => {
+                #[cfg(target_arch = "wasm32")]
+                if crate::host::can_render() {
+                    self.status = Status::Loaded("Blender renders the model as it is stored in Docs…".to_string());
+                    return Task::perform(crate::host::render(), Message::BlenderRendered);
+                }
+            }
+            Message::BlenderRendered(result) => {
+                self.status = match result {
+                    Ok(name) => Status::Loaded(format!("Blender rendered {name}: it is next to the model in Docs")),
+                    Err(e) => Status::Error(e),
+                };
             }
             Message::TakeShot => {
                 return window::latest().and_then(window::screenshot).map(Message::Shot);
@@ -886,73 +2525,571 @@ impl App {
             },
             Message::Ortho(o) => self.camera.ortho = o,
             Message::Fit => self.fit(),
+            Message::NavigateSheet { zoom, pan } => { self.sheet_zoom = zoom; self.sheet_pan = pan; }
+            Message::Walk { forward, right, up, fast } => self.walk(forward, right, up, fast),
             Message::ToggleLayersPanel => self.show_layers = !self.show_layers,
             Message::TogglePropertiesPanel => self.show_properties = !self.show_properties,
-            Message::Layer(i, v) => self.set_layer_visible(i, v),
+            Message::Layer(i, v) => self.switch_layers(&[i], v),
+            Message::ProjectView(path) => {
+                if !self.projected.remove(&*path) {
+                    self.projected.insert(path.to_string());
+                }
+            }
+            Message::Origin(m) => return self.update_origin(m),
+            Message::Gis(m) => return self.update_gis(m),
+            Message::ViewOrder(order) => self.view_order = order,
+            Message::ToggleFolder(path) => {
+                if !self.folded.remove(&path) {
+                    self.folded.insert(path);
+                }
+            }
+            Message::PickModel(i) => {
+                if self.picked_model == Some(i) {
+                    if !self.closed_models.remove(&i) {
+                        self.closed_models.insert(i);
+                    }
+                } else if i < self.models.len() {
+                    self.picked_model = Some(i);
+                }
+                self.side_tab = SideTab::Properties;
+                return self.load_map();
+            }
             Message::ModelVisible(i, shown) => {
                 if let Some(entry) = self.models.get_mut(i) {
                     entry.visible = shown;
-                    self.selection.clear();
-                    self.selected = None;
+                    self.sel.clear();
+                    self.selection_changed();
+                    self.set_structural_selection(Vec::new());
                     self.restore_model_visibility();
+                    self.cut_all_again();
                 }
             }
             Message::AllLayers(v) => {
-                let filter = self.layer_filter.to_lowercase();
+                let layers = self.layers_found();
+                self.switch_layers(&layers, v);
+                // unfiltered in the viewport, it shows or hides the structural objects too (a
+                // model of only those has no layers: its entry follows)
+                if self.layers_query.trim().is_empty() && !matches!(self.layers_of(), Some(layers::LayersOf::Placed(_))) {
+                    self.structural.all_hidden = !v;
+                    for entry in self.models.iter_mut().filter(|e| e.layers.is_empty()) {
+                        entry.visible = v;
+                    }
+                    self.refresh_structural_visibility();
+                }
+            }
+            Message::ToggleLayerGroup(group) => {
+                if !self.open_layer_groups.remove(&group) {
+                    self.open_layer_groups.insert(group);
+                }
+            }
+            Message::LayerGroup(group, v) => {
                 if let Some(m) = &self.model {
-                    let layers: Vec<_> = m.layers.iter().enumerate().filter(|(_, layer)| filter.is_empty() || layer.name.to_lowercase().contains(&filter)).map(|(i, _)| i).collect();
-                    for layer in layers { self.set_layer_visible(layer, v); }
+                    let layers: Vec<usize> = (0..m.layers.len()).filter(|&i| layer_group(&m.layers[i].name).0 == Some(group.as_str())).collect();
+                    self.switch_layers(&layers, v);
                 }
             }
             Message::LayerFilter(f) => self.layer_filter = f,
-            Message::Navigate(n) => match n {
-                Navigate::Orbit { dx, dy } => {
-                    self.anim = None;
+            Message::SideTab(tab) => self.side_tab = tab,
+            Message::LayersQuery(q) => self.layers_query = q,
+            Message::ViewField(field, typed) => self.type_view_field(field, typed),
+            Message::PileLegendField(path, field, value) => {
+                if self.document.set_pile_legend_field(&path, &field, value) { self.tag_plans(); }
+            }
+            Message::ViewFieldDone => self.view_typing = None,
+            Message::ViewKind(key) => self.set_view_kind(&key),
+            Message::ViewScale(scale) => self.set_view_scale(scale),
+            Message::ViewKindEdit(open) => self.edit_view_kind(open),
+            Message::Navigate(n) => {
+                if !matches!(n, Navigate::Hover { .. } | Navigate::HoverOff | Navigate::Resized { .. } | Navigate::Context { .. }) {
+                    self.context_menu = None;
+                }
+                match n {
+                // the point to orbit about or the depth to pan at, looked up once (`navigation`)
+                Navigate::Grab { x, y, width, height, orbit } => self.grab(x, y, width, height, orbit),
+                Navigate::Release => self.release(),
+                Navigate::Hold { x, y } => self.hold(x, y),
+                Navigate::Pivot { x, y, width, height } if self.clicks_go_to_a_tool() => self.pick(x, y, width, height, false),
+                Navigate::Pivot { x, y, width, height } => self.mark_pivot(x, y, width, height),
+                // a drawing view is not turned either
+                Navigate::Look { dx, dy } if self.drawing_view_shown() => {
                     self.measure.hover = None;
-                    self.camera.orbit(dx, dy)
+                    self.pan_drag(dx, dy, self.viewport_size.1)
+                }
+                Navigate::Look { dx, dy } => {
+                    self.measure.hover = None;
+                    self.look_drag(dx, dy)
+                }
+                // a drawing view is not turned: dragging moves it (a 3D view turns)
+                Navigate::Orbit { dx, dy } if self.drawing_view_shown() => {
+                    self.measure.hover = None;
+                    self.pan_drag(dx, dy, self.viewport_size.1)
+                }
+                Navigate::Orbit { dx, dy } => {
+                    self.measure.hover = None;
+                    self.orbit_drag(dx, dy)
                 }
                 Navigate::Pan { dx, dy, height } => {
-                    self.anim = None;
                     self.measure.hover = None;
-                    self.camera.pan(dx, dy, height)
+                    self.pan_drag(dx, dy, height)
                 }
                 Navigate::Zoom { steps, x, y, width, height } => {
-                    self.anim = None;
                     // the viewport looks again on the next frame
                     self.measure.hover = None;
-                    let ndc = (2.0 * x / width.max(1.0) - 1.0, 1.0 - 2.0 * y / height.max(1.0));
-                    self.camera.zoom_at(steps, ndc, width / height.max(1.0));
+                    self.wheel_zoom(steps, x, y, width, height);
                 }
                 Navigate::Resized { x, y, width, height } => {
                     self.viewport_origin = (x, y);
                     self.viewport_size = (width, height);
                 }
-                Navigate::Pick { x, y, width, height } => self.pick(x, y, width, height),
+                Navigate::Pick { x, y, width, height, add } => self.pick(x, y, width, height, add),
+                Navigate::Context { x, y, width, height } => self.context_click(x, y, width, height),
+                Navigate::Cursor3d { x, y, width, height } => self.place_cursor3d(x, y, width, height),
+                // with the Grid line tool on, a drag moves the line of a curtain wall it began on
+                Navigate::Box { x0, y0, x1, y1, width, height, done, .. } if self.curtain_drag((x0, y0), (x1, y1), width, height, done) => {}
+                // a drag that starts on a picked grid line moves the picked grid lines
+                Navigate::Box { x0, y0, x1, y1, width, height, done, .. } if self.drag_grids((x0, y0), (x1, y1), width, height, done) => {}
+                Navigate::Box { x0, y0, x1, y1, width, height, done, add } => {
+                    let rect = (Vec2::new(x0, y0), Vec2::new(x1, y1));
+                    self.box_select = (!done).then_some(rect);
+                    if done {
+                        self.select_box(rect, width, height, add);
+                    }
+                }
+                Navigate::Hover { x, y, width, height } if self.rebar_hover(x, y, width, height) || self.rebar_area_hover(x, y, width, height) => {}
+                Navigate::Hover { x, y, width, height } if self.grab_hover(x, y, width, height) => {}
+                Navigate::Hover { x, y, width, height } if self.sketch_hover(x, y, width, height) => {}
+                Navigate::Hover { x, y, width, height } if self.edit_hover(x, y, width, height) => {}
+                Navigate::Hover { x, y, width, height } if self.model_hover(x, y, width, height) || self.grid_hover(x, y, width, height) => {}
                 Navigate::Hover { x, y, width, height } => {
                     self.hover_request = Some((x, y, width, height));
                     self.update_hover();
+                    if self.measure.tool.is_none() && !self.plane_picking {
+                        return self.hover_structural(x, y, width, height);
+                    }
                 }
                 Navigate::HoverOff => {
+                    self.modeller.cursor = None;
+                    self.modeller.rebar_at = None;
+                    self.modeller.aim = None;
+                    if let Some(sketch) = &mut self.modeller.sketch { sketch.cursor = None; }
                     self.hover_request = None;
                     self.measure.hover = None;
+                    self.structural_hover_off();
                 }
-            },
+                Navigate::Pinch { dx, dy, steps, x, y, width, height } => {
+                    self.anim = None;
+                    self.measure.hover = None;
+                    self.camera.pan(dx, dy, height);
+                    self.wheel_zoom(steps, x, y, width, height);
+                }
+                }
+            }
+            Message::ContextMenu(item) => {
+                let at = self.context_menu.take();
+                let message = match item {
+                    MenuItem::PivotHere => {
+                        if let Some(at) = at {
+                            self.place_pivot(at.x, at.y);
+                        }
+                        return Task::none();
+                    }
+                    MenuItem::ClearPivot => {
+                        self.clear_pivot();
+                        return Task::none();
+                    }
+                    MenuItem::Hide => Message::HideSelection,
+                    MenuItem::Isolate => Message::IsolateSelection,
+                    MenuItem::ShowAll => Message::ShowAllElements,
+                    MenuItem::SelectLayer => Message::SelectLayerOfSelection,
+                    MenuItem::Undo => Message::Undo,
+                    MenuItem::Delete => Message::DeletePicked,
+                    MenuItem::ClearSelection => {
+                        self.sel.clear();
+                        self.selection_changed();
+                        self.set_structural_selection(Vec::new());
+                        return Task::none();
+                    }
+                };
+                return self.update(message);
+            }
+            Message::CloseContextMenu => self.context_menu = None,
             Message::ApplyView(i) => self.apply_view(i),
-            Message::ToggleGrids => self.show_grids = !self.show_grids,
+            Message::ToggleGrids => {
+                self.show_grids = !self.show_grids;
+                if !self.show_grids {
+                    self.picked_grid = None;
+                }
+            }
+            Message::ToggleViewGroup(group) => {
+                if !self.collapsed_view_groups.remove(group) { self.collapsed_view_groups.insert(group); }
+            }
             Message::ToggleExplorer(i) => {
                 if let Some(open) = self.explorer_open.get_mut(i) {
                     *open = !*open;
                 }
             }
+            Message::ExplorerTab(tab) => self.explorer_tab = tab,
+            Message::Library(message) => return self.library_update(message),
+            Message::Docs(message) => return self.docs_update(message),
+            Message::Libraries(message) => return self.libraries_update(message),
+            Message::Standard(message) => return self.standard_update(message),
+            Message::BuildUp(message) => return self.buildup_update(message),
+            Message::Material(message) => return self.material_update(message),
+            Message::Code(message) => return self.code_update(message),
+            Message::Object(message) => self.object_update(message),
+            Message::Connection(message) => self.connection_update(message),
+            Message::Service(message) => self.service_update(message),
+            Message::JoinType(id) => self.set_join_type(&id),
+            Message::Online(message) => return self.online_update(message),
+            Message::DrawingSet(message) => self.drawing_set_update(message),
+            Message::ViewTemplate(message) => self.view_template_update(message),
+            Message::House(message) => return self.house_update(message),
+            Message::Profile(message) => return self.profile_update(message),
+            Message::SystemType(message) => return self.system_update(message),
+            #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
+            Message::Collab(event) => return self.collab_update(event),
+            #[cfg(all(feature = "pointcloud", not(target_arch = "wasm32")))]
+            Message::Pointcloud(event) => return self.pointcloud_update(event),
+            Message::NewLevel(word) => {
+                // the form is in the Levels tab
+                self.explorer_tab = ExplorerTab::Levels;
+                self.new_level(word);
+            }
+            Message::LevelName(name) => {
+                if let Some(form) = &mut self.level_form {
+                    form.name = name;
+                }
+            }
+            Message::LevelElevation(elevation) => {
+                if let Some(form) = &mut self.level_form {
+                    form.elevation = elevation;
+                }
+            }
+            Message::AddLevel => self.add_level(),
+            Message::CancelLevel => self.level_form = None,
+            Message::RemoveLevel(path) => {
+                if self.document.remove_level(&path) {
+                    // what reached it with its top keeps its height
+                    self.free_tops_of(&path);
+                }
+            }
+            Message::NewPlan(level) => {
+                self.new_plan(&level);
+                self.tag_plans();
+            }
+            Message::NewPlanOf(level, kind, word) => {
+                self.new_plan_of(&level, kind, word);
+                self.tag_plans();
+            }
+            Message::PickLevelFor(kind) => {
+                // the levels to pick from are listed in the Views tab
+                if let Some(kind) = kind {
+                    self.collapsed_view_groups.remove(kind.key());
+                    self.explorer_tab = ExplorerTab::Views;
+                }
+                self.views_picker = kind;
+            }
+            Message::OpenPlan(plan) => self.open_plan(&plan),
+            Message::RemovePlan(plan) => {
+                self.close_plan(&plan);
+                self.document.remove_plan(&plan);
+                self.cuts.remove(&*plan);
+                self.cut_epoch += 1;
+            }
+            Message::NewView3d(word) => self.new_view_3d(word),
+            Message::RemoveView3d(view) => {
+                self.close_plan(&view);
+                self.document.remove_view_3d(&view);
+            }
+            Message::NewSheet(name) => self.new_sheet(name),
+            Message::ArrangeSheet(sheet) => self.arrange_sheet(&sheet),
+            Message::FillSheets(names) => self.fill_sheets(names),
+            Message::OpenDocSheet(sheet) => self.open_doc_sheet(&sheet),
+            Message::RemoveSheet(sheet) => {
+                self.close_doc_sheet(&sheet);
+                self.document.remove_sheet(&sheet);
+            }
+            Message::PlaceOnSheet(sheet, plan) => self.place_on_sheet(&sheet, &plan),
+            Message::MoveOnSheet(sheet, i, at) => {
+                self.document.put_placed(&sheet, i, at);
+            }
+            Message::DimensionTool(on) => {
+                self.dimension_tool = on;
+                if on {
+                    self.section_tool = false;
+                    self.note_tool = false;
+                    // the view in its tab is cut, to snap to its lines
+                    if let Some(view) = self.shown_view().map(str::to_string) {
+                        self.cut_view(&view);
+                    }
+                }
+                self.pick_on_sheet(None);
+                self.mark_pick = None;
+            }
+            Message::LevelTool(on) => {
+                let _ = self.update(Message::NoteTool(on));
+                self.level_tool = on;
+            }
+            Message::AddLevelMark(view, at) => {
+                self.document.add_level_mark(&view, at);
+            }
+            Message::NoteTool(on) => {
+                self.level_tool = false;
+                self.note_tool = on;
+                if on {
+                    self.section_tool = false;
+                    self.dimension_tool = false;
+                    if self.mark_pick.is_some() || self.sheet_pick.is_some() {
+                        self.note_text.clear();
+                    }
+                }
+                self.pick_on_sheet(None);
+                self.mark_pick = None;
+            }
+            Message::NoteText(wording) => self.note_text_changed(wording),
+            Message::DrawTool(kind) => {
+                // the same tool again switches it off
+                self.draw_tool = kind.filter(|k| self.draw_tool != Some(*k));
+                if self.draw_tool.is_some() {
+                    self.dimension_tool = false;
+                    self.section_tool = false;
+                    self.note_tool = false;
+                    self.mark_pick = None;
+                }
+            }
+            Message::AddLines(view, lines) => {
+                self.document.add_view_lines(&view, &lines);
+            }
+            Message::AddShape(view, kind, lines) => {
+                match kind.shape() {
+                    Some(shape) => self.document.add_view_shape(&view, shape, &lines),
+                    None => self.document.add_view_lines(&view, &lines),
+                };
+            }
+            Message::AddNote(view, at, wording) => {
+                self.document.add_note(&view, at, &wording);
+            }
+            Message::MoveNote(view, k, at) => {
+                if self.document.move_pile_tag(&view, k, at) {
+                    self.tag_plans();
+                } else {
+                    self.document.move_note(&view, k, at);
+                }
+            }
+            Message::PickMark(pick) => self.pick_mark(pick),
+            Message::RemoveMark => self.remove_mark(),
+            Message::ExplodeDrawn => {
+                self.explode_drawn();
+            }
+            Message::OffsetTool => self.toggle_offset(),
+            Message::PairEdit(kind) => self.toggle_pair_edit(kind),
+            Message::PairSize(typed) => {
+                if let Some(e) = self.modeller.pair_edit.as_mut() {
+                    e.size = typed;
+                }
+            }
+            Message::OffsetText(typed) => {
+                if let Some(text) = self.modeller.offset.as_mut() {
+                    *text = typed;
+                }
+            }
+            Message::ArmDimensionReference(target) => self.reference_target = target,
+            Message::InsertDimensionReference(view, index, at) => {
+                let anchor = self.document.plan(&view).and_then(|_| self.anchor_at(at));
+                self.document.insert_dimension_reference(&view, index, at, anchor);
+                self.reference_target = None;
+            }
+            Message::AddChainTotal(view, index) => { self.document.add_dimension_chain_total(&view, index); }
+            Message::RemoveDimensionReference(view, index, reference) => {
+                self.document.remove_dimension_reference(&view, index, reference);
+                self.reference_target = None;
+            }
+            Message::FlipDimension => self.flip_dimension(),
+            Message::DimensionLook(edit) => self.edit_dimension_look(edit),
+            Message::StandardDimensions(view) => {
+                self.standard_dimensions(&view);
+            }
+            Message::AddUnderlay(level) => return self.add_underlay(level),
+            Message::UnderlayRead(level, name, read) => self.underlay_read(&level, &name, read),
+            Message::ToggleUnderlay(i) => self.toggle_underlay(i),
+            Message::RemoveUnderlay(i) => self.remove_underlay(i),
+            Message::UnderlayScale(i) => self.next_underlay_scale(i),
+            Message::ToggleViewsIn3d => {
+                // off: also the views laid in the 3D view one by one go
+                if self.views_in_3d || !self.projected.is_empty() {
+                    self.views_in_3d = false;
+                    self.projected.clear();
+                } else {
+                    self.views_in_3d = true;
+                }
+            }
+            Message::ToggleAmbient => self.ambient = !self.ambient,
+            Message::MouseButtons(buttons) => self.mouse_buttons = buttons,
+            Message::CloudColor(color) => self.cloud_color = color,
+            Message::Field(change) => self.change_field(change),
+            Message::ToggleCloudDepth => self.cloud_depth = !self.cloud_depth,
+            Message::AnalysisScale(typed) => {
+                if let Some(change) = self.type_analysis_scale(typed) {
+                    let kept = self.analysis_scale.take();
+                    let task = self.update(Message::Analysis(change));
+                    self.analysis_scale = kept;
+                    return task;
+                }
+            }
+            Message::AnalysisScaleDone => self.analysis_scale = None,
+            Message::Analysis(change) => {
+                self.analysis_scale = None;
+                let kinds = (self.analysis.hide_nodes, self.analysis.hide_members);
+                let doc = self.model.as_ref().and_then(|m| m.structural.first()).map(|p| p.doc.clone());
+                let (cases, sets) = doc.as_ref().map_or((0, 0), |d| (d.load_cases.len(), d.results.len()));
+                self.analysis.apply(change, cases, sets);
+                // which load case and result set that is
+                if let Some(doc) = doc {
+                    let case = self.analysis.loads.and_then(|k| doc.load_cases.get(k)).map(|c| format!("Loads: {}", c.name));
+                    let set = (self.analysis.force.is_some() || self.analysis.deformed || self.analysis.reactions).then(|| doc.results.get(self.analysis.set).map(|r| format!("Results: {}", r.name))).flatten();
+                    let said: Vec<String> = [case, set].into_iter().flatten().collect();
+                    if !said.is_empty() {
+                        self.status = Status::Loaded(said.join(" · "));
+                    }
+                }
+                self.refresh_overlay();
+                if kinds != (self.analysis.hide_nodes, self.analysis.hide_members) {
+                    self.refresh_structural_visibility();
+                }
+            }
+            Message::ToggleGridHeadsHidden => self.grid_heads_hidden = !self.grid_heads_hidden,
+            Message::ToggleGridDims => self.grid_dims = !self.grid_dims,
+            Message::ToggleLevels3d => self.levels_3d = !self.levels_3d,
+            Message::ExportMenu(open) => self.export_menu = open,
+            Message::ExportDrawing(format) => {
+                self.export_menu = false;
+                return self.export_drawing(format);
+            }
+            Message::Exported(None) => {}
+            Message::Exported(Some(result)) => {
+                self.status = match result {
+                    Ok((path, secs)) => {
+                        let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        Status::Loaded(format!("Exported {file} in {secs:.2} s"))
+                    }
+                    Err(e) => Status::Error(e),
+                };
+            }
+            // in Docs Backspace goes to the folder above, as in a file manager
+            Message::DeletePicked if self.docs.shown => return self.docs_update(DocsMessage::Up),
+            Message::DeletePicked => {
+                if self.tool_backspace() {
+                    // a length typed for what a tool draws: its last character goes
+                } else if self.grab_backspace() {
+                    // a distance typed in a grab: its last character goes
+                } else if self.edit_backspace() {
+                    // a distance being typed: its last character goes
+                } else if self.sketch_delete() {
+                    // in the sketch of a floor: the picked line goes
+                } else if self.modeller.edit.is_some() {
+                    // in edit mode Delete takes nothing: the element stays
+                } else if self.delete_modelled() | self.delete_picked_grid() | self.remove_lines_picked() {
+                    // modelled elements selected, the picked grid lines of the modelled project
+                    // and the picked lines drawn on the view: they go
+                } else if self.active_doc_sheet.is_some() {
+                    if self.sheet_pick.is_some() {
+                        self.remove_picked();
+                    }
+                } else if self.mark_pick.is_some() {
+                    self.remove_mark();
+                }
+            }
+            Message::PickOnSheet(pick) => self.pick_on_sheet(pick),
+            Message::GrabView(view) => self.grab_view(view),
+            Message::ReleaseView(view) => {
+                let carried = self.dragging_view.take();
+                if carried.is_none_or(|c| c == view) {
+                    self.open_plan(&view);
+                }
+            }
+            Message::DropOnSheet(view, at) => self.drop_on_sheet(&view, at),
+            Message::LetGoView => self.dragging_view = None,
+            Message::CropPlan(plan, crop) => {
+                if self.document.set_crop(&plan, crop) {
+                    self.tag_plans();
+                    self.fit_plan_section(&plan);
+                }
+            }
+            Message::RemovePicked => self.remove_picked(),
+            Message::SetPlacedTitle(sheet, i, show) => self.document.set_placed_title(&sheet, i, show),
+            Message::SetScale(sheet, i, scale) => {
+                self.scale_placed_view(&sheet, i, scale);
+            }
+            Message::ProjectAddress(value) => self.document.set_project_address(value),
+            Message::SheetRevision(sheet, row, date, value) => self.document.set_revision(&sheet, row, date, value),
+            Message::SheetField(sheet, field, value) => self.document.set_title_value(&sheet, field, value),
+            Message::SetPaper(sheet, paper) => {
+                self.document.set_paper(&sheet, paper);
+            }
+            Message::CutText(text) => {
+                if let Some((_, t)) = &mut self.cut_edit {
+                    *t = text;
+                }
+            }
+            Message::ApplyCut => self.apply_cut(),
+            Message::AddDimension(plan, from, to) => {
+                if self.document.add_dimension(&plan, from, to) {
+                    // in the Modeller its ends hold on to the elements they were clicked on
+                    self.anchor_last_dimension(&plan);
+                }
+            }
+            Message::DimensionValue(text) => self.modeller.dimension_value = Some(text),
+            Message::DimensionValueApply => self.apply_dimension_value(),
+            Message::SelectTab(i) => return self.select_tab(i),
+            Message::RemoveSection(path) => {
+                self.close_plan(&path);
+                self.document.remove_section(&path);
+                self.cuts.remove(&*path);
+                self.cut_epoch += 1;
+            }
+            Message::MakeElevations(names) => self.make_elevations(names),
+            Message::NewSection(from, to, word) => {
+                self.section_tool = false;
+                self.new_section(from, to, word);
+            }
+            Message::DrawingOnPaper(on) => self.drawing_on_paper = on,
+            Message::SectionTool(on) => {
+                self.section_tool = on;
+                if on {
+                    self.dimension_tool = false;
+                    self.note_tool = false;
+                    // a floor plan in its tab is cut, to snap to its lines
+                    if let Some(view) = self.shown_view().map(str::to_string) {
+                        self.cut_view(&view);
+                    }
+                }
+                self.pick_on_sheet(None);
+            }
+            Message::CloseTab(i) => return self.close_tab(i),
             Message::OpenSheet(i) => return self.open_sheet(i),
+            Message::OpenDraft(i) => return self.open_draft(i),
+            Message::PickDraft(pick) => self.draft_pick = pick,
             Message::ShowSheet(i) => return self.show_sheet(i),
             Message::CloseSheet(i) => return self.close_sheet(i),
             Message::SheetView(view) => return self.sheet_view(view),
             Message::OpenSchedule(i) => return self.open_schedule(i),
             Message::ShowSchedule(i) => return self.show_schedule(i),
             Message::CloseSchedule(i) => return self.close_schedule(i),
+            Message::ExportSchedules => return self.export_schedules(),
             Message::ScheduleRow(s, r) => self.select_row(s, r),
             Message::ScheduleScroll(v) => return self.scrolled(v),
+            Message::OpenIfc => return self.open_ifc(),
+            Message::CloseIfc => self.close_ifc(),
+            Message::IfcView(view) => return self.ifc_show_view(view),
+            Message::IfcScroll(view, v) => return self.ifc_scrolled(view, v),
+            Message::IfcPick(node) => self.ifc_pick(node),
+            Message::IfcToggle(key) => self.ifc_toggle(key),
+            Message::IfcRelation(relation) => return self.ifc_relation(relation),
+            Message::IfcQuery(query) => return self.ifc_query(query),
+            Message::IfcNext(forward) => return self.ifc_next(forward),
+            Message::Drawings(id, drawings) => return self.take_drawings(id, *drawings),
+            Message::CutAhead(epoch, view, cut) => return self.take_cut(epoch, view, cut),
+            Message::CutFaces(key, faces) => return self.take_cut_faces(*key, faces),
             Message::Schedules(id, schedules) => {
                 if self.model.as_ref().is_some_and(|m| m.id == id) {
                     self.schedules = schedules;
@@ -1011,6 +3148,7 @@ impl App {
                     s.turn_by(degrees.to_radians() - s.turn);
                 }
             }
+            Message::Pressed(fingers) => self.fingers = fingers,
             Message::Tick => {
                 if let Some((from, to, start)) = self.anim {
                     let t = (start.elapsed().as_secs_f32() / ANIM_SECONDS).min(1.0);
@@ -1020,6 +3158,7 @@ impl App {
                         self.anim = None;
                     }
                 }
+                self.update_heads_seen();
                 self.update_hover();
             }
             Message::TogglePlane => {
@@ -1073,7 +3212,20 @@ impl App {
                 self.explode = [0.0; 3];
                 self.update_explode();
             }
+            Message::MoveModelByPoints => {
+                if let Some(i) = self.picked_model.filter(|&i| i < self.models.len() && self.model.is_some()) {
+                    self.moving_model = Some((i, self.measure.results.len()));
+                    self.measure.picks.clear();
+                    self.measure.tool = Some(Tool::Line);
+                    self.plane_picking = false;
+                    if self.explode_on {
+                        self.explode_on = false;
+                        self.update_explode();
+                    }
+                }
+            }
             Message::Measure(tool) => {
+                self.moving_model = None;
                 self.measure.toggle(tool);
                 if self.measure.tool.is_some() {
                     self.plane_picking = false;
@@ -1083,7 +3235,19 @@ impl App {
                     }
                 }
             }
+            // Enter while a distance is typed in a move puts the move down
+            Message::MeasureFinish if self.tool_enter() => {}
+            Message::MeasureFinish if self.modeller.rebar_edit.is_some() => self.rebar_action(reinforcement::Action::Finish),
+            Message::MeasureFinish if self.modeller.sketch.is_some() => self.finish_sketch(),
+            Message::MeasureFinish if self.modeller.tool.is_some() => self.set_model_tool(None),
+            // in Docs Enter opens the picked file
+            Message::MeasureFinish if self.docs.shown => return self.docs_update(DocsMessage::Enter),
+            Message::MeasureFinish if self.put_grab_down() => {}
+            Message::MeasureFinish if self.edit_enter() => {}
+            // Enter while Rotate waits for its centre: about the 3D cursor
+            Message::MeasureFinish if self.rotate_about_cursor3d() => {}
             Message::MeasureFinish => self.measure.finish(),
+            Message::StructuralGrid(built) => return self.structural_grid_built(built),
             Message::MeasureEdges(edges) => {
                 if self.model.as_ref().is_some_and(|m| m.id == edges.0) {
                     self.measure.add_edges(edges.1);
@@ -1095,6 +3259,7 @@ impl App {
                     }
                 }
             }
+            Message::MeasureNote(text) => self.measure.note = text,
             Message::MeasureDelete(i) => {
                 if i < self.measure.results.len() {
                     self.measure.results.remove(i);
@@ -1118,11 +3283,69 @@ impl App {
                     Category::Angle => u.angle_decimals = n,
                 }
             }
+            Message::Undo => self.undo_step(),
+            Message::Redo => self.redo_step(),
+            Message::SelectWhere(key, value) => {
+                if let Some(model) = self.model.clone() {
+                    self.sel.clear();
+                    self.sel.extend(model.elements_with(&key, &value).into_iter().map(Pickable::Element));
+                    self.selection_changed();
+                }
+            }
+            Message::SelectLayerOfSelection => self.select_layer_of_selection(),
+            Message::HideSelection => self.hide_selection(),
+            Message::IsolateSelection => self.isolate_selection(),
+            Message::ShowAllElements => self.show_all_elements(),
+            Message::Escape if self.reference_target.is_some() => self.reference_target = None,
             Message::Escape if self.plane_picking => self.plane_picking = false,
+            Message::Escape if self.moving_model.is_some() => {
+                self.moving_model = None;
+                self.measure.picks.clear();
+                self.measure.hover = None;
+                self.measure.tool = None;
+            }
+            Message::Escape if self.modeller.grab.is_some() => {
+                self.drop_grab();
+            }
+            Message::Escape if self.modeller.temp_dim.is_some() => {
+                self.temp_dim_escape();
+            }
+            Message::Escape if self.modeller.sketch.is_some() => {
+                self.sketch_escape();
+            }
+            Message::Escape if self.modeller.slab_drag.is_some() => {
+                self.slab_escape();
+            }
+            Message::Escape if self.modeller.edit.is_some() => {
+                self.edit_escape();
+            }
+            Message::Escape if self.modeller.rebar_edit.is_some() => self.rebar_action(reinforcement::Action::Cancel),
+            Message::Escape if self.modeller.transform.is_some() => {
+                self.escape_transform();
+            }
+            Message::Escape if self.modeller.offset.is_some() => self.modeller.offset = None,
+            Message::Escape if self.modeller.pair_edit.is_some() => {
+                self.escape_pair_edit();
+            }
+            // Esc drops a length being typed first; the tool goes on drawing
+            Message::Escape if !self.modeller.length_typed.is_empty() => self.modeller.length_typed.clear(),
+            Message::Escape if self.modeller.grid_tool => self.escape_grid_tool(),
+            Message::Escape if self.modeller.rebar_tool.is_some() => self.escape_rebar_tool(),
+            Message::Escape if self.modeller.tool.is_some() || self.modeller.refusal.is_some() => {
+                if !self.escape_model_tool() {
+                    self.modeller.refusal = None;
+                }
+            }
+            // in the Modeller a tool still on goes, back to Select, before the selection does
+            Message::Escape if self.modeller.in_modeller && self.context_menu.is_none() && self.modeller_escape() => {}
             Message::Escape => {
+                if self.context_menu.take().is_some() {
+                    return Task::none();
+                }
                 if !self.measure.escape() {
-                    self.selected = None;
-                    self.selection.clear();
+                    self.sel.clear();
+                    self.selection_changed();
+                    self.set_structural_selection(Vec::new());
                 }
             }
         }
@@ -1133,6 +3356,7 @@ impl App {
         let ticks = if matches!(self.status, Status::Loading { .. } | Status::Saving { .. })
             || self.anim.is_some()
             || self.hover_request.is_some()
+            || self.heads_stale()
         {
             window::frames().map(|_| Message::Tick)
         } else {
@@ -1140,6 +3364,8 @@ impl App {
         };
         let events = event::listen_with(|event, status, _window| match event {
             iced::Event::Window(window::Event::FileDropped(path)) => Some(Message::Open(path)),
+            iced::Event::Touch(iced::touch::Event::FingerPressed { .. }) => Some(Message::Pressed(true)),
+            iced::Event::Mouse(iced::mouse::Event::ButtonPressed(_)) => Some(Message::Pressed(false)),
             iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
                 if status == event::Status::Ignored =>
             {
@@ -1151,6 +3377,11 @@ impl App {
                 match key.as_ref() {
                     Key::Named(Named::Home) => Some(Message::Preset(ViewPreset::Iso)),
                     Key::Named(Named::Enter) => Some(Message::MeasureFinish),
+                    // what is picked on a sheet or a view; not while a text field takes the key
+                    Key::Named(Named::Delete | Named::Backspace) => Some(Message::DeletePicked),
+                    // through the list of files of Docs, as in a file manager
+                    Key::Named(Named::ArrowUp) => Some(Message::Docs(DocsMessage::Step(-1))),
+                    Key::Named(Named::ArrowDown) => Some(Message::Docs(DocsMessage::Step(1))),
                     _ => None,
                 }
             }
@@ -1160,7 +3391,16 @@ impl App {
         // files from the page: `?file=URL` and drag and drop
         #[cfg(target_arch = "wasm32")]
         let remote = Subscription::batch([remote, crate::web::subscription()]);
-        Subscription::batch([events, ticks, remote])
+        // a view carried from the Views list is let go wherever the button goes up
+        let letting_go = if self.dragging_view.is_some() {
+            event::listen_with(|event, _, _| match event {
+                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => Some(Message::LetGoView),
+                _ => None,
+            })
+        } else {
+            Subscription::none()
+        };
+        Subscription::batch([events, ticks, remote, letting_go])
     }
 
     pub fn view(&self) -> Element<'_, Message> {
@@ -1177,9 +3417,105 @@ impl App {
     /// whole layer when the format has no elements); empty space clears the selection. While
     /// placing the section plane, puts it on the face under the cursor instead; while measuring,
     /// hands the click to the measure tool, with what is highlighted under the cursor.
-    pub(crate) fn pick(&mut self, x: f32, y: f32, width: f32, height: f32) {
+    /// A right click (or a long press) at (x, y): what lies there is selected, unless it already
+    /// is; empty space keeps the selection. The menu opens there.
+    fn context_click(&mut self, x: f32, y: f32, width: f32, height: f32) {
+        let Some(model) = self.model.clone() else { return };
+        if self.plane_picking {
+            return;
+        }
+        let (width, height) = (width.max(1.0), height.max(1.0));
+        let (origin, dir, hit) = self.cast(&model, x, y, width, height);
+        let mm = self.model_matrix();
+        let triangle = hit.and_then(|(l, t, s)| face_at(&model.layers[l], t, origin - s, dir).map(|(p, _)| mm.transform_point3(p + s)));
+        if let Some(h) = self.pick_structural(x, y, width, height, triangle) {
+            if !self.structural.selected.contains(&h.element) {
+                self.click_structural(h.element, false);
+            }
+        } else if let Some(g) = self.grid_under(x, y, width, height, triangle) {
+            // a grid line not picked yet is picked, so the menu's Delete takes it
+            if !self.grids_picked().contains(&g) {
+                self.pick_grid(Some(g));
+            }
+        } else if let Some(item) = hit.map(|(l, t, _)| pickable_at(&model, l, t)) {
+            if !self.sel.contains(item) {
+                self.click(Some(item), false);
+            }
+        }
+        self.context_menu = Some(Vec2::new(x, y));
+    }
+
+    /// Moving a model by two points: once the line between them is drawn, the model moves by it
+    /// (its zero point along) and the line is not kept.
+    fn move_model_by_line(&mut self) {
+        let Some((i, before)) = self.moving_model else { return };
+        if self.measure.results.len() <= before {
+            return;
+        }
+        let line = match self.measure.results.pop() {
+            Some(crate::measure::Measurement::Mark { points, .. }) if points.len() == 2 => Some((points[0], points[1])),
+            _ => None,
+        };
+        self.moving_model = None;
+        self.measure.tool = None;
+        self.measure.picks.clear();
+        self.measure.hover = None;
+        let Some((from, to)) = line else { return };
+        // the scene's frame: the points are in the view's, which may be turned up
+        let by = self.model_matrix().inverse().transform_vector3(to - from).as_dvec3();
+        let Some(entry) = self.models.get_mut(i) else { return };
+        entry.placed.moved += by;
+        let name = entry.model.file_name();
+        self.replace_models();
+        self.status = Status::Loaded(format!("{name} moved by {:.3}, {:.3}, {:.3} m", by.x, by.y, by.z));
+    }
+
+    /// Something is selected: elements or layers, or structural objects picked by a click.
+    pub(crate) fn has_selection(&self) -> bool {
+        !self.sel.is_empty() || !self.structural.selected.is_empty()
+    }
+
+    /// The selection as unit keys, the structural objects picked by a click included.
+    fn selection_keys(&self) -> impl Iterator<Item = UnitKey> + '_ {
+        let structural = self.structural.selected.iter().map(|&id| Pickable::Element(id));
+        self.sel.items().iter().copied().chain(structural).map(|i| self.item_key(i))
+    }
+
+    pub(crate) fn pick(&mut self, x: f32, y: f32, width: f32, height: f32, add: bool) {
         let Some(model) = self.model.clone() else { return };
         let (width, height) = (width.max(1.0), height.max(1.0));
+        // a click puts grabbed elements down
+        if self.put_grab_down() {
+            return;
+        }
+        if self.rebar_point_click(x,y,width,height) { return; }
+        if self.sketch_click(x, y, width, height) {
+            return;
+        }
+        if self.modeller.transform.is_some() {
+            return self.transform_click(x, y, width, height);
+        }
+        if self.modeller.offset.is_some() {
+            return self.offset_click(x, y, width, height);
+        }
+        if self.modeller.pair_edit.is_some() {
+            return self.pair_click(x, y, width, height);
+        }
+        if self.modeller.grid_tool {
+            return self.grid_click(x, y, width, height);
+        }
+        if self.modeller.curtain.is_some() {
+            return self.curtain_click(x, y, width, height, add);
+        }
+        if self.modeller.rebar_on.is_some() {
+            return self.rebar_second(x, y, width, height);
+        }
+        if self.modeller.tool.is_some() {
+            return self.model_click(x, y, width, height);
+        }
+        if self.modeller.edit.is_some() {
+            return self.edit_click();
+        }
         if let Some(tool) = self.measure.tool.filter(|_| !self.plane_picking) {
             let screen = self.screen(width, height);
             let holds = self.hover_scene_holds() && self.measure.hover.as_ref().is_some_and(|h| h.holds_for(&screen, Vec2::new(x, y)));
@@ -1188,9 +3524,13 @@ impl App {
             }
             let Some(hover) = self.measure.hover.clone() else { return };
             self.measure.click(&model, &hover, &self.model_matrix());
+            if self.moving_model.is_some() {
+                self.move_model_by_line();
+                return;
+            }
             // the measured element is also selected (shows its properties)
             if tool == Tool::Volume {
-                self.select(&model, Some((hover.layer, hover.triangle)));
+                self.click(Some(pickable_at(&model, hover.layer, hover.triangle)), false);
             }
             return;
         }
@@ -1213,18 +3553,356 @@ impl App {
             }
             return;
         }
-        self.select(&model, hit.map(|(l, t, _)| (l, t)));
+        // a grid line, unless a triangle lies clearly in front of it (its bubbles always); then a
+        // structural node or member, the same; Ctrl adds or removes it, keeping the rest of the
+        // selection
+        let mm = self.model_matrix();
+        let triangle = hit.and_then(|(l, t, s)| face_at(&model.layers[l], t, origin - s, dir).map(|(p, _)| mm.transform_point3(p + s)));
+        // (a reinforcement tool takes the element under the cursor, also where a grid line lies on it)
+        let reinforcing = self.modeller.rebar_tool.is_some();
+        if let Some(g) = self.grid_under(x, y, width, height, triangle).filter(|_| !reinforcing) {
+            // with Shift or Ctrl it joins the grid lines picked, or leaves them
+            if add {
+                let mut grids = self.grids_picked();
+                match grids.iter().position(|&p| p == g) {
+                    Some(k) => drop(grids.remove(k)),
+                    None => grids.push(g),
+                }
+                return self.set_picked_grids(grids);
+            }
+            return self.pick_grid(Some(g));
+        }
+        if let Some(h) = self.pick_structural(x, y, width, height, triangle).filter(|_| !reinforcing) {
+            self.click_structural(h.element, add);
+            return;
+        }
+        // a click that hits no body takes the modelled element whose line it is beside: a curtain
+        // wall or a beam seen from above is too thin to click on
+        if hit.is_none() && self.modeller.in_modeller {
+            if let Some(near) = self.element_near(x, y, width, height).and_then(|id| self.shown_modelled(id)) {
+                return self.click(Some(Pickable::Element(near)), add);
+            }
+        }
+        self.click(hit.map(|(l, t, _)| pickable_at(&model, l, t)), add);
+        // a reinforcement tool: what is clicked is reinforced, or its stretch or line starts there
+        if let Some(tool) = self.modeller.rebar_tool {
+            self.rebar_first(tool, x, y, width, height);
+        }
     }
 
     /// Selects the element of triangle `t` of layer `l` (the whole layer without elements), or
     /// nothing.
-    fn select(&mut self, model: &Model, hit: Option<(usize, usize)>) {
-        self.selected = hit.map(|(l, t)| (l, model.layers[l].element_at(t)));
-        self.selection = match self.selected {
-            Some((_, Some(id))) => model.element_ranges(id),
-            Some((l, None)) => vec![(l, 0, model.layers[l].indices.len() as u32)],
-            None => Vec::new(),
+    /// A click on `hit` (None: empty space). Without `add` it selects only `hit`, so empty space
+    /// clears; with `add` (Ctrl) it adds or removes `hit` and keeps the selection on empty space.
+    pub(crate) fn click(&mut self, hit: Option<Pickable>, add: bool) {
+        // structural objects are selected apart (`app::structural`); a plain click replaces them too
+        if !add {
+            self.set_structural_selection(Vec::new());
+        }
+        match (hit, add) {
+            (Some(item), true) => self.sel.toggle(item),
+            (None, true) => return,
+            (hit, false) => self.sel.set(hit),
+        }
+        if !add { self.expand_rebar_pick(); }
+        self.selection_changed();
+    }
+
+    /// After `sel` changed: the shown element (the first picked), the index ranges and the flags
+    /// of the units.
+    pub(crate) fn selection_changed(&mut self) {
+        // a grid is picked alone
+        self.picked_grid = None;
+        // the Modeller's explorer shows what is selected
+        self.explorer_follow_selection();
+        let model = self.model.clone();
+        self.selected = model.as_deref().and_then(|m| match self.sel.primary()? {
+            Pickable::Element(id) => Some((m.layers.iter().position(|l| l.elements.iter().any(|e| e.0 == id))?, Some(id))),
+            Pickable::Layer(l) => (l < m.layers.len()).then_some((l, None)),
+        });
+        self.selection = model.as_deref().map(|m| self.sel.ranges(m)).unwrap_or_default();
+        self.update_units();
+    }
+
+    /// The stable key of a unit of the shown model.
+    pub(crate) fn unit_key(&self, owner: UnitOwner) -> UnitKey {
+        match owner {
+            UnitOwner::Element(id) => UnitKey::Element(self.model.as_ref().map_or(crate::model::ElementKey { model: 0, source: id }, |m| m.element_key(id))),
+            UnitOwner::LayerRest(l) => {
+                let (model, entry) = self.models.iter().enumerate().find(|(_, e)| e.layers.contains(&l)).map_or((0, 0..0), |(m, e)| (m, e.layers.clone()));
+                UnitKey::LayerRest { model: model as u32, layer: (l - entry.start) as u32 }
+            }
+        }
+    }
+
+    /// The unit of the shown model with `key`, if it is there.
+    #[cfg(test)]
+    pub(crate) fn unit_of_key(&self, key: UnitKey) -> Option<usize> {
+        let index = self.explode_index.as_ref()?;
+        match key {
+            UnitKey::Element(k) => index.element_unit(self.model.as_ref()?.element_with_key(k)?),
+            UnitKey::LayerRest { model, layer } => {
+                let start = self.models.get(model as usize).map_or(0, |e| e.layers.start);
+                index.layer_rest_unit(start + layer as usize)
+            }
+        }
+    }
+
+    /// The state the renderer gets per unit: the explode offsets and the selected flags.
+    fn update_units(&mut self) {
+        let Some(index) = self.explode_index.clone() else {
+            self.units = Arc::default();
+            self.unit_looks = Arc::default();
+            return;
         };
+        let mut flags = vec![0u8; index.len()];
+        for &item in self.sel.items() {
+            let unit = match item {
+                Pickable::Element(id) => index.element_unit(id),
+                Pickable::Layer(l) => index.layer_rest_unit(l),
+            };
+            if let Some(f) = unit.and_then(|u| flags.get_mut(u)) {
+                *f |= UNIT_SELECTED;
+            }
+        }
+        if !self.hidden.is_empty() {
+            for (u, f) in flags.iter_mut().enumerate().skip(1) {
+                if index.owner(u).is_some_and(|o| self.hidden.contains(&self.unit_key(o))) {
+                    *f |= UNIT_HIDDEN;
+                }
+            }
+        }
+        #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
+        for &id in &self.collab.packages.hidden {
+            if let Some(flag) = index.element_unit(id).and_then(|unit| flags.get_mut(unit)) { *flag |= UNIT_HIDDEN; }
+        }
+        // a structural plan leaves out what carries nothing
+        if self.is_structural_plan(self.active_plan.as_deref()) {
+            let left_out = self.non_structural_units();
+            for (f, _) in flags.iter_mut().zip(left_out.iter()).filter(|(_, out)| **out) {
+                *f |= UNIT_HIDDEN;
+            }
+        }
+        // the open view leaves out the elements whose family shows none of their solids as it
+        // looks at them (a pile it draws as a symbol)
+        if let Some(off) = self.active_plan.as_ref().zip(self.model.as_ref()).and_then(|(p, m)| m.project.switched_off.get(p)) {
+            for (u, f) in flags.iter_mut().enumerate().skip(1) {
+                if matches!(index.owner(u), Some(crate::explode::UnitOwner::Element(id)) if off.contains(&id)) {
+                    *f |= UNIT_HIDDEN;
+                }
+            }
+        }
+        // the view of the file shown in the 3D view: what it leaves out (a Revit 3D view's
+        // categories, filters, phase and discipline; a Tekla view's filter, plans too), and how it
+        // draws the rest (colours, halftone, transparency)
+        let mut looks = Vec::new();
+        let shown_3d = self.active_view.filter(|_| self.active_plan.is_none()).zip(self.model.as_ref()).filter(|(i, m)| {
+            let key = crate::model::view3d_key(*i);
+            m.views.get(*i).is_some_and(|v| v.kind == ViewKind::ThreeD) || m.project.switched_off.contains_key(&key) || m.project.looks.contains_key(&key)
+        });
+        if let Some((i, model)) = shown_3d {
+            let key = crate::model::view3d_key(i);
+            let element = |u: usize| match index.owner(u) {
+                Some(UnitOwner::Element(id)) => Some(id),
+                _ => None,
+            };
+            if let Some(off) = model.project.switched_off.get(&key) {
+                for (u, f) in flags.iter_mut().enumerate().skip(1) {
+                    if element(u).is_some_and(|id| off.contains(&id)) {
+                        *f |= UNIT_HIDDEN;
+                    }
+                }
+            }
+            if let Some(view) = model.project.looks.get(&key) {
+                looks = (0..index.len()).map(|u| if u == 0 { [0.0; 4] } else { element(u).and_then(|id| view.get(&id)).map_or([0.0; 4], crate::units::unit_look) }).collect();
+            }
+        }
+        // the Validator's colours (the web build leaves them out)
+        #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
+        {
+            // coloured by a property: each element in the colour of its value
+            if let Some(painted) = self.painted_looks(index.len(), |u| index.owner(u)) {
+                looks = painted;
+            }
+            // a picture of clashes: their elements red and blue, the rest see-through
+            if let Some(shown) = self.clash_looks(index.len(), |u| index.owner(u)) {
+                // what is far from them is left out (its look says so: wholly see-through)
+                for (f, look) in flags.iter_mut().zip(&shown).skip(1) {
+                    if look[2] >= 1.0 {
+                        *f |= UNIT_HIDDEN;
+                    }
+                }
+                looks = shown;
+            }
+        }
+        self.unit_looks = Arc::new(looks);
+        self.units = Arc::new(unit_state(&self.explode_offsets, &flags));
+    }
+
+    /// Select layer: adds every element (and every layer without elements) of the layers the
+    /// selection touches.
+    fn select_layer_of_selection(&mut self) {
+        let Some(model) = self.model.clone().filter(|_| !self.sel.is_empty()) else { return };
+        let layers: std::collections::BTreeSet<usize> = self.selection.iter().map(|r| r.0).collect();
+        let items: Vec<Pickable> = layers
+            .into_iter()
+            .filter_map(|l| model.layers.get(l).map(|layer| (l, layer)))
+            .flat_map(|(l, layer)| {
+                if layer.elements.is_empty() {
+                    vec![Pickable::Layer(l)]
+                } else {
+                    layer.elements.iter().map(|e| Pickable::Element(e.0)).collect()
+                }
+            })
+            .collect();
+        self.sel.extend(items);
+        self.selection_changed();
+    }
+
+    /// Selects what the box `rect` (viewport pixels of a viewport of width × height) holds:
+    /// elements, and layers without elements; nothing hidden or switched off. With `add` beside
+    /// the selection, else in its place.
+    fn select_box(&mut self, rect: (Vec2, Vec2), width: f32, height: f32, add: bool) {
+        let (Some(model), Some(index)) = (self.model.clone(), self.explode_index.clone()) else { return };
+        // the elements on layers that are switched on; with every layer on, all of them
+        let all_on = self.visible.iter().all(|&v| v);
+        let shown_elements: crate::units::FastHashSet<u64> = if all_on {
+            Default::default()
+        } else {
+            model.layers.iter().enumerate().filter(|(l, _)| self.visible.get(*l).copied().unwrap_or(true)).flat_map(|(_, layer)| layer.elements.iter().map(|e| e.0)).collect()
+        };
+        let view_proj = self.camera.view_proj(width.max(1.0) / height.max(1.0)) * self.model_matrix();
+        // what the section box or plane cuts away wholly is not boxed either
+        let (section, plane, mm) = (self.active_section(), self.plane, self.model_matrix());
+        let cut_away = |u: usize| {
+            if section.is_none() && plane.is_none() {
+                return false;
+            }
+            let Some(b) = index.unit_bounds(u as u32) else {
+                return false;
+            };
+            let o = self.units.get(u).map_or(Vec3::ZERO, |s| Vec3::new(s[0], s[1], s[2]));
+            let corners = [0, 1, 2, 3, 4, 5, 6, 7].map(|i| {
+                let pick = |a: usize| if i >> a & 1 == 0 { b.min[a] } else { b.max[a] };
+                mm.transform_point3(Vec3::new(pick(0), pick(1), pick(2))) + o
+            });
+            let mut world = Bounds::empty();
+            corners.iter().for_each(|c| world.extend(c.to_array()));
+            let outside_box = section.is_some_and(|s| {
+                let local = s.local_bounds(&world);
+                (0..3).any(|a| local.max[a] < s.min[a] || local.min[a] > s.max[a])
+            });
+            outside_box || plane.is_some_and(|p| corners.iter().all(|&c| p.cuts(c)))
+        };
+        let hidden = |u: usize| {
+            let off = self.units.get(u).is_some_and(|s| s[3] as u8 & UNIT_HIDDEN != 0) || cut_away(u);
+            off || match index.owner(u) {
+                Some(UnitOwner::Element(id)) => !all_on && !shown_elements.contains(&id),
+                Some(UnitOwner::LayerRest(l)) => !self.visible.get(l).copied().unwrap_or(true) || !model.layers[l].elements.is_empty(),
+                None => true,
+            }
+        };
+        let units = crate::viewport::box_select::units_in_box(&index, &self.units, view_proj, (width, height), rect, &hidden);
+        let items: Vec<Pickable> = units
+            .into_iter()
+            .filter_map(|u| match index.owner(u)? {
+                UnitOwner::Element(id) => Some(Pickable::Element(id)),
+                UnitOwner::LayerRest(l) => Some(Pickable::Layer(l)),
+            })
+            .collect();
+        // the grid lines the box takes go with them (a selection of elements alone lets them go)
+        let mut grids = if add { self.grids_picked() } else { Vec::new() };
+        for g in self.grids_in_box(rect, width, height) {
+            if !grids.contains(&g) {
+                grids.push(g);
+            }
+        }
+        if !add {
+            self.sel.clear();
+            self.set_structural_selection(Vec::new());
+        }
+        self.sel.extend(items);
+        self.selection_changed();
+        self.set_picked_grids(grids);
+        // and the lines and shapes drawn on the view shown
+        let mut lines = if add { self.lines_picked() } else { Vec::new() };
+        for k in self.lines_in_box(rect, width, height) {
+            if !lines.contains(&k) {
+                lines.push(k);
+            }
+        }
+        if !lines.is_empty() || !add {
+            self.set_lines_picked(lines);
+        }
+    }
+
+    /// What is shown now, for undo.
+    fn view_state(&self) -> ViewState {
+        ViewState {
+            hidden: self.hidden.clone(),
+            layers: self.visible.clone(),
+            models: self.models.iter().map(|e| (e.visible, e.layer_visibility.clone())).collect(),
+        }
+    }
+
+    /// Shows what `s` says. A state from before an Add has fewer layers and models: those it has
+    /// are restored, the newer ones stay as they are.
+    fn restore_view_state(&mut self, s: ViewState) {
+        self.hidden = s.hidden;
+        for (shown, value) in self.visible.iter_mut().zip(s.layers) {
+            *shown = value;
+        }
+        for (entry, (visible, layers)) in self.models.iter_mut().zip(s.models) {
+            entry.visible = visible;
+            for (shown, value) in entry.layer_visibility.iter_mut().zip(layers) {
+                *shown = value;
+            }
+        }
+        self.update_units();
+    }
+
+    /// The stable key of a selected item.
+    fn item_key(&self, item: Pickable) -> UnitKey {
+        self.unit_key(match item {
+            Pickable::Element(id) => UnitOwner::Element(id),
+            Pickable::Layer(l) => UnitOwner::LayerRest(l),
+        })
+    }
+
+    /// Hide: the selection joins the hidden elements and empties.
+    fn hide_selection(&mut self) {
+        if !self.has_selection() {
+            return;
+        }
+        let mut hidden = (*self.hidden).clone();
+        hidden.extend(self.selection_keys());
+        self.hidden = Arc::new(hidden);
+        self.sel.clear();
+        self.selection_changed();
+        self.set_structural_selection(Vec::new());
+    }
+
+    /// Isolate: every unit of the shown models is hidden but the selected ones.
+    fn isolate_selection(&mut self) {
+        let Some(index) = self.explode_index.clone().filter(|_| self.has_selection()) else { return };
+        let keep: UnitKeySet = self.selection_keys().collect();
+        let hidden = (1..index.len()).filter_map(|u| index.owner(u)).map(|o| self.unit_key(o)).filter(|k| !keep.contains(k)).collect();
+        self.hidden = Arc::new(hidden);
+        self.update_units();
+    }
+
+    /// Show all: nothing stays hidden by Hide or Isolate; layer and model switches stay as they are.
+    fn show_all_elements(&mut self) {
+        if !self.hidden.is_empty() {
+            self.hidden = Arc::default();
+            self.update_units();
+        }
+    }
+
+    /// Whether vertex `v` of layer `l` belongs to a hidden unit, as drawn now.
+    pub(crate) fn hidden_test(&self) -> impl Fn(usize, u32) -> bool + '_ {
+        let index = self.explode_index.as_deref();
+        move |l, v| index.is_some_and(|ix| self.units.get(ix.unit(l, v)).is_some_and(|s| s[3] as u8 & UNIT_HIDDEN != 0))
     }
 
     /// The camera's view of a viewport of width × height.
@@ -1241,9 +3919,13 @@ impl App {
     /// The ray through viewport point (x, y) (model space) and the nearest visible triangle it
     /// hits: (layer, triangle, how far the exploded view moved it (model space)).
     fn cast(&mut self, model: &Model, x: f32, y: f32, width: f32, height: f32) -> (Vec3, Vec3, Option<(usize, usize, Vec3)>) {
-        let mm = self.model_matrix();
-        let inv = (self.camera.view_proj(width / height) * mm).inverse();
         let (nx, ny) = (2.0 * x / width - 1.0, 1.0 - 2.0 * y / height);
+        self.cast_from_view(model, self.camera.view_proj(width / height), nx, ny)
+    }
+
+    fn cast_from_view(&mut self, model: &Model, view_proj: glam::Mat4, nx: f32, ny: f32) -> (Vec3, Vec3, Option<(usize, usize, Vec3)>) {
+        let mm = self.model_matrix();
+        let inv = (view_proj * mm).inverse();
         let origin = inv.project_point3(Vec3::new(nx, ny, 0.0));
         let dir = inv.project_point3(Vec3::new(nx, ny, 1.0)) - origin;
         let shown = self.shown();
@@ -1256,7 +3938,8 @@ impl App {
         // the exploded view moves the triangles: their offsets back in model space
         let back = mm.inverse();
         let shift = |l: usize, i: u32| back.transform_vector3(self.explode_offset(l, i));
-        let hit = pick_triangle(model, &self.visible, origin, dir, &shift, &keep, index).map(|(l, t)| {
+        let hidden = self.hidden_test();
+        let hit = pick_triangle(model, &self.visible, origin, dir, &shift, &keep, &hidden, index).map(|(l, t)| {
             let s = model.layers[l].indices.get(3 * t).map_or(Vec3::ZERO, |&i| shift(l, i));
             (l, t, s)
         });
@@ -1312,7 +3995,7 @@ impl App {
             tab("Home", RibbonTab::Home),
             tab("View", RibbonTab::View),
             Space::new().width(Fill),
-            text("Open 3D Viewer Studio").size(12).font(FONT_BOLD).color(p.accent),
+            text("Open BIM Suite").size(12).font(FONT_BOLD).color(p.accent),
             text(" · iced").size(12).color(p.text_muted),
         ]
         .spacing(4)
@@ -1438,13 +4121,14 @@ impl App {
     // ---- panels ---------------------------------------------------------------------------
 
     fn layers_panel(&self, p: Palette) -> Element<'_, Message> {
-        let header = panel_header(p, "Layers", self.model.as_ref().map(|m| m.layers.len().to_string()));
-        panel(p, header, self.layers_body(p, standalone_language()), 220)
+        let header = panel_header(p, "Explorer", None);
+        panel(p, header, self.explorer_body(p, standalone_language()), 220)
     }
 
-    /// The explorer pane, organised as Revit's project browser: one search field, then
-    /// collapsible groups (views by kind, rooms by level, layers) with their counts.
-    pub fn layers_body(&self, p: Palette, l: Language) -> Element<'_, Message> {
+    /// The explorer's Model tab, organised as Revit's project browser: one search field, the
+    /// models, then collapsible groups (views by kind, schedules, sheets, rooms by level) with
+    /// their counts. The layers are in the right pane, per view.
+    pub fn model_body(&self, p: Palette, l: Language) -> Element<'_, Message> {
         let Some(model) = &self.model else {
             return text(l.text("Geen model geopend", "No model loaded")).size(12).color(p.text_muted).into();
         };
@@ -1468,151 +4152,214 @@ impl App {
             text(l.text("Modellen", "Models")).size(12).font(FONT_BOLD).width(Fill),
             text(self.models.len().to_string()).size(11).color(p.text_secondary), add,
         ].spacing(6).align_y(Center)).padding([2, 6]).style(move |_| p.panel_header()));
+        // what a model holds lies under it: its views, schedules, sheets, legends and levels. The
+        // scene is the models one after the other, so each has its run of them
+        let (mut views_from, mut sheets_from, mut drafts_from, mut rooms_from) = (0, 0, 0, 0);
+        // the schedules are those of the first Revit model
+        let with_schedules = self.models.iter().position(|e| e.model.format.contains("Revit")).unwrap_or(0);
         for (i, entry) in self.models.iter().enumerate() {
-            let shown = entry.visible;
+            let (shown, picked) = (entry.visible, self.picked_model == Some(i));
+            let open = !self.closed_models.contains(&i) || searching;
+            let own = &entry.model;
+            let views = views_from..(views_from + own.views.len()).min(model.views.len());
+            let sheets = sheets_from..sheets_from + own.project.sheets.len();
+            let drafts = drafts_from..drafts_from + own.project.drafts.len();
+            let rooms = rooms_from..(rooms_from + own.project.rooms.len()).min(model.project.rooms.len());
+            (views_from, sheets_from, drafts_from, rooms_from) = (views.end, sheets.end, drafts.end, rooms.end);
+
             let eye = svg(icons::handle(if shown { icons::EYE } else { icons::EYE_OFF })).width(16).height(16)
                 .style(move |_, _| svg::Style { color: Some(if shown { p.text_secondary } else { p.text_muted }) });
-            let label = column![
-                text(entry.model.file_name()).size(12).color(if shown { p.text } else { p.text_muted })
-                    .wrapping(Wrapping::WordOrGlyph),
-                text(entry.model.format.clone()).size(10).color(p.text_secondary),
-            ].spacing(2).width(Fill);
-            body = body.push(button(row![eye, label].spacing(8).align_y(Center)).padding([6, 8]).width(Fill)
-                .style(move |_, status| p.row_button(status)).on_press(Message::ModelVisible(i, !shown)));
-        }
-        body = body.push(rule::horizontal(1));
-
-        // views, by kind
-        if !model.views.is_empty() {
-            let kinds = [
-                (ViewKind::ThreeD, l.text("3D-aanzichten", "3D views")),
-                (ViewKind::Plan, l.text("Plattegronden", "Floor plans")),
-                (ViewKind::Section, l.text("Doorsneden", "Sections")),
-                (ViewKind::Elevation, l.text("Aanzichten", "Elevations")),
-                (ViewKind::Detail, l.text("Details", "Details")),
-            ];
-            let shown: Vec<usize> = (0..model.views.len())
-                .filter(|&i| hit(&model.views[i].name) || model.views[i].level.as_deref().is_some_and(|lv| hit(lv)))
-                .collect();
-            let open = self.explorer_open[0] || searching;
-            body = body.push(group_header(p, l.text("Weergaven", "Views"), Some("beta"), shown.len(), open, Message::ToggleExplorer(0)));
-            if open {
-                for (kind, label) in kinds {
-                    let items: Vec<usize> = shown.iter().copied().filter(|&i| model.views[i].kind == kind).collect();
-                    if items.is_empty() {
-                        continue;
-                    }
-                    body = body.push(subheader(label));
-                    for i in items {
-                        let active = self.active_view == Some(i);
-                        let item = button(
-                            text(model.views[i].name.clone())
-                                .size(12)
-                                .color(if active { p.accent } else { p.text })
-                                .wrapping(Wrapping::WordOrGlyph)
-                                .width(Fill),
-                        )
-                        .padding([3, 6])
-                        .width(Fill)
-                        .style(move |_, s| if active { p.ribbon_button(true, s) } else { p.row_button(s) })
-                        .on_press(Message::ApplyView(i));
-                        body = body.push(indent(item.into()));
-                    }
-                }
-            }
-        }
-
-        body = self.schedules_group(p, l, &query, body);
-        body = self.sheets_group(p, l, &query, body);
-
-        // rooms, by level (low to high, then rooms without a level)
-        let rooms = &model.project.rooms;
-        if !rooms.is_empty() {
-            let shown: Vec<&crate::model::Room> = rooms
-                .iter()
-                .filter(|r| hit(&r.name) || hit(&r.number) || r.extra.iter().any(|(_, v)| hit(v)))
-                .collect();
-            let open = self.explorer_open[1] || searching;
-            body = body.push(group_header(p, l.text("Ruimten", "Rooms"), None, shown.len(), open, Message::ToggleExplorer(1)));
-            if open {
-                let mut levels: Vec<Option<String>> = model.project.levels.iter().map(|(n, _)| Some(n.clone())).collect();
-                levels.push(None);
-                for level in levels {
-                    let items: Vec<&&crate::model::Room> = shown.iter().filter(|r| r.level == level).collect();
-                    if items.is_empty() {
-                        continue;
-                    }
-                    body = body.push(subheader(level.as_deref().unwrap_or(l.text("Zonder niveau", "No level"))));
-                    for r in items {
-                        let extra = r.extra.iter().map(|(_, v)| v.as_str()).collect::<Vec<_>>().join(" · ");
-                        let item = row![
-                            text(r.number.clone()).size(11).color(p.text_muted).width(30),
-                            column![text(r.name.clone()).size(12).color(p.text).wrapping(Wrapping::WordOrGlyph)]
-                                .push((!extra.is_empty()).then(|| text(extra).size(10).color(p.text_muted).wrapping(Wrapping::WordOrGlyph)))
-                                .width(Fill),
-                        ]
-                        .spacing(4)
-                        .padding([2, 6]);
-                        body = body.push(indent(item.into()));
-                    }
-                }
-            }
-        }
-
-        // layers (categories)
-        let mut order: Vec<usize> = (0..model.layers.len()).filter(|&i| hit(&model.layers[i].name)).collect();
-        order.sort_by(|&a, &b| model.layers[a].name.to_lowercase().cmp(&model.layers[b].name.to_lowercase()));
-        let open = self.explorer_open[2] || searching;
-        body = body.push(group_header(p, l.text("Lagen", "Layers"), None, order.len(), open, Message::ToggleExplorer(2)));
-        if open {
-            let small = |label: &'static str, msg: Message| {
-                button(text(label).size(11)).padding([2, 8]).style(move |_, s| p.ribbon_button(false, s)).on_press(msg)
+            let eye = button(container(eye).center(22)).width(22).height(22).padding(0)
+                .style(move |_, status| p.row_button(status)).on_press(Message::ModelVisible(i, !shown));
+            let arrow = {
+                use openaec_ui::icons::Icon;
+                svg(svg::Handle::from_memory(if open { Icon::DisclosureExpanded } else { Icon::DisclosureCollapsed }.bytes()))
+                    .width(12).height(12).style(move |_, _| svg::Style { color: Some(p.text_secondary) })
             };
-            body = body.push(indent(
-                row![
-                    small(l.text("Alles tonen", "Show all"), Message::AllLayers(true)),
-                    small(l.text("Alles verbergen", "Hide all"), Message::AllLayers(false)),
-                ]
-                .spacing(4)
-                .padding([4, 0])
-                .into(),
-            ));
-            for i in order {
-                let layer = &model.layers[i];
-                let visible = self.visible.get(i).copied().unwrap_or(true);
-                let [r, g, b] = layer.color;
-                let swatch = container(Space::new().width(10).height(10)).style(move |_| Palette::swatch(iced::Color::from_rgb(r, g, b)));
-                let eye = svg(icons::handle(if visible { icons::EYE } else { icons::EYE_OFF }))
-                    .width(14)
-                    .height(14)
-                    .style(move |_, _| svg::Style { color: Some(if visible { p.text_secondary } else { p.text_muted }) });
-                let item = button(
-                    row![
-                        eye,
-                        swatch,
-                        text(layer.name.clone())
+            let label = column![
+                text(own.file_name()).size(12).font(FONT_BOLD).color(if picked { p.accent } else if shown { p.text } else { p.text_muted })
+                    .wrapping(Wrapping::WordOrGlyph),
+                text(own.format.clone()).size(10).color(p.text_secondary),
+            ].spacing(0).width(Fill);
+            let name = button(row![arrow, label].spacing(6).align_y(Center)).padding([2, 4]).width(Fill)
+                .style(move |_, status| if picked { p.ribbon_button(true, status) } else { p.row_button(status) })
+                .on_press(Message::PickModel(i));
+            body = body.push(row![eye, name].spacing(2).align_y(Center));
+            if !open {
+                continue;
+            }
+            let mut inner = column![].spacing(1);
+
+            // views: in the folders of the file's browser when it has them, else by kind
+            if !views.is_empty() {
+                let kinds = [
+                    (ViewKind::ThreeD, l.text("3D-aanzichten", "3D views")),
+                    (ViewKind::Plan, l.text("Plattegronden", "Floor plans")),
+                    (ViewKind::Section, l.text("Doorsneden", "Sections")),
+                    (ViewKind::Elevation, l.text("Aanzichten", "Elevations")),
+                    (ViewKind::Detail, l.text("Details", "Details")),
+                ];
+                // the folders of each view under the browser organization chosen (none: by kind),
+                // or none where it leaves the view out
+                let orders = &own.project.view_orders;
+                let order = match self.view_order.as_deref() {
+                    Some("") => None,
+                    Some(name) => orders.iter().position(|o| o.name == name).or(own.project.view_order),
+                    None => own.project.view_order,
+                };
+                let start = views.start;
+                let folders: Vec<Option<Vec<String>>> = views.clone()
+                    .map(|v| match order {
+                        Some(k) => orders[k].folders.get(v - start).cloned().unwrap_or(Some(Vec::new())),
+                        None => Some(Vec::new()),
+                    })
+                    .collect();
+                let folder_of = |v: usize| -> &[String] { folders[v - start].as_deref().unwrap_or(&[]) };
+                let listed: Vec<usize> = views.clone()
+                    .filter(|&v| folders[v - start].is_some())
+                    .filter(|&v| hit(&model.views[v].name) || model.views[v].level.as_deref().is_some_and(|lv| hit(lv)) || folder_of(v).iter().any(|f| hit(f)))
+                    .collect();
+                let unfolded = self.explorer_open[0] || searching;
+                inner = inner.push(group_header(p, l.text("Weergaven", "Views"), Some("beta"), listed.len(), unfolded, Message::ToggleExplorer(0)));
+                // which way to order them: each organization of the file's browser, or by kind
+                if unfolded && !orders.is_empty() {
+                    let by_kind = l.text("Op soort", "By kind");
+                    let mut choices = vec![OrderChoice(by_kind.to_string(), String::new())];
+                    for o in orders {
+                        if !choices.iter().any(|c| c.1 == o.name) {
+                            choices.push(OrderChoice(o.name.clone(), o.name.clone()));
+                        }
+                    }
+                    let picked = match order {
+                        Some(k) => choices.iter().find(|c| c.1 == orders[k].name).cloned(),
+                        None => choices.first().cloned(),
+                    };
+                    let pick = iced::widget::pick_list(choices, picked, |c: OrderChoice| Message::ViewOrder(Some(c.1))).text_size(11).padding([2, 6]).width(Fill);
+                    let row = row![text(l.text("Ordenen", "Order")).size(11).color(p.text_secondary), pick].spacing(6).align_y(Center);
+                    inner = inner.push(container(row).padding(Padding { top: 2.0, right: 4.0, bottom: 4.0, left: 14.0 }).width(Fill));
+                }
+                // a view's row, set in as deep as its folder lies
+                let item = |v: usize, depth: usize| -> Element<'static, Message> {
+                    let active = self.active_view == Some(v);
+                    let open = button(
+                        text(model.views[v].name.clone())
                             .size(12)
-                            .color(if visible { p.text } else { p.text_muted })
+                            .color(if active { p.accent } else { p.text })
                             .wrapping(Wrapping::WordOrGlyph)
                             .width(Fill),
-                        text(format_count(layer.triangle_count())).size(10).color(p.text_muted),
-                    ]
-                    .spacing(6)
-                    .align_y(Center),
-                )
-                .padding([3, 6])
-                .width(Fill)
-                .style(move |_, s| p.row_button(s))
-                .on_press(Message::Layer(i, !visible));
-                body = body.push(indent(item.into()));
+                    )
+                    .padding([3, 6])
+                    .width(Fill)
+                    .style(move |_, s| if active { p.ribbon_button(true, s) } else { p.row_button(s) })
+                    .on_press(Message::ApplyView(v));
+                    container(open).padding(Padding { top: 0.0, right: 0.0, bottom: 0.0, left: 14.0 + 10.0 * depth as f32 }).width(Fill).into()
+                };
+                if unfolded && listed.iter().any(|&v| !folder_of(v).is_empty()) {
+                    let mut ordered = listed.clone();
+                    ordered.sort_by(|&a, &b| (folder_of(a), &model.views[a].name).cmp(&(folder_of(b), &model.views[b].name)));
+                    // a folder by its path; an outer folder starts open, those in it closed, and a
+                    // search opens them all
+                    let key = |folder: &[String]| folder.join("\u{1f}");
+                    let unfolds = |folder: &[String]| searching || (folder.len() == 1) != self.folded.contains(&key(folder));
+                    let mut last: &[String] = &[];
+                    for v in ordered {
+                        let folder = folder_of(v);
+                        // how far down this view shows: as long as every folder above is open
+                        let shown = (0..folder.len()).take_while(|&d| unfolds(&folder[..=d])).count();
+                        // the folders this view opens: those it does not share with the one before
+                        let shared = folder.iter().zip(last).take_while(|(a, b)| a == b).count();
+                        for (depth, name) in folder.iter().enumerate().skip(shared).take_while(|(depth, _)| *depth <= shown) {
+                            let open = unfolds(&folder[..=depth]);
+                            let arrow = {
+                                use openaec_ui::icons::Icon;
+                                svg(svg::Handle::from_memory(if open { Icon::DisclosureExpanded } else { Icon::DisclosureCollapsed }.bytes()))
+                                    .width(10).height(10).style(move |_, _| svg::Style { color: Some(p.text_secondary) })
+                            };
+                            let label = text(if depth == 0 { name.to_uppercase() } else { name.clone() }).size(if depth == 0 { 10 } else { 11 }).font(FONT_BOLD).color(p.group_label);
+                            let header = button(row![arrow, label].spacing(5).align_y(Center))
+                                .padding([3, 4])
+                                .width(Fill)
+                                .style(move |_, s| p.row_button(s))
+                                .on_press(Message::ToggleFolder(key(&folder[..=depth])));
+                            inner = inner.push(container(header).padding(Padding { top: if depth == 0 { 3.0 } else { 0.0 }, right: 0.0, bottom: 0.0, left: 10.0 + 10.0 * depth as f32 }).width(Fill));
+                        }
+                        last = folder;
+                        if shown == folder.len() {
+                            inner = inner.push(item(v, folder.len()));
+                        }
+                    }
+                } else if unfolded {
+                    for (kind, label) in kinds {
+                        let items: Vec<usize> = listed.iter().copied().filter(|&v| model.views[v].kind == kind).collect();
+                        if items.is_empty() {
+                            continue;
+                        }
+                        inner = inner.push(subheader(label));
+                        for v in items {
+                            inner = inner.push(item(v, 0));
+                        }
+                    }
+                }
             }
+
+            if i == with_schedules {
+                inner = self.schedules_group(p, l, &query, inner);
+            }
+            // (the sheets are listed at once; the header alone stands in for a file without any yet)
+            if self.reads_drawings(own) && sheets.is_empty() {
+                let tag = l.text("leest…", "reading…");
+                inner = inner.push(group_header(p, l.text("Tekenbladen", "Sheets"), Some(tag), 0, false, Message::ToggleExplorer(4)));
+            }
+            inner = self.sheets_group(p, l, &query, sheets, inner);
+            inner = self.drafts_groups(p, l, &query, drafts, inner);
+
+            // the levels, low to high, each with its rooms; then the rooms without a level
+            let levels = &own.project.levels;
+            let own_rooms = &model.project.rooms[rooms];
+            if !levels.is_empty() || !own_rooms.is_empty() {
+                let listed: Vec<&crate::model::Room> = own_rooms
+                    .iter()
+                    .filter(|r| hit(&r.name) || hit(&r.number) || r.extra.iter().any(|(_, v)| hit(v)))
+                    .collect();
+                let unfolded = self.explorer_open[1] || searching;
+                inner = inner.push(group_header(p, l.text("Niveaus", "Levels"), None, levels.len(), unfolded, Message::ToggleExplorer(1)));
+                if unfolded {
+                    let mut groups: Vec<Option<String>> = levels.iter().map(|(n, _)| Some(n.clone())).collect();
+                    groups.push(None);
+                    for level in groups {
+                        let items: Vec<&&crate::model::Room> = listed.iter().filter(|r| r.level == level).collect();
+                        // while searching only the levels with a room that is found
+                        if items.is_empty() && (level.is_none() || searching) {
+                            continue;
+                        }
+                        inner = inner.push(subheader(level.as_deref().unwrap_or(l.text("Zonder niveau", "No level"))));
+                        for r in items {
+                            let extra = r.extra.iter().map(|(_, v)| v.as_str()).collect::<Vec<_>>().join(" · ");
+                            let item = row![
+                                text(r.number.clone()).size(11).color(p.text_muted).width(30),
+                                column![text(r.name.clone()).size(12).color(p.text).wrapping(Wrapping::WordOrGlyph)]
+                                    .push((!extra.is_empty()).then(|| text(extra).size(10).color(p.text_muted).wrapping(Wrapping::WordOrGlyph)))
+                                    .width(Fill),
+                            ]
+                            .spacing(4)
+                            .padding([2, 6]);
+                            inner = inner.push(indent(item.into()));
+                        }
+                    }
+                }
+            }
+            // under its model, set in
+            body = body.push(container(inner).padding(Padding { top: 0.0, right: 0.0, bottom: 4.0, left: 12.0 }).width(Fill));
         }
 
         let search = text_input(l.text("Zoeken in verkenner…", "Search explorer…"), &self.layer_filter)
             .on_input(Message::LayerFilter)
             .size(12)
             .padding([5, 8]);
-        column![search, scrollable(body.padding(Padding { top: 0.0, right: 4.0, bottom: 8.0, left: 0.0 })).height(Fill).spacing(4)]
+        let id = iced::widget::Id::new("explorer");
+        let list = scrollable(body.padding(Padding { top: 0.0, right: 4.0, bottom: 8.0, left: 0.0 })).id(id.clone()).height(Fill).spacing(4);
+        // a finger drags the list, also where it starts on a row
+        column![search, crate::swipe::swipe(id, false, list)]
             .spacing(8)
             .into()
     }
@@ -1622,10 +4369,14 @@ impl App {
         panel(p, header, self.properties_body(p, standalone_language()), 290)
     }
 
-    /// The properties pane: project data (nothing selected) or the selection, the section box,
-    /// then file, geometry and bounds. Labels and values share the width 2 : 3 and wrap, so long
-    /// words never run into each other.
-    pub fn properties_body(&self, p: Palette, l: Language) -> Element<'_, Message> {
+    /// The right pane's Properties tab: the view shown and project data (nothing selected) or the
+    /// selection, the section box, then file, geometry and bounds. Labels and values share the
+    /// width 2 : 3 and wrap, so long words never run into each other.
+    fn properties_tab(&self, p: Palette, l: Language) -> Element<'_, Message> {
+        // Docs shown: the project folder and the picked document, also without a model
+        if let Some(docs) = self.docs_properties(p, l) {
+            return docs;
+        }
         let Some(model) = &self.model else {
             return text(l.text("Open een model om de eigenschappen te zien", "Open a model to see its properties"))
                 .size(12)
@@ -1641,6 +4392,9 @@ impl App {
             .filter(|(_, v)| **v)
             .map(|(l, _)| l.triangle_count())
             .sum();
+        // point clouds count points: shown instead of triangles when the model has no triangles
+        let (triangles, points) = (model.triangle_count(), model.point_count());
+        let visible_points: usize = model.layers.iter().zip(&self.visible).filter(|(_, v)| **v).map(|(l, _)| l.point_count()).sum();
         let mut content = column![].spacing(5).padding(Padding { top: 0.0, right: 6.0, bottom: 8.0, left: 0.0 });
         let section = |title: &str| -> Element<'static, Message> {
             container(text(title.to_uppercase()).size(11).font(FONT_BOLD).color(p.group_label))
@@ -1650,9 +4404,24 @@ impl App {
         let prop = |k: &str, v: String| prop_row(p, k.to_string(), v);
 
         // project data while nothing is selected
-        let pd = &model.project;
-        if self.selected.is_none() {
-            if !pd.info.is_empty() {
+        // the project data of the model picked in the explorer
+        let picked = self.picked_model.and_then(|i| self.models.get(i));
+        let pd = picked.map_or(&model.project, |e| &e.model.project);
+        let picked_entry = picked;
+        let picked = picked.is_some();
+        let drawn = self.drawn_properties(p, l);
+        if let Some((visibility, results)) = self.analysis_properties(p, l) {
+            content = content.push(section(l.text("Zichtbaarheid", "Visibility"))).push(visibility).push(rule::horizontal(1));
+            content = content.push(section(l.text("Resultaten", "Results"))).push(results).push(rule::horizontal(1));
+        }
+        if let Some(field) = self.field_properties(p, l) {
+            content = content.push(section(l.text("Veld", "Field"))).push(field).push(rule::horizontal(1));
+        }
+        if self.selected.is_none() && self.structural.selected.is_empty() && self.picked_grid.is_none() && drawn.is_none() {
+            if let Some(view) = self.view_properties(p, l) {
+                content = content.push(section(l.text("Weergave", "View"))).push(view).push(rule::horizontal(1));
+            }
+            if picked && !pd.info.is_empty() {
                 content = content.push(section(l.text("Project", "Project")));
                 for (k, v) in &pd.info {
                     let label = match k.as_str() {
@@ -1666,14 +4435,11 @@ impl App {
                 }
                 content = content.push(rule::horizontal(1));
             }
-            if !pd.levels.is_empty() {
-                content = content.push(section(l.text("Niveaus", "Levels")));
-                for (name, z) in pd.levels.iter().rev() {
-                    content = content.push(prop(name, format!("{z:+.3} m")));
-                }
-                content = content.push(rule::horizontal(1));
+            if let Some(entry) = picked_entry {
+                content = content.push(section(l.text("Nulpunt", "Zero point"))).push(self.origin_section(p, l, entry)).push(rule::horizontal(1));
             }
-            if !pd.phases.is_empty() {
+            // the levels are not listed here: they have their own tab in the explorer
+            if picked && !pd.phases.is_empty() {
                 content = content
                     .push(section(l.text("Fasen", "Phases")))
                     .push(text(pd.phases.join(" → ")).size(12).color(p.text).wrapping(Wrapping::WordOrGlyph))
@@ -1681,10 +4447,58 @@ impl App {
             }
         }
 
+        // what is picked in a legend or drafting view
+        for (title, rows) in drawn.into_iter().flatten() {
+            content = content.push(section(&title)).push(rows).push(rule::horizontal(1));
+        }
+
+        // the IFCX file shown: what it is, its views and its search
+        if let Some(rows) = self.ifc_properties(p, l) {
+            content = content.push(section("IFCX")).push(rows).push(rule::horizontal(1));
+        }
+        // the sketch of a floor: its tools, first, so Finish and Cancel are in sight
+        if let Some(rows) = self.sketch_bar(p, l) {
+            content = content.push(section(l.text("Schets", "Sketch"))).push(rows).push(rule::horizontal(1));
+        }
+        // a tool on: its type and sizes
+        if let Some(rows) = self.placement_bar(p, l) {
+            let name = self.modeller.tool.map_or("", |(t, _)| t.label(l));
+            content = content.push(section(name)).push(rows).push(rule::horizontal(1));
+        }
+        if let Some(rows) = self.rebar_bar(l) { content = content.push(rows); }
+        // a sheet of the file: its export
+        if self.active_sheet.is_some() && self.active_doc_sheet.is_none() {
+            content = content.push(section(l.text("Tekening", "Drawing"))).push(container(self.export_control(p, l)).padding([2, 8])).push(rule::horizontal(1));
+        }
+        // the view shown: how it shows, what a tool on waits for, or what is picked on it
+        if let Some(rows) = self.view_mark_properties(p, l) {
+            content = content.push(section(l.text("Tekening", "Drawing"))).push(rows).push(rule::horizontal(1));
+        }
+
+        // the sheet shown: its paper and views, or what is picked on it
+        if let Some(rows) = self.sheet_properties(p, l) {
+            content = content.push(section(l.text("Blad", "Sheet"))).push(rows).push(rule::horizontal(1));
+        }
+
+        // a modelled element's definition, typed in
+        if let Some(rows) = self.element_properties(p, l) {
+            content = content.push(section(l.text("Definitie", "Definition"))).push(rows).push(rule::horizontal(1));
+        }
+
+        if let Some(rows) = self.space_properties(p, l) {
+            content = content.push(section(l.text("Definitie", "Definition"))).push(container(rows).padding([2, 8])).push(rule::horizontal(1));
+        }
+
         // the selection
         if let Some((li, element)) = self.selected {
             content = content.push(section(l.text("Selectie", "Selection")));
+            if self.sel.len() > 1 {
+                let count = format!("{} {}", self.sel.len(), l.text("elementen geselecteerd", "elements selected"));
+                content = content.push(container(text(count).size(12).color(p.text_secondary)).padding([2, 8]));
+            }
             let mut props = element.map(|id| model.element_props(id)).unwrap_or_default();
+            // a modelled element's definition is kept for the file, not shown
+            props.retain(|(k, _)| k != crate::export::ifcx::DEFINITION && k != crate::export::ifcx::DERIVED);
             if props.is_empty() {
                 props.push(("category".into(), model.layers[li].name.clone()));
                 if let Some(id) = element {
@@ -1695,7 +4509,42 @@ impl App {
             props.sort_by_key(|(k, _)| PROP_ORDER.iter().position(|o| o.0 == k).unwrap_or(PROP_ORDER.len()));
             for (k, v) in props {
                 let label = PROP_ORDER.iter().find(|o| o.0 == k).map_or(k.as_str(), |o| l.text(o.1, o.2)).to_string();
-                content = content.push(prop_row(p, label, v));
+                if element.is_none() {
+                    content = content.push(prop_row(p, label, v));
+                    continue;
+                }
+                // every element with this value, one click away
+                let pick = button(svg(icons::handle(crate::b2::small("view.fit-selection"))).width(12).height(12))
+                    .padding(2)
+                    .style(move |_, s| p.row_button(s))
+                    .on_press(Message::SelectWhere(k.clone(), v.clone()));
+                let pick = iced::widget::tooltip(
+                    pick,
+                    container(text(l.text("Alles met deze waarde selecteren", "Select all with this value")).size(11)).padding(4).style(move |_| container::Style { background: Some(Background::Color(p.surface)), border: Border { color: p.text_muted, width: 1.0, radius: 3.0.into() }, text_color: Some(p.text), ..container::Style::default() }),
+                    iced::widget::tooltip::Position::Left,
+                );
+                content = content.push(row![container(prop_row(p, label, v)).width(Fill), pick].spacing(2).align_y(Center));
+            }
+            content = content.push(rule::horizontal(1));
+            // the documents of the project folder that are about this element (Docs)
+            if let Some(documents) = element.and_then(|id| self.docs_of_element(p, l, id)) {
+                content = content.push(section(l.text("Documenten", "Documents"))).push(documents).push(rule::horizontal(1));
+            }
+        }
+
+        // the picked grid line
+        if let Some(grid) = self.grid_properties(p, l) {
+            content = content.push(section(l.text("Stramien", "Grid"))).push(grid).push(rule::horizontal(1));
+        }
+
+        // structural objects: properties built from the document
+        if let Some(&id) = self.structural.selected.first() {
+            content = content.push(section(l.text("Selectie", "Selection")));
+            if self.structural.selected.len() > 1 {
+                content = content.push(prop(l.text("Geselecteerd", "Selected"), self.structural.selected.len().to_string()));
+            }
+            for (k, v) in model.element_props(id) {
+                content = content.push(prop_row(p, k, v));
             }
             content = content.push(rule::horizontal(1));
         }
@@ -1808,8 +4657,9 @@ impl App {
             .push(section(l.text("Geometrie", "Geometry")))
             .push(prop(l.text("Lagen", "Layers"), model.layers.len().to_string()))
             .push(prop(l.text("Hoekpunten", "Vertices"), format_count(model.vertex_count())))
-            .push(prop(l.text("Driehoeken", "Triangles"), format_count(model.triangle_count())))
-            .push(prop(l.text("Zichtbaar", "Visible"), format_count(visible_tris)))
+            .push((triangles > 0 || points == 0).then(|| prop(l.text("Driehoeken", "Triangles"), format_count(triangles))))
+            .push((points > 0).then(|| prop(l.text("Punten", "Points"), format_count(points))))
+            .push(prop(l.text("Zichtbaar", "Visible"), format_count(if triangles == 0 { visible_points } else { visible_tris })))
             .push(rule::horizontal(1))
             .push(section(l.text("Grenzen (Z omhoog)", "Bounds (Z up)")))
             .push(prop("Min", format_vec(b.min)))
@@ -1820,7 +4670,8 @@ impl App {
                 if model.source_y_up != self.flip_up { l.text("Y (omgezet)", "Y (converted)").into() } else { "Z".into() },
             ));
         // the scrollbar gets its own strip next to the text
-        scrollable(content).height(Fill).spacing(4).into()
+        let id = iced::widget::Id::new("properties");
+        crate::swipe::swipe(id.clone(), false, scrollable(content).id(id).height(Fill).spacing(4))
     }
 
     /// The measurements in the properties pane: each result with its details and a delete button,
@@ -1837,6 +4688,10 @@ impl App {
             button(text(label).size(11)).padding([2, 6]).style(move |_, s| p.ribbon_button(active, s)).on_press_maybe(msg)
         };
         let mut body = column![heading(l.text("Metingen", "Measurements"))].spacing(5);
+        // the remark tool: its text first, then a click in the model
+        if m.tool == Some(Tool::Note) {
+            body = body.push(text_input(l.text("Tekst van de opmerking", "Text of the note"), &m.note).on_input(Message::MeasureNote).size(12).padding(5));
+        }
         if m.results.is_empty() {
             body = body.push(
                 text(l.text("Nog geen metingen", "No measurements yet")).size(12).color(p.text_muted),
@@ -1864,7 +4719,12 @@ impl App {
             if count > 1 {
                 body = body.push(prop_row(
                     p,
-                    format!("{} {} ({count})", l.text("Totaal", "Total"), category.label(l).to_lowercase()),
+                    {
+                        // German keeps its nouns capitalised
+                        let name = category.label(l);
+                        let name = if l == Language::German { name.to_string() } else { name.to_lowercase() };
+                        format!("{} ({count})", l.text("Totaal {category}", "Total {category}").replace("{category}", &name))
+                    },
                     units.format(l, category, total),
                 ));
             }
@@ -1912,9 +4772,15 @@ impl App {
 
     /// The 3D viewport with its overlays; the shell's workspace.
     pub fn viewport_view(&self, p: Palette, l: Language) -> Element<'_, Message> {
+        // a picture for a report or an issue: the model alone, without the cube, the grids, the
+        // handles and the hints
+        #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
+        let clean = self.collab.picturing();
+        #[cfg(not(all(feature = "validator", not(target_arch = "wasm32"))))]
+        let clean = false;
         let settings = RenderSettings {
             mode: self.mode,
-            grid: self.grid,
+            grid: self.grid && !clean,
             background: srgb3(p.viewport),
             grid_minor: srgb4(p.grid_minor),
             grid_major: srgb4(p.grid_major),
@@ -1922,18 +4788,37 @@ impl App {
             section: self.active_section(),
             plane: self.plane.zip(self.world_bounds()).map(|(p, w)| p.uniform(&w)),
             caps: self.section_fill,
-            grids: self.show_grids && !self.flip_up,
+            grids: (self.grids_shown() || self.levels_3d) && !clean,
+            ambient: self.ambient,
+            point_size: self.point_size,
+            cloud_depth: self.cloud_depth,
+            cloud_color: self.cloud_color,
             bounds: self.world_bounds(),
         };
+        // the grid lines and levels where the view shown draws them
+        let paper_view = self.drawing_on_paper && self.shown_view().is_some();
+        let datums = if clean || paper_view { Vec::new() } else { self.datums() };
+        let segments = Arc::new(datums.iter().map(|d| [d.line.a, d.line.b]).collect::<Vec<_>>());
         let scene = shader(Viewport3D {
             model: self.model.as_ref(),
             visible: &self.visible,
-            selection: &self.selection,
             camera: self.camera,
             settings,
             explode: self.explode_index.as_ref(),
-            offsets: &self.explode_offsets,
-            hover: self.measure.tool.is_some() && !self.plane_picking,
+            offsets: &self.units,
+            looks: &self.unit_looks,
+            drag_selects: self.drag_selects(),
+            cursor3d: self.has_cursor3d(),
+            buttons: self.mouse_buttons,
+            hover: (self.measure.tool.is_some() || self.structural_hover_on() || self.edit_follows_cursor() || self.modeller.sketch.is_some() || self.modeller.grab.is_some() || self.modeller.tool.is_some() || self.modeller.grid_tool || self.copying() || self.modeller.rebar_edit.is_some() || self.modeller.rebar_on.is_some()) && !self.plane_picking,
+            crosshair: (self.measure.tool.is_some() && !self.plane_picking) || (self.shown_view().is_some() && (self.dimension_tool || self.note_tool)),
+            structural_selected: &self.structural.selected_marks,
+            structural_hovered: &self.structural.hovered_marks,
+            structural_shown: self.structural.shown_marks.as_ref(),
+            datum: Some(segments),
+            overlay: self.overlay_lines.clone(),
+            faces: self.overlay_faces.clone(),
+            caps: self.cut_faces.clone(),
         })
             .width(Fill)
             .height(Fill);
@@ -1945,44 +4830,144 @@ impl App {
             (None, _) => Some(center(self.welcome(p)).into()),
             _ => None,
         };
+        // the gestures for whatever pressed last: fingers on a phone or tablet, else the mouse
+        let hint = if self.fingers {
+            l.text(
+                "Tik: selecteren · Eén vinger: draaien · Twee vingers: zoomen en pannen · Lang drukken: menu, en slepen: pannen",
+                "Tap: select · One finger: orbit · Two fingers: zoom and pan · Long press: menu, then drag: pan",
+            )
+        } else if let Some(gestures) = self.modeller_gestures(l) {
+            gestures
+        } else {
+            l.text(
+                "Klik: selecteren · Rechtsklik: menu · Esc: wissen · Middelste knop: pannen · Shift + middelste of links slepen: orbit · Wiel: zoomen · F: passend · W A S D: lopen",
+                "Click: select · Right click: menu · Esc: clear · Middle drag: pan · Shift + middle or left drag: orbit · Wheel: zoom · F: fit · W A S D: walk",
+            )
+        };
         let hint = container(
-            text(l.text(
-                "Klik: selecteren · Esc: wissen · Middelste knop: pannen · Shift + middelste of links slepen: orbit · Wiel: zoomen · F: passend",
-                "Click: select · Esc: clear · Middle drag: pan · Shift + middle or left drag: orbit · Wheel: zoom · F: fit",
-            ))
+            text(if clean { "" } else { hint })
                 .size(11)
                 .color(p.text_muted),
         )
         .padding(8)
         .align_bottom(Fill)
         .align_left(Fill);
-        let cube = (self.model.is_some() && overlay.is_none()).then(|| {
+        let cube = (self.model.is_some() && overlay.is_none() && !clean).then(|| {
             canvas(CubeOverlay { yaw: self.camera.yaw, pitch: self.camera.pitch, ortho: self.camera.ortho })
                 .width(Fill)
                 .height(Fill)
         });
-        let section = self.active_section().filter(|_| overlay.is_none()).map(|section| {
+        // under the cube and its lens button: how the model is drawn
+        let style = (self.model.is_some() && overlay.is_none() && !clean).then(|| {
+            let styles = [
+                Look(RenderMode::Wireframe, l.text("Draadmodel", "Wireframe")),
+                Look(RenderMode::HiddenLine, l.text("Verborgen lijnen", "Hidden line")),
+                Look(RenderMode::Solid, l.text("Gearceerd", "Shaded")),
+            ];
+            // solid with its edges is shaded too
+            let shown = if self.mode == RenderMode::SolidEdges { RenderMode::Solid } else { self.mode };
+            let picked = styles.iter().find(|s| s.0 == shown).copied();
+            let pick = iced::widget::pick_list(styles, picked, |s: Look| Message::Mode(s.0)).text_size(11).padding([2, 6]).width(STYLE_WIDTH);
+            let mut controls = iced::widget::column![pick].spacing(3).align_x(iced::Alignment::End);
+            if let Some(scale) = self.shown_view().and_then(|path| self.document.view_scale(path)) {
+                controls = controls.push(text(format!("1:{scale}")).size(12).color(p.text));
+            }
+            container(controls)
+                .padding(iced::Padding { top: STYLE_TOP, right: CUBE_RIGHT - STYLE_WIDTH / 2.0, ..iced::Padding::ZERO })
+                .align_right(Fill)
+                .align_top(Fill)
+        });
+        // a view's tab keeps its box without the handles: its crop is set on the sheet
+        let section = self.active_section().filter(|_| overlay.is_none() && self.shown_view().is_none() && !clean).map(|section| {
             canvas(SectionOverlay { section, view_proj: self.camera.view_proj(self.aspect()) }).width(Fill).height(Fill)
         });
         let plane = self.plane.zip(self.world_bounds()).filter(|_| overlay.is_none() && !self.plane_picking).map(|(plane, world)| {
             canvas(PlaneOverlay { plane, world, view_proj: self.camera.view_proj(self.aspect()) }).width(Fill).height(Fill)
         });
-        let banner = if self.plane_picking {
+        let editing = self.modeller.edit.as_ref().and_then(|e| Some((e, self.modeller.model.get(e.element)?)));
+        let banner = if self.modeller.rebar_edit.is_some() {
+            Some(l.text("Wapeningsgebied · sluit op het beginpunt · Tab: klaar · Esc: annuleren","Reinforcement area · close at first point · Tab: finish · Esc: cancel").to_string())
+        } else if let Some(hint) = self.grab_hint(l) {
+            Some(hint)
+        } else if let Some(hint) = self.curtain_hint(l) {
+            Some(hint)
+        } else if let Some(hint) = self.sketch_hint(l) {
+            Some(hint)
+        } else if let Some((edit, element)) = editing {
+            let hint = match &edit.grab {
+                Some(g) if g.by_key => l.text("Klik: neerzetten · X, Y, Z: as · Esc: annuleren", "Click: put down · X, Y, Z: axis · Esc: cancel"),
+                Some(_) => l.text("Sleep naar de nieuwe plek · X, Y, Z: as", "Drag to the new place · X, Y, Z: axis"),
+                None => l.text(
+                    "Sleep een punt · klik: kiezen, Ctrl: erbij · G: verplaatsen · A: alles · Tab: klaar",
+                    "Drag a point · click: pick, Ctrl: add · G: move · A: all · Tab: done",
+                ),
+            };
+            let axis = edit.grab.as_ref().and_then(|g| g.axis).map(|a| match a {
+                edit::Axis::X => " · X",
+                edit::Axis::Y => " · Y",
+                edit::Axis::Z => " · Z",
+            });
+            Some(match self.modeller.refusal {
+                Some(refusal) => format!("{}: {} · {}", element.name, l.translate(refusal.reason()), hint),
+                None => {
+                    // the distance typed for the move, where one is
+                    let typed = self.typed_distance().map_or_else(String::new, |t| format!(" · {t} m"));
+                    format!("{} {}: {}{}{}", l.text("Bewerken", "Editing"), element.name, hint, axis.unwrap_or(""), typed)
+                }
+            })
+        } else if self.plane_picking {
             Some(l.text("Klik op een vlak om door te snijden · Esc: annuleren", "Click a face to cut there · Esc: cancel").to_string())
+        } else if let Some(t) = &self.modeller.transform {
+            let hint = t.kind.hint(l, t.points.len());
+            Some(match self.modeller.refusal {
+                Some(refusal) => format!("{}: {} · {}", t.kind.label(l), l.translate(refusal.reason()), hint),
+                None => format!("{}: {}", t.kind.label(l), hint),
+            })
+        } else if let Some(hint) = self.offset_hint(l).or_else(|| self.pair_hint(l)) {
+            Some(hint)
+        } else if let Some(hint) = self.grid_hint(l) {
+            Some(hint)
+        } else if let Some(tool) = self.modeller.rebar_tool {
+            let (word, hint) = (tool.label(l), tool.hint(l, self.modeller.rebar_on.is_some()));
+            Some(match self.modeller.refusal {
+                Some(refusal) => format!("{word}: {} · {hint}", l.translate(refusal.reason())),
+                None => format!("{word}: {hint}"),
+            })
+        } else if let Some((tool, _)) = self.modeller.tool {
+            let hint = tool.hint(l, self.modeller.points.len());
+            Some(match self.modeller.refusal {
+                Some(refusal) => format!("{}: {} · {}", tool.label(l), l.translate(refusal.reason()), hint),
+                None => format!("{}: {}", tool.label(l), hint),
+            })
+        } else if let Some(refusal) = self.modeller.refusal {
+            Some(l.translate(refusal.reason()).to_string())
         } else {
             self.measure.tool.map(|tool| {
                 format!("{}: {} · Esc: {}", tool.label(l), tool.hint(l, self.measure.picks.len()), l.text("stoppen", "stop"))
-            })
+            }).or_else(|| self.select_hint(l))
         };
         // what a click would take, found in this view (not one the camera left)
         let view_proj = self.camera.view_proj(self.aspect());
         let hover = self.measure.hover.as_ref().filter(|h| {
             self.measure.tool.is_some_and(|t| t != Tool::Volume) && h.screen.view_proj == view_proj && self.hover_scene_holds()
         });
+        // the model's labels (Rhino's text dots) on the layers that show
+        let dots: Vec<(Vec3, String, Color)> = self
+            .model
+            .as_ref()
+            .map(|m| {
+                m.project
+                    .dots
+                    .iter()
+                    .filter(|d| m.layers.iter().position(|l| l.name == d.layer).is_none_or(|i| self.visible.get(i).copied().unwrap_or(true)))
+                    .map(|d| (Vec3::from_array(d.at), d.text.clone(), Color::from_rgb8(d.color[0], d.color[1], d.color[2])))
+                    .collect()
+            })
+            .unwrap_or_default();
         // hidden while the model is taken apart: they belong to the model as it is
         let measures = (overlay.is_none()
             && !self.explode_on
-            && (!self.measure.results.is_empty() || !self.measure.picks.is_empty() || hover.is_some()))
+            && (!self.measure.results.is_empty() || !self.measure.picks.is_empty() || hover.is_some() || !dots.is_empty()))
         .then(|| {
             canvas(crate::measure::overlay::MeasureOverlay {
                 results: &self.measure.results,
@@ -1995,12 +4980,15 @@ impl App {
                 ink: p.accent,
                 label_bg: p.surface,
                 label_text: p.text,
+                dots,
             })
             .width(Fill)
             .height(Fill)
         });
+        // the sketch's drawing tools as a toolbar under the banner, over the view
+        let mut sketch_tools = self.sketch_bar(p, l);
         let picking = banner.filter(|_| overlay.is_none()).map(|banner| {
-            container(
+            let mut over = iced::widget::Column::new().spacing(6).align_x(iced::Alignment::Center).push(
                 container(text(banner).size(12).color(Color::WHITE))
                     .padding([6, 12])
                     .style(|_| container::Style {
@@ -2008,25 +4996,44 @@ impl App {
                         border: Border { radius: 4.0.into(), ..Default::default() },
                         ..Default::default()
                     }),
-            )
-            .padding(12)
-            .align_top(Fill)
-            .center_x(Fill)
+            );
+            if let Some(tools) = sketch_tools.take() {
+                // no wider than leaves the view cube free: its buttons wrap
+                over = over.push(container(tools).padding(4).max_width(520).style(move |_| container::Style {
+                    background: Some(Background::Color(p.surface)),
+                    border: Border { radius: 4.0.into(), width: 1.0, color: p.border },
+                    ..Default::default()
+                }));
+            }
+            container(over).padding(12).align_top(Fill).center_x(Fill)
         });
-        let grids = self
-            .model
-            .as_ref()
-            .filter(|m| self.show_grids && !self.flip_up && overlay.is_none() && !m.project.grids.is_empty())
-            .map(|m| {
+        let grids = (overlay.is_none() && !datums.is_empty()).then(|| {
                 canvas(crate::annotations::GridOverlay {
-                    grids: &m.project.grids,
+                    datums,
                     view_proj: self.camera.view_proj(self.aspect()),
                     fill: p.surface,
                     ink: p.text_secondary,
+                    picked: self.grids_picked(),
+                    accent: p.accent,
+                    seen: if self.shown_view().is_none() { self.heads_seen.1.clone() } else { Vec::new() },
+                    dims: self.grid_dimensions(),
+                    dims_seen: if self.shown_view().is_none() { self.marks_seen.0.clone() } else { Vec::new() },
+                    levels_seen: if self.shown_view().is_none() { self.marks_seen.1.clone() } else { Vec::new() },
                 })
                 .width(Fill)
                 .height(Fill)
             });
+        // the zero point of each model, over everything it could hide behind
+        let zero_points = (overlay.is_none() && !clean).then(|| self.zero_points()).filter(|marks| !marks.is_empty()).map(|marks| {
+            canvas(origin::ZeroPoints { marks, view_proj: self.camera.view_proj(self.aspect()), ink: p.text, fill: p.surface, accent: p.accent })
+                .width(Fill)
+                .height(Fill)
+        });
+        let view_labels = (overlay.is_none() && !self.views_3d_labels.is_empty()).then(|| {
+            canvas(views_in_3d::ViewLabels { labels: self.views_3d_labels.clone(), view_proj: self.camera.view_proj(self.aspect()), ink: p.text })
+                .width(Fill)
+                .height(Fill)
+        });
         let measurements = (!self.measurements.is_empty() && overlay.is_none()).then(|| {
             canvas(crate::annotations::MeasureOverlay {
                 items: &self.measurements,
@@ -2038,18 +5045,95 @@ impl App {
             .width(Fill)
             .height(Fill)
         });
+        let boxed = self.box_select.map(|(from, to)| canvas(crate::viewport::box_select::BoxOverlay { from, to }).width(Fill).height(Fill));
+        // the dimensions and texts of the view shown in its tab
+        let marks = self.marks_layer(p, l).filter(|_| overlay.is_none()).map(|m| m.widget());
+        let menu = self.context_menu.filter(|_| overlay.is_none()).map(|at| self.context_menu_view(p, l, at));
+        // edit mode's points, else the selected element's grips: one slot, so a drag that begins on
+        // a grip keeps its overlay
+        let editing = self.edit_overlay(p.accent, p.surface).or_else(|| self.grip_overlay(p.accent, p.surface)).map(|o| canvas(o).width(Fill).height(Fill));
+        let placing = self.placing_overlay(p.accent).filter(|_| overlay.is_none()).map(|o| canvas(o).width(Fill).height(Fill));
+        let joins = self.join_marks(p.accent, p.surface).filter(|_| overlay.is_none()).map(|m| canvas(m).width(Fill).height(Fill));
+        // the temporary dimensions of the selected wall: their lines, and a field on each
+        let temp_marks = self.temp_dim_marks(p.accent).filter(|_| overlay.is_none()).map(|m| canvas(m).width(Fill).height(Fill));
+        let temp_fields = self.temp_dim_fields(p).filter(|_| overlay.is_none());
+        // the spaces the walls close in: their names and areas
+        let space_labels = self.space_labels(p.text_secondary).filter(|_| overlay.is_none()).map(|m| canvas(m).width(Fill).height(Fill));
+        let cursor3d = self.cursor3d_overlay().filter(|_| overlay.is_none()).map(|m| canvas(m).width(Fill).height(Fill));
+        let pivot = self.pivot_overlay().filter(|_| overlay.is_none()).map(|m| canvas(m).width(Fill).height(Fill));
+        let crosshair = self.crosshair_overlay().map(|m| canvas(m).width(Fill).height(Fill));
         stack![scene, hint]
             .push(grids)
+            .push(view_labels)
+            .push(zero_points)
             .push(section)
             .push(plane)
             .push(measures)
             .push(measurements)
+            .push(marks)
+            // what the Modeller works with lies over a view drawn as on a sheet too, so elements
+            // are picked, gripped and moved there as in the 3D view
+            .push(space_labels)
+            .push(cursor3d)
+            .push(pivot)
+            .push(crosshair)
+            .push(placing)
+            .push(joins)
+            .push(temp_marks)
+            .push(editing)
+            .push(temp_fields)
+            .push(self.grid_series_overlay(p, l).filter(|_| overlay.is_none()))
+            .push(self.turn_overlay(p, l).filter(|_| overlay.is_none()))
+            .push(boxed)
             .push(picking)
             .push(cube)
+            .push(style)
+            .push(menu)
             .push(overlay)
             .width(Fill)
             .height(Fill)
             .into()
+    }
+
+    /// The right-click menu at viewport point `at`, kept inside the viewport; a click beside it
+    /// closes it.
+    fn context_menu_view(&self, p: Palette, l: Language, at: Vec2) -> Element<'_, Message> {
+        use openaec_ui::design::command::{Shortcut, ShortcutKey};
+        let key = |c: char| Shortcut { key: ShortcutKey::Char(c), ctrl: false, shift: false, alt: false }.label();
+        let selected = self.has_selection();
+        let item = |label: &'static str, keys: &'static str, item: MenuItem, on: bool| -> Element<'static, Message> {
+            let color = if on { p.text } else { p.text_muted };
+            button(row![text(label).size(12).color(color).width(Fill), text(keys).size(11).color(p.text_muted)].spacing(24))
+                .width(Fill)
+                .padding([5, 10])
+                .style(move |_, s| p.row_button(s))
+                .on_press_maybe(on.then_some(Message::ContextMenu(item)))
+                .into()
+        };
+        let items = column![
+            item(l.text("Verbergen in aanzicht", "Hide in view"), key('h'), MenuItem::Hide, selected),
+            item(l.text("Isoleren", "Isolate"), key('i'), MenuItem::Isolate, selected),
+            item(l.text("Alles tonen", "Show all"), Shortcut::ctrl_shift('h').label(), MenuItem::ShowAll, !self.hidden.is_empty()),
+            rule::horizontal(1),
+            item(l.text("Laag selecteren", "Select layer"), "", MenuItem::SelectLayer, !self.sel.is_empty()),
+            item(l.text("Selectie opheffen", "Clear selection"), "Esc", MenuItem::ClearSelection, selected),
+            rule::horizontal(1),
+            item(l.text("Verwijderen", "Delete"), "Del", MenuItem::Delete, self.modeller.in_modeller && (!self.selected_modelled().is_empty() || !self.picked_modelled_grids().is_empty() || self.mark_pick.is_some())),
+            item(l.text("Draaipunt hier plaatsen", "Set pivot here"), l.text("dubbelklik", "double click"), MenuItem::PivotHere, self.model.is_some()),
+            item(l.text("Draaipunt opheffen", "Clear pivot"), "", MenuItem::ClearPivot, self.has_marked_pivot()),
+            rule::horizontal(1),
+            item(l.text("Ongedaan maken", "Undo"), Shortcut::ctrl('z').label(), MenuItem::Undo, self.can_undo()),
+        ]
+        .width(MENU_WIDTH);
+        let menu = container(items).padding(4).style(move |_| container::Style { background: Some(Background::Color(p.surface)), ..p.overlay() });
+        // at the cursor, moved in where it would stick out of the viewport
+        let (w, h) = self.viewport_size;
+        let x = at.x.min(w - MENU_WIDTH - 12.0).max(0.0);
+        let y = at.y.min(h - MENU_HEIGHT).max(0.0);
+        let beside = iced::widget::mouse_area(Space::new().width(Fill).height(Fill))
+            .on_press(Message::CloseContextMenu)
+            .on_right_press(Message::CloseContextMenu);
+        stack![beside, container(menu).padding(Padding { top: y, left: x, ..Padding::ZERO })].width(Fill).height(Fill).into()
     }
 
     fn welcome(&self, p: Palette) -> Element<'_, Message> {
@@ -2057,7 +5141,7 @@ impl App {
         exts.sort();
         container(
             column![
-                text("Open 3D Viewer Studio").size(24).font(FONT_BOLD).color(p.text),
+                text("Open BIM Suite").size(24).font(FONT_BOLD).color(p.text),
                 text("Rust + iced edition").size(13).color(p.accent),
                 Space::new().height(8),
                 text("Open a model or drop a file on the window.").size(13).color(p.text_secondary),
@@ -2105,8 +5189,14 @@ impl App {
         if let Some(m) = &self.model {
             right = right
                 .push(item("Layers", m.layers.len().to_string()))
-                .push(item("Vertices", format_count(m.vertex_count())))
-                .push(item("Triangles", format_count(m.triangle_count())));
+                .push(item("Vertices", format_count(m.vertex_count())));
+            let (triangles, points) = (m.triangle_count(), m.point_count());
+            if triangles > 0 || points == 0 {
+                right = right.push(item("Triangles", format_count(triangles)));
+            }
+            if points > 0 {
+                right = right.push(item("Points", format_count(points)));
+            }
         }
         right = right.push(item(
             "Mode",
@@ -2114,6 +5204,7 @@ impl App {
                 RenderMode::Solid => "Solid",
                 RenderMode::Wireframe => "Wireframe",
                 RenderMode::SolidEdges => "Edges",
+                RenderMode::HiddenLine => "Hidden line",
             }
             .into(),
         ));
@@ -2224,6 +5315,38 @@ fn ray_meets_box(origin: Vec3, dir: Vec3, (lo, hi): (Vec3, Vec3), max: f32) -> b
     true
 }
 
+/// What is shown, as undo keeps it: the elements hidden with Hide or Isolate, every layer's
+/// switch, and per model its switch and its own layer switches.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ViewState {
+    pub hidden: Arc<UnitKeySet>,
+    pub layers: Vec<bool>,
+    pub models: Vec<(bool, Vec<bool>)>,
+}
+
+/// The messages that change what is shown, and so go into the undo history when they do.
+fn changes_visibility(message: &Message) -> bool {
+    matches!(
+        message,
+        Message::Layer(..)
+            | Message::AllLayers(_)
+            | Message::LayerGroup(..)
+            | Message::ModelVisible(..)
+            | Message::HideSelection
+            | Message::IsolateSelection
+            | Message::ShowAllElements
+    )
+}
+
+/// What a click on triangle `t` of layer `l` selects: its element, or the layer when the format
+/// has no elements.
+fn pickable_at(model: &Model, l: usize, t: usize) -> Pickable {
+    match model.layers[l].element_at(t) {
+        Some(id) => Pickable::Element(id),
+        None => Pickable::Layer(l),
+    }
+}
+
 /// The nearest triangle hit by the ray `origin + t·dir` (t > 0) among the visible layers:
 /// (layer, triangle), skipping hits that `keep` rejects (the section box). A triangle is where
 /// `shift` (layer, vertex) moves its first vertex: the exploded view, whose units never share a
@@ -2236,6 +5359,7 @@ pub fn pick_triangle(
     dir: Vec3,
     shift: &dyn Fn(usize, u32) -> Vec3,
     keep: &dyn Fn(Vec3) -> bool,
+    hidden: &dyn Fn(usize, u32) -> bool,
     index: Option<&PickIndex>,
 ) -> Option<(usize, usize)> {
     let mut best: Option<(f32, usize, usize)> = None;
@@ -2257,7 +5381,7 @@ pub fn pick_triangle(
             }
             for (i, tri) in block.chunks_exact(3).enumerate() {
                 let t = b * TRI_BLOCK + i;
-                if tri.iter().any(|&i| 3 * i as usize + 2 >= pos.len()) {
+                if tri.iter().any(|&i| 3 * i as usize + 2 >= pos.len()) || hidden(l, tri[0]) {
                     continue;
                 }
                 let (a, b, c) = (at(tri[0]), at(tri[1]), at(tri[2]));
@@ -2448,6 +5572,17 @@ fn prop_row(p: Palette, label: String, value: String) -> Element<'static, Messag
 }
 
 /// The header of an explorer group: open/closed arrow, title, optional tag, count.
+/// Separates a group from a layer in a layer name: "Panel Be1 › STUD".
+pub const LAYER_GROUP: &str = " › ";
+
+/// The group of a layer name and the layer's own name (the whole name without a group).
+fn layer_group(name: &str) -> (Option<&str>, &str) {
+    match name.split_once(LAYER_GROUP) {
+        Some((group, rest)) if !group.trim().is_empty() && !rest.trim().is_empty() => (Some(group), rest),
+        _ => (None, name),
+    }
+}
+
 fn group_header(p: Palette, title: &str, tag: Option<&'static str>, count: usize, open: bool, msg: Message) -> Element<'static, Message> {
     use openaec_ui::icons::Icon;
     let arrow = svg(svg::Handle::from_memory(if open { Icon::DisclosureExpanded } else { Icon::DisclosureCollapsed }.bytes()))
@@ -2526,12 +5661,10 @@ fn panel_header<'a>(p: Palette, title: &'static str, badge: Option<String>) -> E
     .into()
 }
 
-/// The language of the stand-alone layout (`--screenshot`): English, Dutch with `O3V_LANG=nl`.
+/// The language of the stand-alone layout (`--screenshot`): English, or the language of
+/// `O3V_LANG` (`nl`, `de`, `fr`).
 pub(crate) fn standalone_language() -> Language {
-    match std::env::var("O3V_LANG").as_deref() {
-        Ok("nl") => Language::Dutch,
-        _ => Language::English,
-    }
+    std::env::var("O3V_LANG").ok().and_then(|code| Language::from_code(&code)).unwrap_or(Language::English)
 }
 
 /// A side panel of the stand-alone layout, as wide as the shell's pane (explorer 220, properties
@@ -2574,12 +5707,72 @@ impl Palette {
     }
 }
 
+/// The interface of `app` at `size` in a test, laid out and drawn on the CPU (tiny-skia).
+///
+/// iced_test tries its wgpu renderer first. Then every test that builds the interface opened a
+/// device on the graphics card, dozens in parallel, and brought the graphics drivers, hundreds of
+/// threads of theirs and the overlays that hook into them into the test process; now and then
+/// the suite died on Windows with an access violation on a thread without a name, as theirs are.
+/// On the CPU no driver is loaded and the suite runs three times as fast. The GPU stays for the
+/// window and `--screenshot`.
+#[cfg(test)]
+pub(crate) fn test_ui(app: &App, size: iced::Size) -> iced_test::Simulator<'_, Message> {
+    test_ui_of(size, app.view())
+}
+
+/// A part of the interface at `size` in a test, drawn on the CPU as [`test_ui`] is.
+#[cfg(test)]
+pub(crate) fn test_ui_of<'a>(size: iced::Size, part: Element<'a, Message>) -> iced_test::Simulator<'a, Message> {
+    static CPU: std::sync::Once = std::sync::Once::new();
+    // iced_test reads the variable for each simulator; all of them are made here
+    CPU.call_once(|| std::env::set_var("ICED_TEST_BACKEND", "tiny-skia"));
+    iced_test::Simulator::with_size(iced::Settings::default(), size, part)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_interface_in_tests_is_drawn_on_the_cpu() {
+        let dir = std::env::temp_dir().join(format!("o3v-test-ui-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let app = App::default();
+        let mut ui = test_ui(&app, iced::Size::new(320.0, 200.0));
+        let snapshot = ui.snapshot(&iced::Theme::Light).expect("a snapshot");
+        // iced_test names the hash file after the renderer that drew it
+        snapshot.matches_hash(dir.join("ui")).expect("the hash is written");
+        let drawn_by: Vec<_> = std::fs::read_dir(&dir).into_iter().flatten().flatten().map(|e| e.file_name()).collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(drawn_by, [std::ffi::OsString::from("ui-tiny-skia.sha256")]);
+    }
+
+    #[test]
+    fn layer_groups_split_on_the_arrow() {
+        assert_eq!(layer_group("Panel Be1 › STUD"), (Some("Panel Be1"), "STUD"));
+        assert_eq!(layer_group("Walls"), (None, "Walls"));
+        // A name that only starts or ends with the separator is not grouped.
+        assert_eq!(layer_group(" › STUD"), (None, " › STUD"));
+    }
+
     fn simulator(app: &App) -> iced_test::Simulator<'_, Message> {
-        iced_test::Simulator::with_size(iced::Settings::default(), iced::Size::new(1400.0, 900.0), app.view())
+        crate::app::test_ui(app, iced::Size::new(1400.0, 900.0))
+    }
+
+    #[test]
+    fn the_right_click_menu_sends_its_items() {
+        let mut app = App::default();
+        app.set_model(two_squares());
+        app.click(Some(Pickable::Element(10)), false);
+        app.context_menu = Some(Vec2::new(300.0, 200.0));
+        let mut ui = simulator(&app);
+        ui.click("Hide in view").expect("the menu is shown");
+        ui.click("Clear selection").expect("its items");
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert!(
+            matches!(messages[..], [Message::ContextMenu(MenuItem::Hide), Message::ContextMenu(MenuItem::ClearSelection)]),
+            "{messages:?}"
+        );
     }
 
     #[test]
@@ -2594,6 +5787,42 @@ mod tests {
         assert!(matches!(messages[0], Message::Mode(RenderMode::Wireframe)), "{messages:?}");
         assert!(matches!(messages[1], Message::ToggleGrid), "{messages:?}");
         assert!(matches!(messages[2], Message::SaveDialog), "{messages:?}");
+    }
+
+    #[test]
+    fn an_ifcx_file_added_to_an_ifcx_model_layers_over_it() {
+        fn source(name: &str, text: &str) -> loaders::Source {
+            loaders::Source::Bytes { name: name.into(), data: Arc::new(text.as_bytes().to_vec()) }
+        }
+        // the load the task would run, done here
+        fn finish(app: &mut App) {
+            let model = loaders::load_stack(&app.loading_stack.0, &loaders::Progress::default()).map(Arc::new);
+            let _ = app.update(Message::Loaded(model));
+        }
+        let base = r#"{"header": {"ifcxVersion": "ifcx_alpha"}, "imports": [], "schemas": {}, "data": [
+            {"path": "w", "attributes": {"bsi::ifc::class": {"code": "IfcWall"},
+             "usd::usdgeom::mesh": {"points": [[0,0,0],[1,0,0],[0,0,1]], "faceVertexIndices": [0,1,2]}}}]}"#;
+        let overlay = r#"{"header": {"ifcxVersion": "ifcx_alpha"}, "imports": [], "schemas": {}, "data": [
+            {"path": "w", "attributes": {"bsi::ifc::prop::FireRating": "R60"}}]}"#;
+        let mut app = App::default();
+        let _ = app.update(Message::Picked(Some(source("base.ifcx", base))));
+        finish(&mut app);
+        let _ = app.update(Message::AddPicked(Some(source("rating.ifcx", overlay))));
+        assert_eq!(app.loading_stack.0.len(), 2);
+        finish(&mut app);
+        assert_eq!(app.models.len(), 1, "composed into the open model");
+        let model = app.model.clone().unwrap();
+        assert_eq!(model.triangle_count(), 1);
+        assert!(model.props.values().any(|p| p.contains("R60")));
+        // after another kind of file the next IFCX stands on its own
+        let _ = app.update(Message::AddPicked(Some(loaders::Source::Bytes {
+            name: "tri.obj".into(),
+            data: Arc::new(b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n".to_vec()),
+        })));
+        finish(&mut app);
+        assert_eq!(app.models.len(), 2, "{:?}", app.status);
+        let _ = app.update(Message::AddPicked(Some(source("rating.ifcx", overlay))));
+        assert_eq!(app.loading_stack.0.len(), 1);
     }
 
     #[test]
@@ -2629,8 +5858,8 @@ mod tests {
         let _ = app.update(Message::ModelVisible(0, true));
         assert!(!app.visible[0], "a model toggle preserves its hidden layers");
         let mut ui = simulator(&app);
-        ui.click("second.obj").expect("model visibility row");
-        assert!(ui.into_messages().any(|m| matches!(m, Message::ModelVisible(1, false))));
+        ui.click("second.obj").expect("model row");
+        assert!(ui.into_messages().any(|m| matches!(m, Message::PickModel(1))));
         app.set_model(source("replacement.obj", 4.0));
         assert_eq!(app.models.len(), 1);
         assert_eq!(app.model.as_ref().unwrap().file_name(), "replacement.obj");
@@ -2647,8 +5876,11 @@ mod tests {
         let start = iced::Point::new(700.0, 300.0);
         ui.point_at(start);
         ui.simulate([iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))]);
-        ui.point_at(iced::Point::new(740.0, 310.0));
-        ui.simulate([iced::Event::Mouse(mouse::Event::CursorMoved { position: iced::Point::new(740.0, 310.0) })]);
+        // the drag grabs where it began, then orbits
+        for at in [iced::Point::new(740.0, 310.0), iced::Point::new(780.0, 320.0)] {
+            ui.point_at(at);
+            ui.simulate([iced::Event::Mouse(mouse::Event::CursorMoved { position: at })]);
+        }
         ui.simulate([iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))]);
         ui.simulate([iced::Event::Mouse(mouse::Event::WheelScrolled { delta: mouse::ScrollDelta::Lines { x: 0.0, y: 1.0 } })]);
         let nav: Vec<Navigate> = ui
@@ -2658,8 +5890,59 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert!(nav.iter().any(|n| matches!(n, Navigate::Orbit { dx, dy } if *dx == 40.0 && *dy == 10.0)), "{nav:?}");
+        assert!(nav.iter().any(|n| matches!(n, Navigate::Grab { orbit: true, .. })), "{nav:?}");
+        assert!(nav.iter().any(|n| matches!(n, Navigate::Orbit { dx, dy } if *dx == 80.0 && *dy == 20.0)), "{nav:?}");
+        assert!(nav.iter().any(|n| matches!(n, Navigate::Release)), "{nav:?}");
         assert!(nav.iter().any(|n| matches!(n, Navigate::Zoom { steps, .. } if *steps == 1.0)), "{nav:?}");
+    }
+
+    #[test]
+    fn touch_orbits_pinches_pans_and_taps() {
+        use iced::touch::{Event as T, Finger};
+        let navigation = |events: &[T], wait: bool| -> Vec<Navigate> {
+            let mut app = App::default();
+            app.status = Status::Loaded(String::new());
+            app.model = None;
+            let mut ui = simulator(&app);
+            for (i, event) in events.iter().enumerate() {
+                if wait && i == 1 {
+                    std::thread::sleep(std::time::Duration::from_millis(550));
+                }
+                ui.simulate([iced::Event::Touch(*event)]);
+            }
+            ui.into_messages().filter_map(|m| if let Message::Navigate(n) = m { Some(n) } else { None }).collect()
+        };
+        let (one, two) = (Finger(1), Finger(2));
+        let p = |x, y| iced::Point::new(x, y);
+
+        // one finger drags: grabs where it went down, orbits from there, and no pick
+        let nav = navigation(&[T::FingerPressed { id: one, position: p(700.0, 300.0) }, T::FingerMoved { id: one, position: p(730.0, 310.0) }, T::FingerMoved { id: one, position: p(760.0, 320.0) }, T::FingerLifted { id: one, position: p(760.0, 320.0) }], false);
+        assert!(nav.iter().any(|n| matches!(n, Navigate::Orbit { dx, dy } if *dx == 60.0 && *dy == 20.0)), "{nav:?}");
+        assert!(!nav.iter().any(|n| matches!(n, Navigate::Pick { .. })), "{nav:?}");
+
+        // a tap picks where the finger went down
+        let nav = navigation(&[T::FingerPressed { id: one, position: p(700.0, 300.0) }, T::FingerLifted { id: one, position: p(702.0, 301.0) }], false);
+        assert!(nav.iter().any(|n| matches!(n, Navigate::Pick { .. })), "{nav:?}");
+
+        // a long press, then a drag: pan (as a right drag)
+        let nav = navigation(&[T::FingerPressed { id: one, position: p(700.0, 300.0) }, T::FingerMoved { id: one, position: p(720.0, 300.0) }, T::FingerMoved { id: one, position: p(740.0, 300.0) }, T::FingerLifted { id: one, position: p(740.0, 300.0) }], true);
+        assert!(nav.iter().any(|n| matches!(n, Navigate::Pan { dx, .. } if *dx == 40.0)), "{nav:?}");
+        assert!(!nav.iter().any(|n| matches!(n, Navigate::Orbit { .. } | Navigate::Pick { .. })), "{nav:?}");
+
+        // two fingers spread: zoom in about their middle; the last finger alone does not orbit
+        let nav = navigation(
+            &[
+                T::FingerPressed { id: one, position: p(600.0, 300.0) },
+                T::FingerPressed { id: two, position: p(800.0, 300.0) },
+                T::FingerMoved { id: two, position: p(1000.0, 300.0) },
+                T::FingerLifted { id: one, position: p(600.0, 300.0) },
+                T::FingerMoved { id: two, position: p(900.0, 350.0) },
+                T::FingerLifted { id: two, position: p(900.0, 350.0) },
+            ],
+            false,
+        );
+        assert!(nav.iter().any(|n| matches!(n, Navigate::Pinch { steps, dx, .. } if *steps > 0.0 && *dx == 100.0)), "{nav:?}");
+        assert!(!nav.iter().any(|n| matches!(n, Navigate::Orbit { .. } | Navigate::Pick { .. })), "{nav:?}");
     }
 
     #[test]
@@ -2681,19 +5964,19 @@ mod tests {
         };
         let model = Model::new(PathBuf::from("x.rvt"), "Revit", vec![layer]);
         let still = |_: usize, _: u32| Vec3::ZERO;
-        let hit = pick_triangle(&model, &[true], Vec3::new(0.3, 0.6, 5.0), Vec3::new(0.0, 0.0, -1.0), &still, &|_| true, None);
+        let hit = pick_triangle(&model, &[true], Vec3::new(0.3, 0.6, 5.0), Vec3::new(0.0, 0.0, -1.0), &still, &|_| true, &|_, _| false, None);
         let (l, t) = hit.expect("hit");
         assert_eq!(model.layers[l].element_at(t), Some(20));
         let index = PickIndex::new(&model);
-        assert_eq!(pick_triangle(&model, &[true], Vec3::new(0.3, 0.6, 5.0), Vec3::new(0.0, 0.0, -1.0), &still, &|_| true, Some(&index)), hit);
+        assert_eq!(pick_triangle(&model, &[true], Vec3::new(0.3, 0.6, 5.0), Vec3::new(0.0, 0.0, -1.0), &still, &|_| true, &|_, _| false, Some(&index)), hit);
         assert_eq!(model.element_ranges(20), vec![(0, 6, 6)]);
         let props = model.element_props(20);
         assert!(props.contains(&("level".to_string(), "00 begane grond".to_string())), "{props:?}");
-        assert!(pick_triangle(&model, &[false], Vec3::new(0.3, 0.6, 5.0), Vec3::new(0.0, 0.0, -1.0), &still, &|_| true, None).is_none());
-        assert!(pick_triangle(&model, &[true], Vec3::new(3.0, 0.6, 5.0), Vec3::new(0.0, 0.0, -1.0), &still, &|_| true, None).is_none());
+        assert!(pick_triangle(&model, &[false], Vec3::new(0.3, 0.6, 5.0), Vec3::new(0.0, 0.0, -1.0), &still, &|_| true, &|_, _| false, None).is_none());
+        assert!(pick_triangle(&model, &[true], Vec3::new(3.0, 0.6, 5.0), Vec3::new(0.0, 0.0, -1.0), &still, &|_| true, &|_, _| false, None).is_none());
         // a section box below z = 0.5 cuts the upper square away: the lower one is hit
         let below = |p: Vec3| p.z < 0.5;
-        let (l, t) = pick_triangle(&model, &[true], Vec3::new(0.3, 0.6, 5.0), Vec3::new(0.0, 0.0, -1.0), &still, &below, None).expect("hit");
+        let (l, t) = pick_triangle(&model, &[true], Vec3::new(0.3, 0.6, 5.0), Vec3::new(0.0, 0.0, -1.0), &still, &below, &|_, _| false, None).expect("hit");
         assert_eq!(model.layers[l].element_at(t), Some(10));
     }
 
@@ -2714,16 +5997,16 @@ mod tests {
         let down = Vec3::new(0.0, 0.0, -1.0);
         for x in [0.3, 255.5, 256.7, 1400.2, 1998.9, 1999.5] {
             let origin = Vec3::new(x, 0.6, 5.0);
-            let plain = pick_triangle(&model, &[true], origin, down, &still, &|_| true, None);
-            assert_eq!(pick_triangle(&model, &[true], origin, down, &still, &|_| true, Some(&index)), plain, "x = {x}");
+            let plain = pick_triangle(&model, &[true], origin, down, &still, &|_| true, &|_, _| false, None);
+            assert_eq!(pick_triangle(&model, &[true], origin, down, &still, &|_| true, &|_, _| false, Some(&index)), plain, "x = {x}");
             assert_eq!(plain.is_some(), x.rem_euclid(2.0) < 1.0, "x = {x}");
         }
         // a slanted ray, across many blocks
         let slanted = Vec3::new(-0.3, 0.0, -1.0);
         let origin = Vec3::new(1001.0, 0.5, 2.0);
         assert_eq!(
-            pick_triangle(&model, &[true], origin, slanted, &still, &|_| true, Some(&index)),
-            pick_triangle(&model, &[true], origin, slanted, &still, &|_| true, None),
+            pick_triangle(&model, &[true], origin, slanted, &still, &|_| true, &|_, _| false, Some(&index)),
+            pick_triangle(&model, &[true], origin, slanted, &still, &|_| true, &|_, _| false, None),
         );
     }
 
@@ -2744,6 +6027,491 @@ mod tests {
         Arc::new(Model::new(PathBuf::from("x.rvt"), "Revit", vec![layer]))
     }
 
+    /// Where world point `p` is in the viewport of `app`, as the viewport reports a click.
+    fn screen_point(app: &App, p: Vec3) -> (f32, f32) {
+        let (w, h) = app.viewport_size;
+        let n = (app.camera.view_proj(w / h) * app.model_matrix()).project_point3(p);
+        ((n.x + 1.0) * 0.5 * w, (1.0 - n.y) * 0.5 * h)
+    }
+
+    /// A model of one square, element `id`, at x, named `name`.
+    fn named_square(name: &str, id: u64, x: f32) -> Arc<Model> {
+        use crate::model::Layer;
+        let layer = Layer {
+            name: "Walls".into(),
+            positions: vec![x, 0.0, 0.0, x + 1.0, 0.0, 0.0, x + 1.0, 1.0, 0.0, x, 1.0, 0.0],
+            indices: vec![0, 1, 2, 0, 2, 3],
+            elements: vec![(id, 0, 6)],
+            props: vec![(id, format!(r#"{{"Name":"{name}"}}"#))],
+            ..Layer::default()
+        };
+        Arc::new(Model::new(PathBuf::from(format!("{name}.rvt")), "Revit", vec![layer]))
+    }
+
+    #[test]
+    fn a_picked_model_moves_by_two_points_its_zero_point_along() {
+        let mut app = App::default();
+        app.set_model(named_square("architect", 7, 0.0));
+        app.add_model(named_square("structure", 8, 5.0));
+        let _ = app.update(Message::PickModel(1));
+        let _ = app.update(Message::MoveModelByPoints);
+        assert_eq!(app.moving_model, Some((1, 0)));
+        assert_eq!(app.measure.tool, Some(Tool::Line));
+        // the line from a corner of the second square to the first square's corner
+        app.measure.results.push(crate::measure::Measurement::Mark { kind: crate::measure::MarkKind::Line, points: vec![Vec3::new(5.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 0.0)] });
+        app.move_model_by_line();
+        assert_eq!(app.models[1].placed.moved, glam::DVec3::new(-5.0, 0.0, 0.0));
+        assert!(app.moving_model.is_none() && app.measure.tool.is_none() && app.measure.results.is_empty(), "the line is not kept");
+        let scene = app.model.clone().unwrap();
+        assert_eq!(scene.layers[1].positions[0], scene.layers[0].positions[0], "the squares lie on each other");
+        let Status::Loaded(said) = &app.status else { panic!("{:?}", app.status) };
+        assert!(said.contains("structure.rvt moved by -5.000"), "{said}");
+        // Esc stops a move begun
+        let _ = app.update(Message::MoveModelByPoints);
+        let _ = app.update(Message::Escape);
+        assert!(app.moving_model.is_none() && app.measure.tool.is_none());
+    }
+
+    #[test]
+    fn an_added_model_is_laid_on_the_first_by_the_grids_they_share() {
+        use crate::model::GridLine;
+        let with_grids = |name: &str, id: u64, x: f32, off: [f32; 2]| {
+            let mut model = (*named_square(name, id, x)).clone();
+            let g = |n: &str, a: [f32; 2], b: [f32; 2]| GridLine { name: n.into(), a: [a[0] + off[0], a[1] + off[1], 0.0], b: [b[0] + off[0], b[1] + off[1], 0.0] };
+            model.project.grids = vec![g("1", [0.0, -5.0], [0.0, 5.0]), g("A", [-5.0, 0.0], [5.0, 0.0]), g("2", [6.0, -5.0], [6.0, 5.0])];
+            Arc::new(model)
+        };
+        let mut app = App::default();
+        // the architect's square at x 10 with its grids from 10; the structural engineer's the same
+        // square at x 0 with its grids from 0: once laid on each other the squares coincide
+        app.set_model(with_grids("architect", 7, 10.0, [10.0, 3.0]));
+        app.add_model(with_grids("structure", 8, 0.0, [0.0, 0.0]));
+        assert_eq!(app.models[1].placed.moved, glam::DVec3::new(10.0, 3.0, 0.0));
+        let Status::Loaded(said) = &app.status else { panic!("{:?}", app.status) };
+        assert!(said.contains("structure.rvt laid on the first model by 3 grids"), "{said}");
+        let scene = app.model.clone().unwrap();
+        let x = |layer: usize| scene.layers[layer].positions[0];
+        assert_eq!(x(1), x(0), "the squares lie on each other");
+        // a model without shared grids stays where it is
+        app.add_model(named_square("other", 9, 40.0));
+        assert_eq!(app.models[2].placed.moved, glam::DVec3::ZERO);
+    }
+
+    /// Two unit squares facing +Z, element 10 at z = 0 under element 20 at z = 1.
+    fn stacked_squares() -> Arc<Model> {
+        use crate::model::Layer;
+        let mut positions = Vec::new();
+        for z in [0.0, 1.0] {
+            positions.extend_from_slice(&[0.0, 0.0, z, 1.0, 0.0, z, 1.0, 1.0, z, 0.0, 1.0, z]);
+        }
+        let layer = Layer {
+            name: "Slabs".into(),
+            positions,
+            indices: vec![0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7],
+            elements: vec![(10, 0, 6), (20, 6, 6)],
+            ..Layer::default()
+        };
+        Arc::new(Model::new(PathBuf::from("x.rvt"), "Revit", vec![layer]))
+    }
+
+    /// The flags of the unit of element `id`.
+    fn element_flags(app: &App, id: u64) -> u8 {
+        let unit = app.explode_index.as_ref().and_then(|i| i.element_unit(id)).expect("unit");
+        app.units.get(unit).map_or(0, |s| s[3] as u8)
+    }
+
+    #[test]
+    fn hide_hides_selected_units_and_clears_selection() {
+        let mut app = App::default();
+        app.set_model(two_squares());
+        app.click(Some(Pickable::Element(20)), false);
+        let _ = app.update(Message::HideSelection);
+        assert_eq!(element_flags(&app, 20) & UNIT_HIDDEN, UNIT_HIDDEN);
+        assert_eq!(element_flags(&app, 10), 0);
+        assert!(app.sel.is_empty());
+    }
+
+    #[test]
+    fn isolate_hides_everything_else() {
+        let mut app = App::default();
+        app.set_model(two_squares());
+        app.click(Some(Pickable::Element(20)), false);
+        let _ = app.update(Message::IsolateSelection);
+        assert_eq!(element_flags(&app, 10) & UNIT_HIDDEN, UNIT_HIDDEN);
+        assert_eq!(element_flags(&app, 20) & UNIT_HIDDEN, 0);
+        assert!(app.sel.contains(Pickable::Element(20)));
+    }
+
+    #[test]
+    fn show_all_clears_hidden() {
+        let mut app = App::default();
+        app.set_model(two_squares());
+        app.click(Some(Pickable::Element(20)), false);
+        let _ = app.update(Message::HideSelection);
+        let _ = app.update(Message::ShowAllElements);
+        assert!(app.hidden.is_empty());
+        assert_eq!(element_flags(&app, 20), 0);
+    }
+
+    #[test]
+    fn fitting_frames_the_model_not_a_stray_far_away() {
+        use crate::model::Layer;
+        // a slab of 200 triangles from 0,0 to 10,10, and one triangle a thousand kilometres away
+        let mut positions = Vec::new();
+        let mut elements = Vec::new();
+        for k in 0..100 {
+            let (x, y) = ((k % 10) as f32, (k / 10) as f32);
+            elements.push((k as u64 + 1, 6 * k, 6));
+            positions.extend_from_slice(&[x, y, 0.0, x + 1.0, y, 0.0, x + 1.0, y + 1.0, 0.0, x, y, 0.0, x + 1.0, y + 1.0, 0.0, x, y + 1.0, 0.0]);
+        }
+        elements.push((1000, 600, 3));
+        positions.extend_from_slice(&[1.0e6, 0.0, 0.0, 1.0e6 + 1.0, 0.0, 0.0, 1.0e6, 1.0, 0.0]);
+        let indices = (0..positions.len() as u32 / 3).collect();
+        let layer = Layer { name: "Map".into(), positions, indices, elements, ..Layer::default() };
+        let mut app = App::default();
+        app.set_model(Arc::new(Model::new(PathBuf::from("map.blend"), "Blender", vec![layer])));
+        app.fit();
+        assert!(app.camera.target.distance(Vec3::new(5.0, 5.0, 0.0)) < 1e-3, "{:?}", app.camera.target);
+        assert!(app.camera.scene_radius < 10.0, "{}", app.camera.scene_radius);
+    }
+
+    #[test]
+    fn pick_passes_through_hidden_element() {
+        let mut app = App::default();
+        app.set_model(stacked_squares());
+        app.camera.set_preset(ViewPreset::Top);
+        app.fit();
+        let (w, h) = app.viewport_size;
+        let (x, y) = screen_point(&app, Vec3::new(0.5, 0.5, 1.0));
+        let _ = app.update(Message::Navigate(Navigate::Pick { x, y, width: w, height: h, add: false }));
+        assert_eq!(app.sel.primary(), Some(Pickable::Element(20)));
+        let _ = app.update(Message::HideSelection);
+        let _ = app.update(Message::Navigate(Navigate::Pick { x, y, width: w, height: h, add: false }));
+        assert_eq!(app.sel.primary(), Some(Pickable::Element(10)));
+    }
+
+    #[test]
+    fn hide_works_for_formats_without_elements() {
+        use crate::model::Layer;
+        let layer = Layer { name: "Mesh".into(), positions: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0], indices: vec![0, 1, 2], ..Layer::default() };
+        let mut app = App::default();
+        app.set_model(Arc::new(Model::new(PathBuf::from("x.obj"), "OBJ", vec![layer])));
+        app.click(Some(Pickable::Layer(0)), false);
+        let _ = app.update(Message::HideSelection);
+        let unit = app.explode_index.as_ref().and_then(|i| i.layer_rest_unit(0)).expect("unit");
+        assert_eq!(app.units[unit][3] as u8 & UNIT_HIDDEN, UNIT_HIDDEN);
+    }
+
+    #[test]
+    fn hidden_survive_add_model() {
+        let mut app = App::default();
+        app.set_model(named_square("a", 7, 0.0));
+        app.click(Some(Pickable::Element(7)), false);
+        let _ = app.update(Message::HideSelection);
+        app.add_model(named_square("b", 7, 2.0));
+        let model = app.model.clone().unwrap();
+        let id = model.element_with_key(crate::model::ElementKey { model: 0, source: 7 }).unwrap();
+        let other = model.element_with_key(crate::model::ElementKey { model: 1, source: 7 }).unwrap();
+        assert_eq!(element_flags(&app, id) & UNIT_HIDDEN, UNIT_HIDDEN);
+        assert_eq!(element_flags(&app, other), 0);
+    }
+
+    #[test]
+    fn explode_and_hidden_combine() {
+        let mut app = App::default();
+        app.set_model(two_squares());
+        let _ = app.update(Message::ToggleExplode);
+        let _ = app.update(Message::Explode(0, 50.0));
+        app.click(Some(Pickable::Element(20)), false);
+        let _ = app.update(Message::HideSelection);
+        let unit = app.explode_index.as_ref().and_then(|i| i.element_unit(20)).unwrap();
+        assert_ne!(app.units[unit][0], 0.0, "still moved apart");
+        assert_eq!(app.units[unit][3] as u8 & UNIT_HIDDEN, UNIT_HIDDEN);
+    }
+
+    #[test]
+    fn a_right_click_selects_what_lies_there_and_its_menu_hides_it() {
+        let mut app = App::default();
+        app.set_model(two_squares());
+        app.camera.set_preset(ViewPreset::Top);
+        app.fit();
+        let (w, h) = app.viewport_size;
+        let (x, y) = screen_point(&app, Vec3::new(0.5, 0.5, 0.0));
+        let _ = app.update(Message::Navigate(Navigate::Context { x, y, width: w, height: h }));
+        assert_eq!(app.sel.items(), &[Pickable::Element(10)]);
+        assert_eq!(app.context_menu, Some(Vec2::new(x, y)));
+        let _ = app.update(Message::ContextMenu(MenuItem::Hide));
+        assert!(app.context_menu.is_none(), "choosing closes the menu");
+        assert_eq!(app.hidden.len(), 1);
+        assert!(app.sel.is_empty());
+        let _ = app.update(Message::Undo);
+        assert!(app.hidden.is_empty(), "undo brings it back");
+    }
+
+    #[test]
+    fn a_right_click_keeps_the_selection_it_lies_in() {
+        let mut app = App::default();
+        app.set_model(two_squares());
+        app.camera.set_preset(ViewPreset::Top);
+        app.fit();
+        let (w, h) = app.viewport_size;
+        let ((x1, y1), (x2, y2)) = (screen_point(&app, Vec3::new(0.5, 0.5, 0.0)), screen_point(&app, Vec3::new(2.5, 0.5, 0.0)));
+        let _ = app.update(Message::Navigate(Navigate::Pick { x: x1, y: y1, width: w, height: h, add: false }));
+        let _ = app.update(Message::Navigate(Navigate::Pick { x: x2, y: y2, width: w, height: h, add: true }));
+        let both = [Pickable::Element(10), Pickable::Element(20)];
+        let _ = app.update(Message::Navigate(Navigate::Context { x: x2, y: y2, width: w, height: h }));
+        assert_eq!(app.sel.items(), &both, "a right click in the selection keeps it");
+        // Esc closes the menu first, and keeps the selection
+        let _ = app.update(Message::Escape);
+        assert!(app.context_menu.is_none());
+        assert_eq!(app.sel.items(), &both);
+        // empty space keeps the selection too; moving the camera closes the menu
+        let _ = app.update(Message::Navigate(Navigate::Context { x: 2.0, y: 2.0, width: w, height: h }));
+        assert_eq!(app.sel.items(), &both);
+        assert!(app.context_menu.is_some());
+        let _ = app.update(Message::Navigate(Navigate::Orbit { dx: 5.0, dy: 0.0 }));
+        assert!(app.context_menu.is_none());
+        // isolating from the menu hides nothing of the selection
+        let _ = app.update(Message::Navigate(Navigate::Context { x: x1, y: y1, width: w, height: h }));
+        let _ = app.update(Message::ContextMenu(MenuItem::Isolate));
+        assert!(app.hidden.is_empty() && app.context_menu.is_none());
+    }
+
+    #[test]
+    fn box_select_skips_what_the_section_cuts_away() {
+        let mut app = App::default();
+        app.set_model(two_squares());
+        app.camera.set_preset(ViewPreset::Top);
+        app.fit();
+        // a section box around the first square only
+        app.section = Some(SectionBox::around(&Bounds { min: [-0.5, -0.5, -1.0], max: [1.5, 1.5, 1.0] }));
+        app.section_on = true;
+        let (w, h) = app.viewport_size;
+        let (x0, y0) = screen_point(&app, Vec3::new(-0.5, 1.5, 0.0));
+        let (x1, y1) = screen_point(&app, Vec3::new(3.5, -0.5, 0.0));
+        let _ = app.update(Message::Navigate(Navigate::Box { x0, y0, x1, y1, width: w, height: h, done: true, add: true }));
+        assert_eq!(app.sel.items(), &[Pickable::Element(10)]);
+    }
+
+    #[test]
+    fn box_select_finds_structural_nodes_and_members() {
+        use bim_structural::{sam_id, IdKind};
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/bim-structural/tests/fixtures/portal_frame.samjson");
+        let model = crate::loaders::load(&path).expect("portal frame");
+        let el = |source| model.structural[0].element_of(source).expect("a structural object");
+        let mut want = vec![el(sam_id(IdKind::Node, 1)), el(sam_id(IdKind::Node, 2)), el(sam_id(IdKind::Member, 1))];
+        want.sort_unstable();
+        let mut app = App::default();
+        app.set_model(Arc::new(model));
+        app.camera.set_preset(ViewPreset::Front);
+        app.fit();
+        // a window around the left column (x = 0): its two nodes and the column, wholly inside
+        let (w, h) = app.viewport_size;
+        let (ax, ay) = screen_point(&app, Vec3::new(-0.5, 0.0, 5.0));
+        let (bx, by) = screen_point(&app, Vec3::new(0.5, 0.0, -1.0));
+        let (x0, x1) = (ax.min(bx), ax.max(bx));
+        let _ = app.update(Message::Navigate(Navigate::Box { x0, y0: ay, x1, y1: by, width: w, height: h, done: true, add: true }));
+        let mut got: Vec<u64> = app.sel.items().iter().filter_map(|i| match i { Pickable::Element(id) => Some(*id), _ => None }).collect();
+        got.sort_unstable();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn hiding_drops_the_measure_highlight() {
+        let mut app = App::default();
+        app.set_model(two_squares());
+        app.camera.set_preset(ViewPreset::Top);
+        app.fit();
+        let (w, h) = app.viewport_size;
+        let _ = app.update(Message::Measure(Tool::Distance));
+        let (x, y) = screen_point(&app, Vec3::new(0.5, 0.5, 0.0));
+        let _ = app.update(Message::Navigate(Navigate::Hover { x, y, width: w, height: h }));
+        app.hover_last = None;
+        assert!(app.measure.hover.is_some());
+        app.click(Some(Pickable::Element(10)), false);
+        let _ = app.update(Message::HideSelection);
+        assert!(app.measure.hover.is_none(), "looked again: nothing shown there");
+    }
+
+    #[test]
+    fn select_where_selects_all_matches() {
+        use crate::model::Layer;
+        let layer = Layer {
+            name: "Walls".into(),
+            positions: vec![0.0; 27],
+            indices: (0..9).collect(),
+            elements: vec![(1, 0, 3), (2, 3, 3), (3, 6, 3)],
+            props: vec![(1, r#"{"level":"00"}"#.into()), (2, r#"{"level":"01"}"#.into()), (3, r#"{"level":"00"}"#.into())],
+            ..Layer::default()
+        };
+        let mut app = App::default();
+        app.set_model(Arc::new(Model::new(PathBuf::from("x.rvt"), "Revit", vec![layer])));
+        app.click(Some(Pickable::Element(2)), false);
+        let _ = app.update(Message::SelectWhere("level".into(), "00".into()));
+        assert_eq!(app.sel.items(), &[Pickable::Element(1), Pickable::Element(3)]);
+    }
+
+    #[test]
+    fn select_layer_of_selection() {
+        use crate::model::Layer;
+        let walls = two_squares().layers[0].clone();
+        let mesh = Layer { name: "Mesh".into(), positions: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0], indices: vec![0, 1, 2], ..Layer::default() };
+        let mut app = App::default();
+        app.set_model(Arc::new(Model::new(PathBuf::from("x.rvt"), "Revit", vec![walls, mesh])));
+        app.click(Some(Pickable::Element(20)), false);
+        let _ = app.update(Message::SelectLayerOfSelection);
+        assert_eq!(app.sel.items(), &[Pickable::Element(20), Pickable::Element(10)]);
+        app.click(Some(Pickable::Layer(1)), true);
+        let _ = app.update(Message::SelectLayerOfSelection);
+        assert_eq!(app.sel.len(), 3);
+    }
+
+    #[test]
+    fn ctrl_drag_box_adds_what_it_holds() {
+        let mut app = App::default();
+        app.set_model(two_squares());
+        app.camera.set_preset(ViewPreset::Top);
+        app.fit();
+        let (w, h) = app.viewport_size;
+        let (x0, y0) = screen_point(&app, Vec3::new(-0.5, 1.5, 0.0));
+        let (x1, y1) = screen_point(&app, Vec3::new(3.5, -0.5, 0.0));
+        let _ = app.update(Message::Navigate(Navigate::Box { x0, y0, x1, y1, width: w, height: h, done: false, add: true }));
+        assert!(app.box_select.is_some(), "drawn while dragging");
+        let _ = app.update(Message::Navigate(Navigate::Box { x0, y0, x1, y1, width: w, height: h, done: true, add: true }));
+        assert!(app.box_select.is_none());
+        assert_eq!(app.sel.len(), 2);
+    }
+
+    #[test]
+    fn undo_restores_hidden_and_layers() {
+        let mut app = App::default();
+        app.set_model(two_squares());
+        app.click(Some(Pickable::Element(10)), false);
+        let _ = app.update(Message::HideSelection);
+        let _ = app.update(Message::Layer(0, false));
+        assert!(!app.visible[0]);
+        let _ = app.update(Message::Undo);
+        assert!(app.visible[0]);
+        assert_eq!(element_flags(&app, 10) & UNIT_HIDDEN, UNIT_HIDDEN);
+        let _ = app.update(Message::Undo);
+        assert_eq!(element_flags(&app, 10) & UNIT_HIDDEN, 0);
+        let _ = app.update(Message::Redo);
+        assert_eq!(element_flags(&app, 10) & UNIT_HIDDEN, UNIT_HIDDEN);
+    }
+
+    #[test]
+    fn no_entry_for_noop() {
+        let mut app = App::default();
+        app.set_model(two_squares());
+        let _ = app.update(Message::ShowAllElements);
+        let _ = app.update(Message::Layer(0, true));
+        assert!(!app.history.can_undo());
+    }
+
+    #[test]
+    fn undo_survives_add_model() {
+        let mut app = App::default();
+        app.set_model(named_square("a", 7, 0.0));
+        app.click(Some(Pickable::Element(7)), false);
+        let _ = app.update(Message::HideSelection);
+        app.add_model(named_square("b", 7, 2.0));
+        let id = app.model.as_ref().unwrap().element_with_key(crate::model::ElementKey { model: 0, source: 7 }).unwrap();
+        assert_eq!(element_flags(&app, id) & UNIT_HIDDEN, UNIT_HIDDEN);
+        let _ = app.update(Message::Undo);
+        assert_eq!(element_flags(&app, id) & UNIT_HIDDEN, 0);
+        assert_eq!(app.visible.len(), 2, "the added model's layer stays");
+    }
+
+    #[test]
+    fn ids_stay_the_same_after_add() {
+        let mut app = App::default();
+        let name = |app: &App, id: u64| app.model.as_ref().unwrap().element_props(id).first().map(|p| p.1.clone());
+        app.set_model(named_square("a", 7, 0.0));
+        app.add_model(named_square("b", 7, 2.0));
+        assert_eq!(name(&app, 7).as_deref(), Some("a"), "the first model keeps its ids");
+        let b = app.model.as_ref().unwrap().element_with_key(crate::model::ElementKey { model: 1, source: 7 }).unwrap();
+        app.add_model(named_square("c", 7, 4.0));
+        assert_eq!(name(&app, 7).as_deref(), Some("a"));
+        assert_eq!(name(&app, b).as_deref(), Some("b"), "an added model keeps its ids when the next is added");
+    }
+
+    #[test]
+    fn keys_survive_add_model() {
+        let mut app = App::default();
+        app.set_model(named_square("a", 7, 0.0));
+        let key = app.model.as_ref().unwrap().element_key(7);
+        let before = app.model.as_ref().unwrap().element_props(7);
+        app.add_model(named_square("b", 7, 2.0));
+        let model = app.model.clone().unwrap();
+        let id = model.element_with_key(key).expect("still there");
+        assert_eq!(model.element_props(id), before);
+    }
+
+    #[test]
+    fn unit_keys_round_trip_after_add() {
+        let mut app = App::default();
+        app.set_model(named_square("a", 7, 0.0));
+        app.add_model(named_square("b", 7, 2.0));
+        let index = app.explode_index.clone().unwrap();
+        for unit in 1..index.len() {
+            let key = app.unit_key(index.owner(unit).unwrap());
+            assert_eq!(app.unit_of_key(key), Some(unit));
+        }
+        assert_eq!(app.unit_key(UnitOwner::LayerRest(1)), UnitKey::LayerRest { model: 1, layer: 0 });
+    }
+
+    #[test]
+    fn ctrl_click_adds_and_removes() {
+        let mut app = App::default();
+        app.set_model(two_squares());
+        app.click(Some(Pickable::Element(20)), false);
+        app.click(Some(Pickable::Element(10)), true);
+        assert_eq!(app.sel.len(), 2);
+        assert_eq!(app.sel.primary(), Some(Pickable::Element(20)));
+        app.click(Some(Pickable::Element(10)), true);
+        assert_eq!(app.sel.len(), 1);
+    }
+
+    #[test]
+    fn plain_click_on_empty_space_clears_but_ctrl_click_keeps() {
+        let mut app = App::default();
+        app.set_model(two_squares());
+        app.click(Some(Pickable::Element(10)), false);
+        app.click(None, true);
+        assert_eq!(app.sel.len(), 1);
+        assert_eq!(app.selected, Some((0, Some(10))));
+        app.click(None, false);
+        assert!(app.sel.is_empty());
+        assert_eq!(app.selected, None);
+        assert!(app.selection.is_empty());
+    }
+
+    #[test]
+    fn ctrl_pick_reaches_click_with_add() {
+        let mut app = App::default();
+        app.set_model(two_squares());
+        app.camera.set_preset(ViewPreset::Top);
+        app.fit();
+        let (w, h) = app.viewport_size;
+        let (x, y) = screen_point(&app, Vec3::new(0.5, 0.5, 0.0));
+        let _ = app.update(Message::Navigate(Navigate::Pick { x, y, width: w, height: h, add: false }));
+        let (x, y) = screen_point(&app, Vec3::new(2.5, 0.5, 0.0));
+        let _ = app.update(Message::Navigate(Navigate::Pick { x, y, width: w, height: h, add: true }));
+        assert_eq!(app.sel.items(), &[Pickable::Element(10), Pickable::Element(20)]);
+        assert_eq!(app.selection, vec![(0, 0, 6), (0, 6, 6)]);
+    }
+
+    #[test]
+    fn selected_units_carry_the_selected_flag() {
+        let mut app = App::default();
+        app.set_model(two_squares());
+        app.click(Some(Pickable::Element(20)), false);
+        let index = app.explode_index.clone().expect("units");
+        let flags = |id: u64| app.units[index.element_unit(id).expect("unit")][3] as u8;
+        assert_eq!(flags(20) & UNIT_SELECTED, UNIT_SELECTED);
+        assert_eq!(flags(10), 0);
+    }
+
     #[test]
     fn the_exploded_view_is_picked_and_framed_where_it_is_drawn() {
         let mut app = App::default();
@@ -2754,9 +6522,9 @@ mod tests {
         // no levels: elements mode; the middle is x 1.5, so the squares move by -2 and +2
         let down = Vec3::new(0.0, 0.0, -1.0);
         let shift = |l: usize, i: u32| app.explode_offset(l, i);
-        let hit = pick_triangle(&model, &[true], Vec3::new(4.5, 0.5, 5.0), down, &shift, &|_| true, None);
+        let hit = pick_triangle(&model, &[true], Vec3::new(4.5, 0.5, 5.0), down, &shift, &|_| true, &|_, _| false, None);
         assert_eq!(hit.map(|(l, t)| model.layers[l].element_at(t)), Some(Some(20)));
-        assert!(pick_triangle(&model, &[true], Vec3::new(2.5, 0.5, 5.0), down, &shift, &|_| true, None).is_none());
+        assert!(pick_triangle(&model, &[true], Vec3::new(2.5, 0.5, 5.0), down, &shift, &|_| true, &|_, _| false, None).is_none());
         let b = app.world_bounds().unwrap();
         assert_eq!((b.min[0], b.max[0]), (-2.0, 5.0));
         app.selection = model.element_ranges(20);
@@ -2807,7 +6575,7 @@ mod tests {
         // a few pixels off the corners: they snap
         for (corner, off) in [(Vec3::new(0.0, 0.0, 0.0), 0.01), (Vec3::new(2.0, 1.0, 0.0), -0.01)] {
             let (x, y) = screen(corner + Vec3::new(off, off, 0.0));
-            let _ = app.update(Message::Navigate(Navigate::Pick { x, y, width: w, height: h }));
+            let _ = app.update(Message::Navigate(Navigate::Pick { x, y, width: w, height: h, add: false }));
         }
         assert_eq!(app.measure.results.len(), 1);
         let (_, d) = app.measure.results[0].value();
@@ -2855,7 +6623,7 @@ mod tests {
         let highlighted = app.measure.hover.clone().expect("hover");
         assert_eq!(highlighted.kind, SnapKind::Corner);
         // the click lands a pixel or two off: it takes the highlighted corner
-        let _ = app.update(Message::Navigate(Navigate::Pick { x: cx + 5.0, y: cy - 3.0, width: w, height: h }));
+        let _ = app.update(Message::Navigate(Navigate::Pick { x: cx + 5.0, y: cy - 3.0, width: w, height: h, add: false }));
         assert_eq!(app.measure.picks, vec![highlighted.snap]);
         // orbiting drops the highlight; leaving the viewport too
         hover(&mut app, x, y);
@@ -2870,7 +6638,7 @@ mod tests {
         assert!(app.measure.hover.is_some());
         let _ = app.update(Message::Layer(0, false));
         assert!(app.measure.hover.is_none(), "looked again: nothing shown there");
-        let _ = app.update(Message::Navigate(Navigate::Pick { x, y, width: w, height: h }));
+        let _ = app.update(Message::Navigate(Navigate::Pick { x, y, width: w, height: h, add: false }));
         assert_eq!(app.measure.picks.len(), 1, "only the corner from before");
     }
 

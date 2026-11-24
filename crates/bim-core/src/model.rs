@@ -1,0 +1,1145 @@
+//! The model: elements by id over a tile grid, and their evaluation to solids.
+//!
+//! Elements hold definitions; [`Model::evaluate`] derives their solids. A connection joins linear
+//! elements ([`crate::join`]): it trims their ends, takes material out of them and adds to them, so
+//! a member is evaluated with the connections that name it; the connection's own parts (plates,
+//! bolts) are its body. A connection that cannot be made is refused by its own evaluation and
+//! leaves its members as they are.
+
+use crate::element::{opening_solids, planar_parts, ConnectionDef, ConnectionKind, Element, ElementId, LinearDef, Opening, PlanarDef, PlanarForm, PointDef, Shape};
+use glam::DVec2;
+use crate::join::{self, JoinKind, JoinResult, Member, MemberEnd};
+use crate::solid::{Plane, Solid};
+use crate::tile::{TileGrid, TileKey};
+use crate::boolean::{boolean, BooleanOp};
+use crate::Refusal;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+/// A door or window stands in a wall when its foot lies within the wall and this far beside it (metres).
+const STANDS_IN: f64 = 0.01;
+/// And faces along it: the sine of the angle between them is at most this.
+const FACES_ALONG: f64 = 0.02;
+
+/// How far apart (metres) the ends of members may be and still be joined.
+pub const JOIN_TOLERANCE: f64 = 1e-3;
+
+/// A solid of an element, in the frame of the element's tile.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Part {
+    /// The IFC class of the part (a curtain wall's members are `IfcMember`).
+    pub class: &'static str,
+    pub tile: TileKey,
+    pub solid: Solid,
+    /// What it is made of: the material key of its layer, for a planar element with a build-up.
+    pub material: Option<String>,
+}
+
+/// The elements of a project over its tile grid.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Model {
+    pub grid: TileGrid,
+    elements: BTreeMap<ElementId, Element>,
+    next: u64,
+    /// The grid lines the project is set out on (see [`crate::datum`]).
+    #[serde(default)]
+    pub(crate) grids: Vec<crate::datum::GridDef>,
+}
+
+impl Model {
+    pub fn new(grid: TileGrid) -> Self {
+        Self { grid, elements: BTreeMap::new(), next: 1, grids: Vec::new() }
+    }
+
+    pub fn len(&self) -> usize {
+        self.elements.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.elements.is_empty()
+    }
+
+    pub fn get(&self, id: ElementId) -> Option<&Element> {
+        self.elements.get(&id)
+    }
+
+    /// The elements in id order.
+    pub fn iter(&self) -> impl Iterator<Item = &Element> {
+        self.elements.values()
+    }
+
+    /// Adds `element` under a new id, if it evaluates; a refusal leaves the model as it was.
+    pub fn add(&mut self, mut element: Element) -> Result<ElementId, Refusal> {
+        let id = ElementId(self.next.max(1));
+        element.id = id;
+        // A copy is a new pile. Zero requests the next issued number on refresh.
+        element.pile_number = element.pile_number.map(|_| 0);
+        element.pile_mark = None;
+        element.rehome(&self.grid);
+        self.evaluate_element(&element)?;
+        self.elements.insert(id, element);
+        self.next = id.0 + 1;
+        Ok(id)
+    }
+
+    /// Puts `element` back under its own id (reading a file): kept even when it does not evaluate,
+    /// so nothing is lost; its evaluation reports the refusal.
+    pub fn insert(&mut self, element: Element) {
+        self.next = self.next.max(element.id.0 + 1);
+        self.elements.insert(element.id, element);
+    }
+
+    /// Changes an element, if the change evaluates.
+    pub fn replace(&mut self, mut element: Element) -> Result<(), Refusal> {
+        if !self.elements.contains_key(&element.id) {
+            return Err(Refusal::Missing);
+        }
+        element.rehome(&self.grid);
+        self.evaluate_element(&element)?;
+        self.elements.insert(element.id, element);
+        Ok(())
+    }
+
+    /// Removes an element and the connections that join it; returns what was removed.
+    pub fn remove(&mut self, id: ElementId) -> Vec<Element> {
+        let Some(element) = self.elements.remove(&id) else { return Vec::new() };
+        let joined: Vec<ElementId> = self
+            .elements
+            .values()
+            .filter(|e| matches!(&e.shape, Shape::Connection(c) if c.primary == id || c.secondary == id))
+            .map(|e| e.id)
+            .collect();
+        std::iter::once(element).chain(joined.into_iter().filter_map(|j| self.elements.remove(&j))).collect()
+    }
+
+    /// The point where a join's members meet, in the project frame: the end of its second member
+    /// nearest the first's axis. `None` for a cut, or a join whose members are gone.
+    pub fn join_node(&self, id: ElementId) -> Option<glam::DVec3> {
+        let Shape::Connection(c) = &self.elements.get(&id)?.shape else { return None };
+        if c.kind == ConnectionKind::Cut {
+            return None;
+        }
+        if self.joins_systems(c) {
+            return crate::system::connection_node(self, c);
+        }
+        let (p, s) = (self.member(c.primary).ok()?, self.member(c.secondary).ok()?);
+        let near = |q| join::to_segment(q, p.start, p.end);
+        Some(if near(s.start) <= near(s.end) { s.start } else { s.end })
+    }
+
+    /// Keeps the joins of linear elements up to date, as a model is drawn and changed:
+    ///
+    /// - a join whose members no longer meet (or that lost a member) goes;
+    /// - a linear element's end that meets another linear element and is not joined yet gets a
+    ///   join, named `name` and a number: a mitre between two of one profile meeting end to end at
+    ///   an angle; a butt where it ends on the other's side (the other runs through), or where two
+    ///   profiles meet end to end (the larger runs through). Members in one straight line get none.
+    ///   Two elements of different services are not joined; a fitting takes its runs' service.
+    ///   Only meetings that involve an element of `changed` are joined (all, when `None`), so a join
+    ///   taken away stays away until one of its members changes.
+    ///
+    /// Returns the joins added and removed.
+    pub fn update_joins(&mut self, name: &str, changed: Option<&[ElementId]>) -> (Vec<ElementId>, Vec<ElementId>) {
+        let broken: Vec<ElementId> = self
+            .elements
+            .values()
+            .filter_map(|e| match &e.shape {
+                Shape::Connection(c) if c.kind != ConnectionKind::Cut => {
+                    matches!(self.join(c), Err(Refusal::NotTouching | Refusal::Parallel | Refusal::Missing | Refusal::NotLinear | Refusal::SystemJoin)).then_some(e.id)
+                }
+                _ => None,
+            })
+            .collect();
+        for id in &broken {
+            self.elements.remove(id);
+        }
+        // New automatic joins require a changed linear member. Broken connections were
+        // still checked above, including those between systems.
+        if changed.is_some_and(|ids| !ids.iter().any(|id| self.member(*id).is_ok())) {
+            return (Vec::new(), broken);
+        }
+        // the ends joined already, and the pairs joined already
+        let mut taken: std::collections::HashSet<(ElementId, MemberEnd)> = Default::default();
+        let mut paired: std::collections::HashSet<(ElementId, ElementId)> = Default::default();
+        for e in self.elements.values() {
+            let Shape::Connection(c) = &e.shape else { continue };
+            paired.insert((c.primary.min(c.secondary), c.primary.max(c.secondary)));
+            if let Ok((members, result)) = self.join(c) {
+                for (k, end, _) in result.trims {
+                    if let Some(&m) = members.get(k) {
+                        taken.insert((m, end));
+                    }
+                }
+            }
+        }
+        let linear: Vec<(ElementId, LinearDef)> = self.elements.values().filter_map(|e| Some((e.id, self.member(e.id).ok()?))).collect();
+        let radii: Vec<std::cell::OnceCell<f64>> = (0..linear.len()).map(|_| Default::default()).collect();
+        let mut added = Vec::new();
+        for (id, me) in &linear {
+            for (end, at) in [(MemberEnd::Start, me.start), (MemberEnd::End, me.end)] {
+                if taken.contains(&(*id, end)) {
+                    continue;
+                }
+                let Some((other, other_end, def)) = self.partner(*id, at, &linear, &radii, &paired) else { continue };
+                if changed.is_some_and(|c| !c.contains(id) && !c.contains(&other)) {
+                    continue;
+                }
+                let service = |id: &ElementId| self.elements.get(id).and_then(|e| e.service);
+                let (mine, theirs) = (service(id), service(&other));
+                let Some(kind) = auto_kind(me, &def, other_end) else { continue };
+                let (primary, secondary) = match (kind, other_end) {
+                    // in a butt end to end, the larger profile runs through
+                    (ConnectionKind::Butt, Some(_)) if profile_area(me) > profile_area(&def) => (*id, other),
+                    _ => (other, *id),
+                };
+                let number = self.elements.values().filter(|e| e.base() == crate::element::BaseKind::Connection).count() + 1;
+                let level = self.elements.get(id).and_then(|e| e.level.clone());
+                let mut joint = Element::in_project(&self.grid, format!("{name} {number}"), level, Shape::Connection(ConnectionDef { kind, primary, secondary }));
+                // a fitting is of the service of its runs
+                joint.service = mine.or(theirs).filter(|_| kind.is_fitting());
+                if let Ok(joint) = self.add(joint) {
+                    added.push(joint);
+                    paired.insert((primary.min(secondary), primary.max(secondary)));
+                    taken.insert((*id, end));
+                    if let Some(e) = other_end {
+                        taken.insert((other, e));
+                    }
+                }
+            }
+        }
+        (added, broken)
+    }
+
+    /// The linear element that element `id` meets with its end at `at`, not joined to it
+    /// yet: one whose end lies there (and which of its ends), else one on whose side it ends.
+    fn partner(
+        &self,
+        id: ElementId,
+        at: glam::DVec3,
+        linear: &[(ElementId, LinearDef)],
+        radii: &[std::cell::OnceCell<f64>],
+        paired: &std::collections::HashSet<(ElementId, ElementId)>,
+    ) -> Option<(ElementId, Option<MemberEnd>, LinearDef)> {
+        // two runs of different services are never joined
+        let service = |id: ElementId| self.elements.get(&id).and_then(|e| e.service);
+        let mine = service(id);
+        let apart = |o: ElementId| mine.is_some_and(|mine| service(o).is_some_and(|theirs| theirs != mine));
+        let others = linear.iter().zip(radii).filter(|((o, _), _)| *o != id && !paired.contains(&(id.min(*o), id.max(*o))) && !apart(*o));
+        let mut side = None;
+        for ((o, def), radius) in others {
+            if def.start.distance(at) <= JOIN_TOLERANCE {
+                return Some((*o, Some(MemberEnd::Start), def.clone()));
+            }
+            if def.end.distance(at) <= JOIN_TOLERANCE {
+                return Some((*o, Some(MemberEnd::End), def.clone()));
+            }
+            let axis = def.end - def.start;
+            let t = (at - def.start).dot(axis) / axis.length_squared().max(1e-300);
+            let length = axis.length();
+            if t * length <= JOIN_TOLERANCE || (1.0 - t) * length <= JOIN_TOLERANCE {
+                continue;
+            }
+            let radius = radius.get_or_init(|| def.profile.profile().map_or(0.0, |p| p.outer().iter().map(|q| q.length()).fold(0.0, f64::max)));
+            let d = join::to_segment(at, def.start, def.end);
+            if d <= *radius + JOIN_TOLERANCE {
+                if side.as_ref().is_none_or(|(_, best, _): &(ElementId, f64, LinearDef)| d < *best) {
+                    side = Some((*o, d, def.clone()));
+                }
+            }
+        }
+        side.map(|(o, _, def)| (o, None, def))
+    }
+
+    /// The elements per tile.
+    pub fn tiles(&self) -> BTreeMap<TileKey, Vec<ElementId>> {
+        let mut tiles: BTreeMap<TileKey, Vec<ElementId>> = BTreeMap::new();
+        for e in self.elements.values() {
+            tiles.entry(e.tile).or_default().push(e.id);
+        }
+        tiles
+    }
+
+    /// The solids of element `id`, in its tile's frame.
+    pub fn evaluate(&self, id: ElementId) -> Result<Vec<Part>, Refusal> {
+        self.evaluate_element(self.elements.get(&id).ok_or(Refusal::Missing)?)
+    }
+
+    fn evaluate_element(&self, element: &Element) -> Result<Vec<Part>, Refusal> {
+        if let Shape::Connection(c) = &element.shape {
+            self.check_connection(c)?;
+            // its own parts (plates, bolts), from the frame of tile (0, 0) to its own
+            let Ok((_, result)) = self.join(c) else { return Ok(Vec::new()) };
+            let offset = self.grid.offset(TileKey::default(), element.tile);
+            return Ok(result.parts.into_iter().map(|p| Part { class: p.class, tile: element.tile, solid: p.solid.translated(offset), material: p.material }).collect());
+        }
+        let mut parts = self.body(element)?;
+        // the cuts made in it, in id order; a cut that cannot be made leaves it as it is
+        for e in self.elements.values() {
+            if let Shape::Connection(c) = &e.shape {
+                if c.kind == ConnectionKind::Cut && c.secondary == element.id {
+                    if let Ok(cut) = self.cut(&parts, element, c.primary) {
+                        parts = cut;
+                    }
+                }
+            }
+        }
+        // its reinforcement: the bars and stirrups in its concrete, as its definition gives them
+        // (not cut or trimmed with it); one that cannot be made is left out of the body
+        if let (Some(r), Shape::Linear(l)) = (&element.reinforcement, &element.shape) {
+            if let Ok(bars) = r.solids(l, &element.extras) {
+                parts.extend(bars.into_iter().map(|(_, solid)| Part { class: crate::reinforcement::BAR_CLASS, tile: element.tile, solid, material: Some(crate::reinforcement::BAR_MATERIAL.into()) }));
+            }
+        }
+        if let (Some(nets), Shape::Planar(p)) = (&element.nets, &element.shape) {
+            if let Ok(bars) = nets.solids(p, &self.openings_of(element.id), &element.extras) {
+                parts.extend(bars.into_iter().map(|(_, solid)| Part { class: crate::reinforcement::BAR_CLASS, tile: element.tile, solid, material: Some(crate::reinforcement::BAR_MATERIAL.into()) }));
+            }
+        }
+        Ok(parts)
+    }
+
+    /// The openings the doors and windows standing in `target` (a wall or a standing system) cut
+    /// in it, in its own terms: along its axis from its start, above its base. A door or window
+    /// stands in it when its foot lies within the wall's thickness of the axis (and a centimetre),
+    /// it faces along the wall, its width lies between the wall's ends, and its foot is not below
+    /// the wall's base or above its top. One that reaches above the wall is cut off at its top.
+    pub fn standing_openings(&self, target: &Element) -> Vec<Opening> {
+        let (start, end, base, height, half) = match &target.shape {
+            Shape::Planar(p @ PlanarDef { form: PlanarForm::Wall { start, end, base, height }, .. }) => (*start, *end, *base, *height, p.total_thickness() / 2.0),
+            // a framed system (a timber frame wall) frames them; a curtain wall takes none
+            Shape::System(s) if !s.lies() && s.system_type.as_ref().is_some_and(|t| t.framing.is_some()) => (s.start, s.end, s.base, s.height, s.member.max_element() / 2.0),
+            _ => return Vec::new(),
+        };
+        let length = start.distance(end);
+        let Some(along) = (end - start).try_normalize() else { return Vec::new() };
+        let mut out = Vec::new();
+        for e in self.elements.values() {
+            let Shape::Point(p @ PointDef { opening: Some(_), .. }) = &e.shape else { continue };
+            let at = p.at + self.grid.offset(e.tile, target.tile);
+            let from_start = at.truncate() - start;
+            let facing = DVec2::from_angle(p.rotation);
+            if from_start.perp_dot(along).abs() > half + STANDS_IN || facing.perp_dot(along).abs() > FACES_ALONG {
+                continue;
+            }
+            let (left, sill) = (from_start.dot(along) - p.size.x / 2.0, at.z - base);
+            let sill = if sill.abs() < crate::LINEAR_TOLERANCE { 0.0 } else { sill };
+            if left < 0.0 || left + p.size.x > length || sill < 0.0 || sill >= height {
+                continue;
+            }
+            out.push(Opening { along: left, sill, width: p.size.x, height: p.size.z.min(height - sill), framing: None });
+        }
+        out
+    }
+
+    /// The openings of wall or system `id`: its own and those of the doors and windows standing
+    /// in it.
+    pub fn openings_of(&self, id: ElementId) -> Vec<Opening> {
+        let Some(e) = self.elements.get(&id) else { return Vec::new() };
+        let own = match &e.shape {
+            Shape::Planar(p) => p.openings.clone(),
+            Shape::System(s) => s.openings.clone(),
+            _ => Vec::new(),
+        };
+        own.into_iter().chain(self.standing_openings(e)).collect()
+    }
+
+    /// An element's solids before any cut is made in it (with the ends its joints give it). A
+    /// cutter cuts with this body, so cuts never depend on each other. A wall or a system is made
+    /// with the openings of the doors and windows standing in it; when it cannot be made with
+    /// them (one too near its end, or overlapping another), it is made without.
+    fn body(&self, element: &Element) -> Result<Vec<Part>, Refusal> {
+        let standing = self.standing_openings(element);
+        if !standing.is_empty() {
+            let mut with = element.clone();
+            match &mut with.shape {
+                Shape::Planar(p) => p.openings.extend(standing),
+                Shape::System(s) => s.openings.extend(standing),
+                _ => {}
+            }
+            if let Ok(parts) = self.body_as_defined(&with) {
+                return Ok(parts);
+            }
+        }
+        self.body_as_defined(element)
+    }
+
+    /// An element's solids as its own definition gives them.
+    fn body_as_defined(&self, element: &Element) -> Result<Vec<Part>, Refusal> {
+        let class = element.class();
+        let part = |solid: Solid| Part { class, tile: element.tile, solid, material: None };
+        match &element.shape {
+            // a door or a window: its frame, and its leaf or its pane of glass
+            Shape::Point(p) => Ok(opening_solids(p)?
+                .into_iter()
+                .map(|(solid, glass)| if glass { Part { class: "IfcPlate", tile: element.tile, solid, material: Some("glass".into()) } } else { part(solid) })
+                .collect()),
+            Shape::Planar(p) => {
+                // a wall meeting other walls is cut to its corners; when that cannot be made, it is
+                // made as it is
+                let joined = crate::joins::wall_join(self, element).and_then(|join| joined_parts(p, &join).ok());
+                let parts = match joined {
+                    Some(parts) => parts,
+                    None => planar_parts(p)?,
+                };
+                Ok(parts.into_iter().map(|(material, solid)| Part { material, ..part(solid) }).collect())
+            }
+            // a framed system meeting another at a corner ends there as the corner says
+            Shape::System(s) => Ok(crate::system::joined_parts(self, element, s)?.into_iter().map(|p| Part { class: p.class, tile: element.tile, solid: p.solid, material: p.material }).collect()),
+            Shape::Linear(l) => {
+                if let Some(leg) = element.hairpin_leg {
+                    return Ok(vec![part(crate::reinforcement::hairpin_solid(l, leg)?)]);
+                }
+                let joined = self.joined(element.id, element.tile);
+                let body = join::finish(&Member::of(l)?, joined.start, joined.end, &joined.additions, &joined.removals);
+                // additions or removals that cannot be made leave the member with its trims only
+                let body = match body {
+                    Ok(body) => body,
+                    Err(_) => join::finish(&Member::of(l)?, joined.start, joined.end, &[], &[])?,
+                };
+                Ok(vec![part(body)])
+            }
+            Shape::Connection(_) => Err(Refusal::NoBody),
+        }
+    }
+
+    /// `parts` of `target` with the body of element `cutter` taken out. A part the cutter takes
+    /// wholly goes; when nothing is left, or the cutter does not reach the target, it is refused.
+    fn cut(&self, parts: &[Part], target: &Element, cutter: ElementId) -> Result<Vec<Part>, Refusal> {
+        let tool = self.elements.get(&cutter).ok_or(Refusal::Missing)?;
+        let offset = self.grid.offset(tool.tile, target.tile);
+        let tools: Vec<Solid> = self.body(tool)?.iter().map(|p| p.solid.translated(offset)).collect();
+        let overlaps = |a: &Solid, b: &Solid| {
+            let ((alo, ahi), (blo, bhi)) = (a.bounds(), b.bounds());
+            alo.cmplt(bhi).all() && blo.cmplt(ahi).all()
+        };
+        if !tools.iter().any(|t| parts.iter().any(|p| overlaps(t, &p.solid))) {
+            return Err(Refusal::NotTouching);
+        }
+        let mut out = Vec::with_capacity(parts.len());
+        for part in parts {
+            let mut solid = Some(part.solid.clone());
+            for t in tools.iter().filter(|t| overlaps(t, &part.solid)) {
+                solid = match solid.map(|s| boolean(&s, t, BooleanOp::Difference)) {
+                    Some(Ok(rest)) => Some(rest),
+                    Some(Err(Refusal::Empty)) | None => None,
+                    Some(Err(other)) => return Err(other),
+                };
+            }
+            if let Some(solid) = solid {
+                out.push(Part { solid, ..part.clone() });
+            }
+        }
+        if out.is_empty() {
+            return Err(Refusal::Empty);
+        }
+        Ok(out)
+    }
+
+    /// Whether a connection can be made.
+    fn check_connection(&self, c: &ConnectionDef) -> Result<(), Refusal> {
+        if c.primary == c.secondary {
+            return Err(Refusal::SameMember);
+        }
+        match c.kind {
+            ConnectionKind::Butt | ConnectionKind::Mitre | ConnectionKind::EndPlate(_) | ConnectionKind::FinPlate(_) | ConnectionKind::Bend(_) | ConnectionKind::Tee(_) | ConnectionKind::Transition(_) | ConnectionKind::Splice(_) | ConnectionKind::BasePlate(_) | ConnectionKind::Apart => self.join(c).map(|_| ()),
+            ConnectionKind::Cut => {
+                let target = self.elements.get(&c.secondary).ok_or(Refusal::Missing)?;
+                let parts = self.body(target)?;
+                self.cut(&parts, target, c.primary).map(|_| ())
+            }
+        }
+    }
+
+    /// What the connections joining member `id` do to it (in its tile's frame), where they can be
+    /// made: its end planes, and what they add to it and take out of it.
+    fn joined(&self, id: ElementId, tile: TileKey) -> Joined {
+        let mut joined = Joined::default();
+        let offset = self.grid.offset(TileKey::default(), tile);
+        for e in self.elements.values() {
+            let Shape::Connection(c) = &e.shape else { continue };
+            if c.primary != id && c.secondary != id {
+                continue;
+            }
+            let Ok((members, result)) = self.join(c) else { continue };
+            let mine = |k: usize| members.get(k) == Some(&id);
+            for (k, which, plane) in result.trims {
+                if mine(k) {
+                    let plane = Plane { point: plane.point + offset, normal: plane.normal };
+                    match which {
+                        MemberEnd::Start => joined.start = Some(plane),
+                        MemberEnd::End => joined.end = Some(plane),
+                    }
+                }
+            }
+            joined.additions.extend(result.additions.into_iter().filter(|(k, _)| mine(*k)).map(|(_, s)| s.translated(offset)));
+            joined.removals.extend(result.removals.into_iter().filter(|(k, _)| mine(*k)).map(|(_, s)| s.translated(offset)));
+        }
+        joined
+    }
+
+    /// Whether a connection joins a building system (its other member must be one too).
+    fn joins_systems(&self, c: &ConnectionDef) -> bool {
+        [c.primary, c.secondary].iter().any(|id| matches!(self.elements.get(id).map(|e| &e.shape), Some(Shape::System(_))))
+    }
+
+    /// A member of a connection: its definition in the frame of tile (0, 0), so both members
+    /// share one frame.
+    fn member(&self, id: ElementId) -> Result<LinearDef, Refusal> {
+        let e = self.elements.get(&id).ok_or(Refusal::Missing)?;
+        let Shape::Linear(l) = &e.shape else { return Err(Refusal::NotLinear) };
+        let offset = self.grid.origin(e.tile);
+        Ok(LinearDef { start: l.start + offset, end: l.end + offset, ..l.clone() })
+    }
+
+    /// What a connection does to its members (their ids, in order) in the frame of tile (0, 0);
+    /// nothing for a cut, which [`Model::cut`] makes.
+    fn join(&self, c: &ConnectionDef) -> Result<(Vec<ElementId>, JoinResult), Refusal> {
+        if c.primary == c.secondary {
+            return Err(Refusal::SameMember);
+        }
+        if c.kind == ConnectionKind::Cut {
+            return Ok((Vec::new(), JoinResult::default()));
+        }
+        // two building systems: they end at each other as their corner or T junction says
+        if self.joins_systems(c) {
+            crate::system::connection(self, c)?;
+            return Ok((Vec::new(), JoinResult::default()));
+        }
+        let kind = match c.kind {
+            ConnectionKind::Cut => return Ok((Vec::new(), JoinResult::default())),
+            ConnectionKind::Butt => JoinKind::Butt,
+            ConnectionKind::Mitre => JoinKind::Mitre,
+            ConnectionKind::EndPlate(plate) => JoinKind::EndPlate(plate),
+            ConnectionKind::FinPlate(plate) => JoinKind::FinPlate(plate),
+            ConnectionKind::Splice(plate) => JoinKind::Splice(plate),
+            ConnectionKind::BasePlate(plate) => JoinKind::BasePlate(plate),
+            ConnectionKind::Bend(b) => JoinKind::Bend(b),
+            ConnectionKind::Tee(t) => JoinKind::Tee(t),
+            ConnectionKind::Transition(t) => JoinKind::Transition(t),
+            // two members kept apart: no join
+            ConnectionKind::Apart => {
+                self.member(c.primary)?;
+                self.member(c.secondary)?;
+                return Ok((Vec::new(), JoinResult::default()));
+            }
+        };
+        let members = [Member::of(&self.member(c.primary)?)?, Member::of(&self.member(c.secondary)?)?];
+        Ok((vec![c.primary, c.secondary], join::cuts(kind, &members)?))
+    }
+}
+
+/// The kind a join made automatically gets between `me` and `other`, which meet end to end (with
+/// `other_end`) or end to side (`None`): `None` for two in one straight line.
+fn auto_kind(me: &LinearDef, other: &LinearDef, other_end: Option<MemberEnd>) -> Option<ConnectionKind> {
+    let (a, b) = ((me.end - me.start).normalize_or_zero(), (other.end - other.start).normalize_or_zero());
+    if a.cross(b).length() < 1e-6 {
+        // two runs of one building service in one line: a transition where their profiles differ
+        let differ = me.role.is_service() && me.role == other.role && other_end.is_some() && me.profile != other.profile;
+        return differ.then(|| ConnectionKind::Transition(join::Transition::of(me.role)));
+    }
+    // two runs of one building service get its fittings: a bend end to end, a tee end to side
+    if me.role.is_service() && me.role == other.role {
+        return Some(match other_end {
+            Some(_) => ConnectionKind::Bend(join::Bend::of(me.role)),
+            None => ConnectionKind::Tee(join::Tee::of(me.role)),
+        });
+    }
+    Some(match other_end {
+        Some(_) if me.profile == other.profile => ConnectionKind::Mitre,
+        _ => ConnectionKind::Butt,
+    })
+}
+
+/// The area of a member's profile (0 when it has none).
+fn profile_area(l: &LinearDef) -> f64 {
+    l.profile.profile().map_or(0.0, |p| p.area())
+}
+
+/// What the connections joining a member do to it, in its tile's frame.
+#[derive(Debug, Default)]
+struct Joined {
+    start: Option<Plane>,
+    end: Option<Plane>,
+    additions: Vec<Solid>,
+    removals: Vec<Solid>,
+}
+
+/// A wall's layers reaching past its ends, cut back to its footprint at its corners.
+fn joined_parts(p: &crate::element::PlanarDef, join: &crate::joins::WallJoin) -> Result<Vec<(Option<String>, Solid)>, Refusal> {
+    let prism = join.prism()?;
+    crate::element::planar_parts_extended(p, join.extend)?
+        .into_iter()
+        .map(|(material, solid)| Ok((material, boolean(&solid, &prism, BooleanOp::Intersection)?)))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use glam::{DVec2, DVec3};
+    use crate::element::{PlanarDef, PlanarForm, PointDef, SystemDef};
+    use crate::mesh::Mesh;
+    use crate::profile::ProfileDef;
+
+    fn beam(start: DVec3, end: DVec3) -> Shape {
+        Shape::Linear(LinearDef { start, end, profile: ProfileDef::Rectangle { width: 0.2, height: 0.4 }, roll: 0.0, role: Default::default() })
+    }
+
+    fn add(model: &mut Model, shape: Shape) -> ElementId {
+        let grid = model.grid;
+        model.add(Element::in_project(&grid, "e", None, shape)).unwrap()
+    }
+
+    #[test]
+    fn ids_are_never_reused() {
+        let mut m = Model::new(TileGrid::default());
+        let a = add(&mut m, beam(DVec3::ZERO, DVec3::X));
+        m.remove(a);
+        let b = add(&mut m, beam(DVec3::ZERO, DVec3::X));
+        assert!(b > a);
+    }
+
+    #[test]
+    fn a_refused_element_is_not_added() {
+        let mut m = Model::new(TileGrid::default());
+        let grid = m.grid;
+        let bad = Element::in_project(&grid, "e", None, beam(DVec3::ONE, DVec3::ONE));
+        assert_eq!(m.add(bad), Err(Refusal::ZeroLength));
+        assert!(m.is_empty());
+    }
+
+    #[test]
+    fn a_butt_stops_the_secondary_at_the_primary_face() {
+        let mut m = Model::new(TileGrid::default());
+        // a column at the origin, 400 wide along x (its profile's x is the project's x)
+        let column = add(
+            &mut m,
+            Shape::Linear(LinearDef { start: DVec3::ZERO, end: DVec3::new(0.0, 0.0, 3.0), profile: ProfileDef::Rectangle { width: 0.4, height: 0.4 }, roll: 0.0, role: Default::default() }),
+        );
+        let b = add(&mut m, beam(DVec3::new(0.0, 0.0, 2.5), DVec3::new(5.0, 0.0, 2.5)));
+        add(&mut m, Shape::Connection(ConnectionDef { kind: ConnectionKind::Butt, primary: column, secondary: b }));
+        let (lo, hi) = m.evaluate(b).unwrap()[0].solid.bounds();
+        assert!((lo.x - 0.2).abs() < 1e-12 && (hi.x - 5.0).abs() < 1e-12, "{lo} {hi}");
+        let (lo, _) = m.evaluate(column).unwrap()[0].solid.bounds();
+        assert!((lo.x + 0.2).abs() < 1e-12, "the primary runs through");
+    }
+
+    #[test]
+    fn a_mitre_cuts_both_members_on_the_bisector() {
+        let mut m = Model::new(TileGrid::default());
+        let a = add(&mut m, beam(DVec3::new(0.0, 0.0, 0.0), DVec3::new(4.0, 0.0, 0.0)));
+        let b = add(&mut m, beam(DVec3::new(4.0, 0.0, 0.0), DVec3::new(4.0, 3.0, 0.0)));
+        add(&mut m, Shape::Connection(ConnectionDef { kind: ConnectionKind::Mitre, primary: a, secondary: b }));
+        let va = m.evaluate(a).unwrap()[0].solid.volume();
+        let vb = m.evaluate(b).unwrap()[0].solid.volume();
+        // a mitre on the bisector takes off as much on the inside as it adds on the outside
+        assert!((va - 4.0 * 0.2 * 0.4).abs() < 1e-12, "{va}");
+        assert!((vb - 3.0 * 0.2 * 0.4).abs() < 1e-12, "{vb}");
+        let (_, hi) = m.evaluate(a).unwrap()[0].solid.bounds();
+        assert!((hi.x - 4.1).abs() < 1e-12, "the outer corner reaches the outside of the other member: {hi}");
+    }
+
+    #[test]
+    fn connections_that_cannot_be_made_are_refused() {
+        let mut m = Model::new(TileGrid::default());
+        let a = add(&mut m, beam(DVec3::ZERO, DVec3::new(4.0, 0.0, 0.0)));
+        let parallel = add(&mut m, beam(DVec3::new(0.0, 1.0, 0.0), DVec3::new(4.0, 1.0, 0.0)));
+        let far = add(&mut m, beam(DVec3::new(10.0, 5.0, 0.0), DVec3::new(10.0, 8.0, 0.0)));
+        let wall = add(
+            &mut m,
+            Shape::Planar(PlanarDef { form: PlanarForm::Wall { start: DVec2::ZERO, end: DVec2::Y, base: 0.0, height: 1.0 }, thickness: 0.1, openings: Vec::new(), build_up: None }),
+        );
+        let grid = m.grid;
+        let try_join = |m: &mut Model, kind, primary, secondary| m.add(Element::in_project(&grid, "c", None, Shape::Connection(ConnectionDef { kind, primary, secondary })));
+        assert_eq!(try_join(&mut m, ConnectionKind::Butt, a, parallel), Err(Refusal::Parallel));
+        assert_eq!(try_join(&mut m, ConnectionKind::Butt, a, far), Err(Refusal::NotTouching));
+        assert_eq!(try_join(&mut m, ConnectionKind::Mitre, a, far), Err(Refusal::NotTouching));
+        assert_eq!(try_join(&mut m, ConnectionKind::Butt, a, a), Err(Refusal::SameMember));
+        assert_eq!(try_join(&mut m, ConnectionKind::Butt, a, wall), Err(Refusal::NotLinear));
+        assert_eq!(try_join(&mut m, ConnectionKind::Butt, a, ElementId(999)), Err(Refusal::Missing));
+    }
+
+    #[test]
+    fn removing_a_member_removes_its_connections() {
+        let mut m = Model::new(TileGrid::default());
+        let a = add(&mut m, beam(DVec3::ZERO, DVec3::new(4.0, 0.0, 0.0)));
+        let b = add(&mut m, beam(DVec3::new(4.0, 0.0, 0.0), DVec3::new(4.0, 3.0, 0.0)));
+        add(&mut m, Shape::Connection(ConnectionDef { kind: ConnectionKind::Mitre, primary: a, secondary: b }));
+        assert_eq!(m.remove(b).len(), 2);
+        assert_eq!(m.len(), 1);
+        assert!((m.evaluate(a).unwrap()[0].solid.volume() - 4.0 * 0.08).abs() < 1e-12, "square again");
+    }
+
+    fn far_wall(o: DVec2) -> Shape {
+        Shape::Planar(PlanarDef {
+            form: PlanarForm::Wall { start: DVec2::new(0.123, 0.456) + o, end: DVec2::new(7.891, 3.21) + o, base: 0.0, height: 2.8 },
+            thickness: 0.3,
+            openings: Vec::new(),
+            build_up: None,
+        })
+    }
+
+    #[test]
+    fn far_from_the_origin_a_tile_frame_gives_the_same_solid_bit_for_bit() {
+        // the same definition in tile (500, 300), 500 km out, as in tile (0, 0): the kernel only
+        // ever sees the small local coordinates, so the solids are identical
+        let mut m = Model::new(TileGrid::default());
+        let near = add(&mut m, far_wall(DVec2::ZERO));
+        let mut far = m.get(near).unwrap().clone();
+        far.tile = TileKey { x: 500, y: 300 };
+        let far = m.add(far).unwrap();
+        let (pn, pf) = (&m.evaluate(near).unwrap()[0], &m.evaluate(far).unwrap()[0]);
+        assert_eq!(pf.tile, TileKey { x: 500, y: 300 });
+        assert_eq!(pn.solid, pf.solid);
+        let mesh = Mesh::of(&pf.solid).unwrap();
+        assert!(mesh.positions.iter().all(|p| p.length() < 20.0), "mesh coordinates stay small in the tile frame");
+    }
+
+    #[test]
+    fn far_from_the_origin_project_input_is_off_by_no_more_than_f64_resolves() {
+        // typing the wall in project coordinates 500 km out rounds each coordinate once when it is
+        // entered (f64 resolves about 6e-11 m there); the tile frame adds nothing to that
+        let mut m = Model::new(TileGrid::default());
+        let near = add(&mut m, far_wall(DVec2::ZERO));
+        let far = add(&mut m, far_wall(DVec2::new(500_000.0, 300_000.0)));
+        let (pn, pf) = (&m.evaluate(near).unwrap()[0], &m.evaluate(far).unwrap()[0]);
+        let worst = pn.solid.positions.iter().zip(&pf.solid.positions).map(|(a, b)| (*a - *b).length()).fold(0.0, f64::max);
+        assert!(worst < 2.0 * 500_000f64 * f64::EPSILON, "{worst}");
+        assert!(worst < crate::LINEAR_TOLERANCE * 1e-4);
+    }
+
+    #[test]
+    fn members_in_different_tiles_join_in_one_frame() {
+        let mut m = Model::new(TileGrid::new(10).unwrap());
+        // a beam crossing the tile boundary at x = 10 onto a column in the next tile
+        let column = add(
+            &mut m,
+            Shape::Linear(LinearDef { start: DVec3::new(12.0, 0.0, 0.0), end: DVec3::new(12.0, 0.0, 3.0), profile: ProfileDef::Rectangle { width: 0.4, height: 0.4 }, roll: 0.0, role: Default::default() }),
+        );
+        let b = add(&mut m, beam(DVec3::new(6.0, 0.0, 2.5), DVec3::new(12.0, 0.0, 2.5)));
+        assert_ne!(m.get(column).unwrap().tile, m.get(b).unwrap().tile);
+        add(&mut m, Shape::Connection(ConnectionDef { kind: ConnectionKind::Butt, primary: column, secondary: b }));
+        let part = &m.evaluate(b).unwrap()[0];
+        let (_, hi) = part.solid.bounds();
+        // the beam's tile is (0, 0): its end stops at x = 11.8 in that frame
+        assert!((hi.x - 11.8).abs() < 1e-12, "{hi}");
+    }
+
+    #[test]
+    fn every_base_element_evaluates() {
+        let mut m = Model::new(TileGrid::default());
+        let point = add(&mut m, Shape::Point(PointDef { at: DVec3::new(1.0, 1.0, 0.0), rotation: 0.5, size: DVec3::new(0.6, 0.6, 0.9), opening: None, role: Default::default() }));
+        let system = add(
+            &mut m,
+            Shape::System(SystemDef { start: DVec2::new(0.0, 5.0), end: DVec2::new(6.0, 5.0), base: 0.0, height: 3.0, spacing: DVec2::new(1.2, 1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), grid: None, division: None }),
+        );
+        assert!((m.evaluate(point).unwrap()[0].solid.volume() - 0.6 * 0.6 * 0.9).abs() < 1e-12);
+        assert!(m.evaluate(system).unwrap().len() > 10);
+        for id in [point, system] {
+            for part in m.evaluate(id).unwrap() {
+                Mesh::of(&part.solid).unwrap();
+            }
+        }
+        assert_eq!(m.tiles().len(), 1);
+    }
+
+    fn wall_along_x() -> Shape {
+        Shape::Planar(PlanarDef { form: PlanarForm::Wall { start: DVec2::ZERO, end: DVec2::new(6.0, 0.0), base: 0.0, height: 3.0 }, thickness: 0.2, openings: Vec::new(), build_up: None })
+    }
+
+    #[test]
+    fn a_beam_through_a_wall_cuts_its_way_through() {
+        let mut m = Model::new(TileGrid::default());
+        let wall = add(&mut m, wall_along_x());
+        let b = add(&mut m, beam(DVec3::new(3.0, -2.0, 2.5), DVec3::new(3.0, 2.0, 2.5)));
+        let before = m.evaluate(wall).unwrap()[0].solid.volume();
+        add(&mut m, Shape::Connection(ConnectionDef { kind: ConnectionKind::Cut, primary: b, secondary: wall }));
+        let after = m.evaluate(wall).unwrap()[0].solid.volume();
+        assert!((before - after - 0.2 * 0.4 * 0.2).abs() < 1e-9, "{before} - {after}");
+        assert!((m.evaluate(b).unwrap()[0].solid.volume() - 4.0 * 0.08).abs() < 1e-9, "the cutter keeps its body");
+        // removing the beam removes the cut, and the wall is whole again
+        m.remove(b);
+        assert!((m.evaluate(wall).unwrap()[0].solid.volume() - before).abs() < 1e-12);
+    }
+
+    #[test]
+    fn cuts_that_cannot_be_made_are_refused() {
+        let mut m = Model::new(TileGrid::default());
+        let wall = add(&mut m, wall_along_x());
+        let far = add(&mut m, beam(DVec3::new(3.0, 5.0, 2.5), DVec3::new(3.0, 9.0, 2.5)));
+        let block = add(&mut m, Shape::Point(PointDef { at: DVec3::new(3.0, 0.0, -1.0), rotation: 0.0, size: DVec3::new(8.0, 2.0, 6.0), opening: None, role: Default::default() }));
+        let grid = m.grid;
+        let try_cut = |m: &mut Model, primary, secondary| m.add(Element::in_project(&grid, "c", None, Shape::Connection(ConnectionDef { kind: ConnectionKind::Cut, primary, secondary })));
+        assert_eq!(try_cut(&mut m, far, wall), Err(Refusal::NotTouching));
+        assert_eq!(try_cut(&mut m, block, wall), Err(Refusal::Empty), "it would take the whole wall");
+        assert_eq!(try_cut(&mut m, wall, wall), Err(Refusal::SameMember));
+        let joint = try_cut(&mut m, block, far).map(|_| ()).err();
+        assert_eq!(joint, Some(Refusal::NotTouching));
+    }
+
+    #[test]
+    fn two_elements_cutting_each_other_do_not_go_round_in_circles() {
+        let mut m = Model::new(TileGrid::default());
+        let a = add(&mut m, wall_along_x());
+        let b = add(&mut m, Shape::Planar(PlanarDef { form: PlanarForm::Wall { start: DVec2::new(3.0, -2.0), end: DVec2::new(3.0, 2.0), base: 0.0, height: 3.0 }, thickness: 0.2, openings: Vec::new(), build_up: None }));
+        add(&mut m, Shape::Connection(ConnectionDef { kind: ConnectionKind::Cut, primary: a, secondary: b }));
+        add(&mut m, Shape::Connection(ConnectionDef { kind: ConnectionKind::Cut, primary: b, secondary: a }));
+        // each is cut by the other's whole body: the crossing goes from both
+        let (va, vb) = (m.evaluate(a).unwrap()[0].solid.volume(), m.evaluate(b).unwrap()[0].solid.volume());
+        assert!((va - (6.0 - 0.2) * 0.2 * 3.0).abs() < 1e-9 && (vb - (4.0 - 0.2) * 0.2 * 3.0).abs() < 1e-9, "{va} {vb}");
+    }
+
+    #[test]
+    fn a_curtain_wall_cut_by_a_beam_loses_the_parts_it_takes() {
+        let mut m = Model::new(TileGrid::default());
+        let s = add(
+            &mut m,
+            Shape::System(SystemDef { start: DVec2::ZERO, end: DVec2::new(3.0, 0.0), base: 0.0, height: 3.0, spacing: DVec2::new(1.5, 1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), grid: None, division: None }),
+        );
+        let parts = m.evaluate(s).unwrap().len();
+        let b = add(&mut m, beam(DVec3::new(0.75, -1.0, 2.0), DVec3::new(0.75, 1.0, 2.0)));
+        add(&mut m, Shape::Connection(ConnectionDef { kind: ConnectionKind::Cut, primary: b, secondary: s }));
+        let cut = m.evaluate(s).unwrap();
+        assert_eq!(cut.len(), parts, "the beam cuts a hole in one panel, no part goes");
+        let glass: f64 = cut.iter().filter(|p| p.class == "IfcPlate").map(|p| p.solid.volume()).sum();
+        assert!((glass - (4.0 * 1.45 * 1.45 * 0.02 - 0.2 * 0.4 * 0.02)).abs() < 1e-9, "{glass}");
+    }
+
+    #[test]
+    fn an_end_plate_connection_has_a_body_and_changes_both_members() {
+        let mut m = Model::new(TileGrid::default());
+        let column = add(
+            &mut m,
+            Shape::Linear(LinearDef { start: DVec3::ZERO, end: DVec3::new(0.0, 0.0, 4.0), profile: ProfileDef::Rectangle { width: 0.3, height: 0.3 }, roll: 0.0, role: Default::default() }),
+        );
+        let b = add(&mut m, beam(DVec3::new(0.0, 0.0, 2.5), DVec3::new(5.0, 0.0, 2.5)));
+        let (column_before, beam_before) = (m.evaluate(column).unwrap()[0].solid.volume(), m.evaluate(b).unwrap()[0].solid.volume());
+        let plate = crate::join::EndPlate::default();
+        let joint = add(&mut m, Shape::Connection(ConnectionDef { kind: ConnectionKind::EndPlate(plate), primary: column, secondary: b }));
+        assert_eq!(m.get(joint).unwrap().class(), "IfcElementAssembly");
+        let parts = m.evaluate(joint).unwrap();
+        assert_eq!(parts.len(), 5, "a plate and four bolts");
+        // the beam stops at the plate: 0.15 + 0.015 from the column's axis
+        let beam_after = m.evaluate(b).unwrap()[0].solid.volume();
+        assert!((beam_before - beam_after - 0.165 * 0.2 * 0.4).abs() < 1e-9, "{beam_before} - {beam_after}");
+        // the column is drilled for the bolts, 50 mm deep (the holes start at its face)
+        let hole = crate::profile::Profile::circle(0.022).unwrap().area();
+        let column_after = m.evaluate(column).unwrap()[0].solid.volume();
+        assert!((column_before - column_after - 4.0 * hole * 0.05).abs() < 1e-9, "{column_before} - {column_after}");
+        // and it reads back from JSON with its sizes
+        let json = serde_json::to_string(m.get(joint).unwrap()).unwrap();
+        assert!(json.contains("end_plate") && json.contains("0.015"), "{json}");
+        assert_eq!(&serde_json::from_str::<Element>(&json).unwrap(), m.get(joint).unwrap());
+    }
+
+    #[test]
+    fn a_fin_plate_connection_is_a_hinge_with_a_plate_and_bolts_through_the_web() {
+        let mut m = Model::new(TileGrid::default());
+        let column = add(&mut m, Shape::Linear(LinearDef { start: DVec3::ZERO, end: DVec3::new(0.0, 0.0, 4.0), profile: ProfileDef::steel("HEA 200").unwrap(), roll: 0.0, role: Default::default() }));
+        let b = add(&mut m, Shape::Linear(LinearDef { start: DVec3::new(0.0, 0.0, 2.5), end: DVec3::new(5.0, 0.0, 2.5), profile: ProfileDef::steel("IPE 300").unwrap(), roll: 0.0, role: Default::default() }));
+        let free = add(&mut m, Shape::Linear(LinearDef { start: DVec3::new(0.0, 9.0, 2.5), end: DVec3::new(5.0, 9.0, 2.5), profile: ProfileDef::steel("IPE 300").unwrap(), roll: 0.0, role: Default::default() }));
+        let whole = m.evaluate(free).unwrap()[0].solid.volume();
+        let plate = crate::join::FinPlate::default();
+        let kind = ConnectionKind::FinPlate(plate);
+        assert_eq!((kind.fixity(), ConnectionKind::EndPlate(Default::default()).fixity(), ConnectionKind::Butt.fixity()), (Some(crate::Fixity::Pinned), Some(crate::Fixity::Rigid), None));
+        let joint = add(&mut m, Shape::Connection(ConnectionDef { kind, primary: column, secondary: b }));
+        assert_eq!(m.get(joint).unwrap().class(), "IfcElementAssembly");
+        let parts = m.evaluate(joint).unwrap();
+        assert_eq!(parts.iter().map(|p| p.class).collect::<Vec<_>>(), ["IfcPlate", "IfcMechanicalFastener", "IfcMechanicalFastener", "IfcMechanicalFastener"]);
+        // the plate: 90 by 240 by 10 with three 22 mm holes
+        let hole = crate::profile::Profile::circle(0.022).unwrap().area();
+        assert!((parts[0].solid.volume() - (0.09 * 0.24 - 3.0 * hole) * 0.01).abs() < 1e-9, "{}", parts[0].solid.volume());
+        // against the web's side: an IPE 300's web is 7.1 mm, so the plate lies from y = 3.55 mm
+        let (lo, hi) = parts[0].solid.positions.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| (lo.min(p.y.abs()), hi.max(p.y.abs())));
+        assert!((lo - 0.00355).abs() < 1e-4 && (hi - 0.01355).abs() < 1e-4, "{lo} {hi}");
+        // the beam is shorter than a free one and its web is drilled
+        let joined = m.evaluate(b).unwrap()[0].solid.volume();
+        assert!(joined < whole - 3.0 * hole * 0.007, "{joined} {whole}");
+        // a plate too high for the profile is refused
+        let high = ConnectionKind::FinPlate(crate::join::FinPlate { rows: 5, ..plate });
+        let mut changed = m.get(joint).unwrap().clone();
+        changed.shape = Shape::Connection(ConnectionDef { kind: high, primary: column, secondary: b });
+        assert_eq!(m.replace(changed), Err(Refusal::BoltsDoNotFit));
+        let json = serde_json::to_string(m.get(joint).unwrap()).unwrap();
+        assert!(json.contains("fin_plate"), "{json}");
+        assert_eq!(&serde_json::from_str::<Element>(&json).unwrap(), m.get(joint).unwrap());
+    }
+
+    #[test]
+    fn a_splice_and_a_base_plate_are_assemblies_with_their_fixity() {
+        let mut m = Model::new(TileGrid::default());
+        let steel = |a: DVec3, b: DVec3, name: &str| Shape::Linear(LinearDef { role: Default::default(), start: a, end: b, profile: ProfileDef::steel(name).unwrap(), roll: 0.0 });
+        // two beams in one line: joined by nothing of themselves, spliced on request
+        let a = add(&mut m, steel(DVec3::new(0.0, 0.0, 3.0), DVec3::new(4.0, 0.0, 3.0), "IPE 300"));
+        let b = add(&mut m, steel(DVec3::new(4.0, 0.0, 3.0), DVec3::new(9.0, 0.0, 3.0), "IPE 300"));
+        assert!(joints(&m).is_empty());
+        let before = m.evaluate(a).unwrap()[0].solid.volume();
+        let kind = ConnectionKind::Splice(crate::join::EndPlate::default());
+        assert_eq!(kind.fixity(), Some(crate::Fixity::Rigid));
+        let splice = add(&mut m, Shape::Connection(ConnectionDef { kind, primary: a, secondary: b }));
+        assert_eq!(m.get(splice).unwrap().class(), "IfcElementAssembly");
+        assert_eq!(m.evaluate(splice).unwrap().len(), 6, "two plates and four bolts");
+        assert!(m.evaluate(a).unwrap()[0].solid.volume() < before, "the beam makes room for its plate");
+        // a steel column on a concrete pile: a base plate, a hinge to the analysis
+        let pile = add(&mut m, Shape::Linear(LinearDef { role: Default::default(), start: DVec3::new(20.0, 0.0, -8.0), end: DVec3::new(20.0, 0.0, 0.0), profile: ProfileDef::Rectangle { width: 0.4, height: 0.4 }, roll: 0.0 }));
+        let column = add(&mut m, steel(DVec3::new(20.0, 0.0, 0.0), DVec3::new(20.0, 0.0, 3.0), "HEA 200"));
+        let kind = ConnectionKind::BasePlate(crate::join::BasePlate::default());
+        assert_eq!(kind.fixity(), Some(crate::Fixity::Pinned));
+        let base = add(&mut m, Shape::Connection(ConnectionDef { kind, primary: pile, secondary: column }));
+        let parts = m.evaluate(base).unwrap();
+        assert_eq!(parts.iter().filter(|p| p.class == "IfcMechanicalFastener").count(), 4);
+        assert!(parts.iter().any(|p| p.material.as_deref() == Some("grout")));
+        let (lo, _) = m.evaluate(column).unwrap()[0].solid.bounds();
+        assert!((lo.z - 0.05).abs() < 1e-9, "the column stands on grout and plate: {lo}");
+        let json = serde_json::to_string(m.get(base).unwrap()).unwrap();
+        assert!(json.contains("base_plate"), "{json}");
+        assert_eq!(&serde_json::from_str::<Element>(&json).unwrap(), m.get(base).unwrap());
+        // a splice of members at an angle is refused
+        let c = add(&mut m, steel(DVec3::new(30.0, 0.0, 3.0), DVec3::new(34.0, 0.0, 3.0), "IPE 300"));
+        let d = add(&mut m, steel(DVec3::new(34.0, 0.0, 3.0), DVec3::new(34.0, 4.0, 3.0), "HEA 200"));
+        let grid = m.grid;
+        let bent = Element::in_project(&grid, "c", None, Shape::Connection(ConnectionDef { kind: ConnectionKind::Splice(Default::default()), primary: c, secondary: d }));
+        assert_eq!(m.add(bent).map(|_| ()), Err(Refusal::NotInLine));
+    }
+
+    fn joints(m: &Model) -> Vec<ConnectionDef> {
+        m.iter()
+            .filter_map(|e| match &e.shape {
+                Shape::Connection(c) => Some(c.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn members_drawn_to_meet_are_joined_automatically() {
+        let mut m = Model::new(TileGrid::default());
+        // two beams of one profile at a corner: a mitre
+        let a = add(&mut m, beam(DVec3::ZERO, DVec3::new(4.0, 0.0, 0.0)));
+        add(&mut m, beam(DVec3::new(4.0, 0.0, 0.0), DVec3::new(4.0, 3.0, 0.0)));
+        let (added, removed) = m.update_joins("Joint", None);
+        assert_eq!((added.len(), removed.len()), (1, 0));
+        assert_eq!(joints(&m)[0].kind, ConnectionKind::Mitre);
+        assert_eq!(m.get(added[0]).unwrap().name, "Joint 1");
+        // a third ending on the first's side: a butt, the first runs through
+        let c = add(&mut m, beam(DVec3::new(2.0, -3.0, 0.0), DVec3::new(2.0, 0.0, 0.0)));
+        let (added, _) = m.update_joins("Joint", None);
+        assert_eq!(added.len(), 1);
+        let butt = joints(&m).into_iter().find(|j| j.secondary == c).unwrap();
+        assert_eq!((butt.kind, butt.primary), (ConnectionKind::Butt, a));
+        // nothing more to join: running again adds nothing
+        assert_eq!(m.update_joins("Joint", None), (Vec::new(), Vec::new()));
+        // the node of the mitre is the corner
+        let mitre = m.iter().find(|e| matches!(&e.shape, Shape::Connection(j) if j.kind == ConnectionKind::Mitre)).unwrap().id;
+        assert!((m.join_node(mitre).unwrap() - DVec3::new(4.0, 0.0, 0.0)).length() < 1e-12);
+    }
+
+    #[test]
+    fn a_larger_profile_runs_through_and_a_straight_line_gets_no_join() {
+        let mut m = Model::new(TileGrid::default());
+        let column = add(
+            &mut m,
+            Shape::Linear(LinearDef { start: DVec3::new(0.0, 0.0, 0.0), end: DVec3::new(0.0, 0.0, 3.0), profile: ProfileDef::Rectangle { width: 0.4, height: 0.4 }, roll: 0.0, role: Default::default() }),
+        );
+        let b = add(&mut m, beam(DVec3::new(0.0, 0.0, 3.0), DVec3::new(5.0, 0.0, 3.0)));
+        add(&mut m, beam(DVec3::new(5.0, 0.0, 3.0), DVec3::new(9.0, 0.0, 3.0)));
+        let (added, _) = m.update_joins("Joint", None);
+        assert_eq!(added.len(), 1, "the beams in one line get none");
+        let j = &joints(&m)[0];
+        assert_eq!((j.kind, j.primary, j.secondary), (ConnectionKind::Butt, column, b));
+    }
+
+    #[test]
+    fn only_meetings_of_what_changed_are_joined() {
+        let mut m = Model::new(TileGrid::default());
+        let a = add(&mut m, beam(DVec3::ZERO, DVec3::new(4.0, 0.0, 0.0)));
+        let b = add(&mut m, beam(DVec3::new(4.0, 0.0, 0.0), DVec3::new(4.0, 3.0, 0.0)));
+        let c = add(&mut m, beam(DVec3::new(10.0, 0.0, 0.0), DVec3::new(10.0, 3.0, 0.0)));
+        assert!(m.update_joins("Joint", Some(&[c])).0.is_empty(), "c meets nothing");
+        assert_eq!(m.update_joins("Joint", Some(&[b])).0.len(), 1, "b meets a");
+        let _ = a;
+    }
+
+    #[test]
+    fn a_join_goes_when_its_members_part() {
+        let mut m = Model::new(TileGrid::default());
+        add(&mut m, beam(DVec3::ZERO, DVec3::new(4.0, 0.0, 0.0)));
+        let b = add(&mut m, beam(DVec3::new(4.0, 0.0, 0.0), DVec3::new(4.0, 3.0, 0.0)));
+        m.update_joins("Joint", None);
+        let mut moved = m.get(b).unwrap().clone();
+        moved.translate(&m.grid, DVec3::new(1.0, 0.0, 0.0));
+        m.replace(moved).unwrap();
+        let (added, removed) = m.update_joins("Joint", None);
+        assert_eq!((added.len(), removed.len()), (0, 1));
+        assert!(joints(&m).is_empty());
+    }
+
+    #[test]
+    fn a_door_cuts_the_wall_it_stands_in_and_moved_to_another_the_first_closes() {
+        use crate::element::OpeningKind;
+        let wall = |y: f64| Shape::Planar(PlanarDef { form: PlanarForm::Wall { start: DVec2::new(0.0, y), end: DVec2::new(6.0, y), base: 0.0, height: 3.0 }, thickness: 0.2, openings: Vec::new(), build_up: None });
+        let door = |x: f64, y: f64, rotation: f64| Shape::Point(PointDef { at: DVec3::new(x, y, 0.0), rotation, size: DVec3::new(0.9, 0.04, 2.1), opening: Some(OpeningKind::Door), role: Default::default() });
+        let mut m = Model::new(TileGrid::default());
+        let (south, north) = (add(&mut m, wall(0.0)), add(&mut m, wall(4.0)));
+        let whole = 6.0 * 0.2 * 3.0;
+        let hole = 0.9 * 0.2 * 2.1;
+        let volume = |m: &Model, id| m.evaluate(id).unwrap().iter().map(|p| p.solid.volume()).sum::<f64>();
+        let id = add(&mut m, door(2.0, 0.05, 0.0));
+        assert_eq!(m.get(id).unwrap().class(), "IfcDoor");
+        // the door is a frame of three members and a leaf; a window a frame of four and a pane of glass
+        let parts = m.evaluate(id).unwrap();
+        assert_eq!((parts.len(), parts.iter().filter(|p| p.material.is_some()).count()), (4, 0));
+        let window = add(&mut m, Shape::Point(PointDef { at: DVec3::new(4.5, 0.0, 0.9), rotation: 0.0, size: DVec3::new(1.2, 0.04, 1.2), opening: Some(OpeningKind::Window), role: Default::default() }));
+        let parts = m.evaluate(window).unwrap();
+        assert_eq!(parts.len(), 5);
+        let glass: Vec<_> = parts.iter().filter(|p| p.material.as_deref() == Some("glass")).collect();
+        assert!(glass.len() == 1 && glass[0].class == "IfcPlate" && (glass[0].solid.volume() - 1.08 * 1.08 * 0.02).abs() < 1e-9);
+        m.remove(window);
+        assert!((volume(&m, south) - (whole - hole)).abs() < 1e-9 && (volume(&m, north) - whole).abs() < 1e-9);
+        assert_eq!(m.openings_of(south), vec![Opening { along: 1.55, sill: 0.0, width: 0.9, height: 2.1, framing: None }]);
+        // moved into the north wall: the south wall closes, the north one opens
+        let mut moved = m.get(id).unwrap().clone();
+        moved.shape = door(3.0, 4.0, std::f64::consts::PI);
+        m.replace(moved).unwrap();
+        assert!((volume(&m, south) - whole).abs() < 1e-9 && (volume(&m, north) - (whole - hole)).abs() < 1e-9);
+        // square to the wall, beside it, or out past its end it cuts nothing; the wall stays whole
+        for (x, y, rotation) in [(3.0, 4.0, 1.5), (3.0, 4.5, 0.0), (5.8, 4.0, 0.0)] {
+            let mut e = m.get(id).unwrap().clone();
+            e.shape = door(x, y, rotation);
+            m.replace(e).unwrap();
+            assert!((volume(&m, north) - whole).abs() < 1e-9, "{x} {y} {rotation}");
+        }
+        // the wall removed, the door still stands
+        let mut back = m.get(id).unwrap().clone();
+        back.shape = door(3.0, 4.0, 0.0);
+        m.replace(back).unwrap();
+        m.remove(north);
+        assert!(m.get(id).is_some() && m.evaluate(id).is_ok());
+    }
+
+    #[test]
+    fn a_model_round_trips_through_json() {
+        let mut m = Model::new(TileGrid::default());
+        let a = add(&mut m, beam(DVec3::new(1000.5, 2.0, 0.0), DVec3::new(1004.5, 2.0, 0.0)));
+        let b = add(&mut m, beam(DVec3::new(1004.5, 2.0, 0.0), DVec3::new(1004.5, 5.0, 0.0)));
+        add(&mut m, Shape::Connection(ConnectionDef { kind: ConnectionKind::Mitre, primary: a, secondary: b }));
+        let json = serde_json::to_string(&m).unwrap();
+        let back: Model = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, m);
+        assert_eq!(back.evaluate(a), m.evaluate(a));
+    }
+
+    /// A rectangular duct 400 × 200, 1 mm of sheet, from `start` to `end`.
+    fn duct(start: DVec3, end: DVec3) -> Shape {
+        let shape = bim_library::ProfileShape::Rhs { h: 0.2, b: 0.4, t: 0.001, r_out: 0.0, r_in: 0.0 };
+        Shape::Linear(LinearDef { start, end, profile: ProfileDef::Catalogue { designation: "400×200".into(), shape }, roll: 0.0, role: crate::element::LinearRole::Duct })
+    }
+
+    #[test]
+    fn two_ducts_that_meet_at_a_corner_get_a_bend_and_one_that_ends_on_another_a_tee() {
+        let mut m = Model::new(TileGrid::default());
+        let a = add(&mut m, duct(DVec3::new(0.0, 0.0, 2.6), DVec3::new(4.0, 0.0, 2.6)));
+        let b = add(&mut m, duct(DVec3::new(4.0, 0.0, 2.6), DVec3::new(4.0, 3.0, 2.6)));
+        let branch = add(&mut m, duct(DVec3::new(2.0, 0.0, 2.6), DVec3::new(2.0, -2.0, 2.6)));
+        assert_eq!(m.get(a).unwrap().class(), "IfcDuctSegment");
+        let (added, _) = m.update_joins("Fitting", None);
+        assert_eq!(added.len(), 2, "a bend and a tee");
+        let kinds: Vec<ConnectionKind> = added.iter().map(|id| match &m.get(*id).unwrap().shape { Shape::Connection(c) => c.kind, other => panic!("{other:?}") }).collect();
+        let bend = added[kinds.iter().position(|k| matches!(k, ConnectionKind::Bend(_))).expect("a bend")];
+        let tee = added[kinds.iter().position(|k| matches!(k, ConnectionKind::Tee(_))).expect("a tee")];
+        assert_eq!(m.get(bend).unwrap().class(), "IfcDuctFitting");
+        // a quarter turn in pieces of 15°, each a closed hollow solid of the fitting's class
+        let parts = m.evaluate(bend).unwrap();
+        assert_eq!(parts.len(), 6);
+        assert!(parts.iter().all(|p| p.class == "IfcDuctFitting" && p.solid.volume() > 0.0));
+        // the radius is once the width (0.4): both ducts stop 0.4 from the corner
+        let (lo, hi) = m.evaluate(a).unwrap()[0].solid.bounds();
+        assert!((hi.x - 3.6).abs() < 1e-9 && lo.x.abs() < 1e-9, "{lo} {hi}");
+        let (lo, _) = m.evaluate(b).unwrap()[0].solid.bounds();
+        assert!((lo.y - 0.4).abs() < 1e-9, "{lo}");
+        // the bend stays within the corner's square (its straight pieces reach 2 mm past the
+        // true arc at their joints), and reaches both ducts
+        let (lo, hi) = parts.iter().map(|p| p.solid.bounds()).reduce(|(a, b), (c, d)| (a.min(c), b.max(d))).unwrap();
+        assert!((lo.x - 3.6).abs() < 1e-9 && (hi.y - 0.4).abs() < 1e-9 && hi.x <= 4.2 + 0.003 && lo.y >= -0.2 - 0.003, "{lo} {hi}");
+        // the branch stops 0.1 short of the main's side (at y = −0.2), and the tee's branch fills that
+        let (_, hi) = m.evaluate(branch).unwrap()[0].solid.bounds();
+        assert!((hi.y + 0.3).abs() < 1e-9, "{hi}");
+        let tee_parts = m.evaluate(tee).unwrap();
+        let (lo, hi) = tee_parts[0].solid.bounds();
+        assert!(tee_parts.len() == 1 && (lo.y + 0.3).abs() < 1e-9 && (hi.y + 0.2).abs() < 1e-9, "{lo} {hi}");
+        // a structural beam meeting a duct gets no fitting
+        let mut m = Model::new(TileGrid::default());
+        add(&mut m, duct(DVec3::new(0.0, 0.0, 2.6), DVec3::new(4.0, 0.0, 2.6)));
+        add(&mut m, beam(DVec3::new(4.0, 0.0, 2.6), DVec3::new(4.0, 3.0, 2.6)));
+        let (added, _) = m.update_joins("Joint", None);
+        assert!(added.iter().all(|id| matches!(&m.get(*id).unwrap().shape, Shape::Connection(c) if !matches!(c.kind, ConnectionKind::Bend(_) | ConnectionKind::Tee(_)))));
+    }
+
+    #[test]
+    fn two_ducts_in_one_line_of_different_sizes_get_a_transition_and_a_riser_gets_bends() {
+        let mut m = Model::new(TileGrid::default());
+        let a = add(&mut m, duct(DVec3::new(0.0, 0.0, 2.6), DVec3::new(4.0, 0.0, 2.6)));
+        let round = Shape::Linear(LinearDef {
+            start: DVec3::new(4.0, 0.0, 2.6),
+            end: DVec3::new(8.0, 0.0, 2.6),
+            profile: ProfileDef::Catalogue { designation: "ø250".into(), shape: bim_library::ProfileShape::Chs { d: 0.25, t: 0.001 } },
+            roll: 0.0,
+            role: crate::element::LinearRole::Duct,
+        });
+        let b = add(&mut m, round);
+        // a second duct of the same size in line with the first: nothing between them
+        add(&mut m, duct(DVec3::new(-3.0, 0.0, 2.6), DVec3::new(0.0, 0.0, 2.6)));
+        let (added, _) = m.update_joins("Fitting", None);
+        assert_eq!(added.len(), 1);
+        let Shape::Connection(c) = &m.get(added[0]).unwrap().shape else { panic!() };
+        assert!(matches!(c.kind, ConnectionKind::Transition(_)));
+        // both stop 0.15 short; the fitting is one closed hollow solid between them, as wide as
+        // the rectangle at the one end and as the circle at the other
+        let (_, hi) = m.evaluate(a).unwrap()[0].solid.bounds();
+        let (lo, _) = m.evaluate(b).unwrap()[0].solid.bounds();
+        assert!((hi.x - 3.85).abs() < 1e-9 && (lo.x - 4.15).abs() < 1e-9, "{hi} {lo}");
+        let parts = m.evaluate(added[0]).unwrap();
+        let (lo, hi) = parts[0].solid.bounds();
+        assert_eq!((parts.len(), parts[0].class), (1, "IfcDuctFitting"));
+        assert!((lo.x - 3.85).abs() < 1e-9 && (hi.x - 4.15).abs() < 1e-9 && (hi.y - 0.2).abs() < 1e-6 && (hi.z - 2.725).abs() < 1e-6, "{lo} {hi}");
+        let solid = 0.3 * (0.4 * 0.2 + 0.25 * 0.25 * 0.785) / 2.0;
+        assert!(parts[0].solid.volume() < solid * 0.1, "hollow: {}", parts[0].solid.volume());
+
+        // a duct going up from the end of a level one: a bend into the riser
+        let mut m = Model::new(TileGrid::default());
+        add(&mut m, duct(DVec3::new(0.0, 0.0, 2.6), DVec3::new(4.0, 0.0, 2.6)));
+        // rolled a quarter turn, so its width lies across the level run as that one's does
+        let Shape::Linear(up) = duct(DVec3::new(4.0, 0.0, 2.6), DVec3::new(4.0, 0.0, 5.6)) else { panic!() };
+        let riser = add(&mut m, Shape::Linear(LinearDef { roll: std::f64::consts::FRAC_PI_2, ..up }));
+        let (added, _) = m.update_joins("Fitting", None);
+        let parts = m.evaluate(added[0]).unwrap();
+        assert_eq!((added.len(), parts.len()), (1, 6));
+        // the bend turns in the duct's height (0.2): the riser starts 0.2 above the level run
+        let (lo, _) = m.evaluate(riser).unwrap()[0].solid.bounds();
+        assert!((lo.z - 2.8).abs() < 1e-9, "{lo}");
+    }
+
+    #[test]
+    fn runs_of_different_services_are_not_joined_and_a_fitting_takes_its_runs_service() {
+        use crate::element::Service;
+        let mut m = Model::new(TileGrid::default());
+        let grid = m.grid;
+        let mut of = |m: &mut Model, service: Option<Service>, start: DVec3, end: DVec3| {
+            let mut e = Element::in_project(&grid, "e", None, duct(start, end));
+            e.service = service;
+            m.add(e).unwrap()
+        };
+        let (at, x, y) = (DVec3::new(4.0, 0.0, 2.6), DVec3::new(0.0, 0.0, 2.6), DVec3::new(4.0, 4.0, 2.6));
+        of(&mut m, Some(Service::ReturnAir), at, y);
+        of(&mut m, Some(Service::SupplyAir), x, at);
+        assert!(m.update_joins("Fitting", None).0.is_empty(), "supply and return do not join");
+        // a third of the supply's own service, and one of none: each joins the supply run
+        of(&mut m, Some(Service::SupplyAir), at, DVec3::new(4.0, -4.0, 2.6));
+        let (added, _) = m.update_joins("Fitting", None);
+        assert_eq!(added.len(), 1);
+        assert_eq!(m.get(added[0]).unwrap().service, Some(Service::SupplyAir));
+        // it is kept when the element is written and read
+        let read: Element = serde_json::from_str(&serde_json::to_string(m.get(added[0]).unwrap()).unwrap()).unwrap();
+        assert_eq!(read.service, Some(Service::SupplyAir));
+    }
+}

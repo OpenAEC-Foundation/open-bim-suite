@@ -1,0 +1,18 @@
+[package]
+name = "bim-gis"
+version = "0.1.0"
+description = "Headless GIS for a BIM project: the Dutch national grid (RD New) and WGS 84, and the open services of PDOK for finding a place and the parcels and buildings around it"
+authors = ["Open BIM Suite Contributors"]
+license = "LGPL-3.0-or-later"
+edition = "2021"
+rust-version = "1.96"
+repository = "https://github.com/OpenAEC-Foundation/open-bim-suite"
+publish = false
+
+[dependencies]
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+# What the services answer, and the GeoJSON handed on (MIT OR Apache-2.0)
+serde_json = { version = "1", features = ["float_roundtrip"] }
+# The height grids of the coverage service: GeoTIFF with deflate or LZW (MIT)
+tiff = { version = "0.11", default-features = false, features = ["deflate", "lzw"] }

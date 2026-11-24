@@ -2,34 +2,109 @@
 //! the browser) into [`Layer`]s in Z-up coordinates; [`load`] picks the loader by extension and
 //! wraps the result in a [`Model`].
 //!
-//! To add a format (DWG, E57, IFC, ...): implement [`Loader`] in a new module and add it to
+//! To add a format (DWG, IFC, ...): implement [`Loader`] in a new module and add it to
 //! [`registry`]. Additional loaders that live outside this crate are added with
 //! [`add`] before the app starts.
 
 mod gltf;
+mod placed;
+mod svx;
+mod tiles;
 mod obj;
 mod stl;
 #[cfg(not(target_arch = "wasm32"))]
 mod rvt;
 #[cfg(not(target_arch = "wasm32"))]
+mod rvt_drawings;
+#[cfg(not(target_arch = "wasm32"))]
+mod rvt_drafts;
+#[cfg(not(target_arch = "wasm32"))]
+mod rvt_tags;
+#[cfg(not(target_arch = "wasm32"))]
+mod rvt_schedules;
+#[cfg(not(target_arch = "wasm32"))]
+mod rvt_props;
+#[cfg(not(target_arch = "wasm32"))]
+mod rvt_filters;
 mod ifc;
 
 mod skp;
+mod sldprt;
+mod solidedge;
+mod vwx;
+#[cfg(not(target_arch = "wasm32"))]
+mod smc;
 mod tekla;
+mod tekla_analysis;
+mod tbp;
 mod ply;
 mod cityjson;
 mod landxml;
-mod cad;
+pub(crate) mod cad;
 mod allplan;
 mod dgn;
 mod archicad;
+mod inventor;
+#[cfg(not(target_arch = "wasm32"))]
+mod vertex;
+mod threemf;
+mod collada;
+mod fbx;
+mod off;
+mod max3ds;
+mod geojson;
+mod citygml;
+mod usd;
+mod pointcloud;
+mod las;
+mod e57;
+mod xyz;
+mod ptx;
+mod pcd;
+mod splat;
+mod ascgrid;
+mod shapefile;
+mod vrml;
+mod amf;
+mod ifcx;
+mod step;
+mod e2k;
+mod ifcfem;
+mod ifcfem_project;
+mod sam;
+mod fem;
+mod rhino;
+mod blend;
+mod fcstd;
+mod dicom;
+mod xodr;
+mod urdf;
+mod vox;
 
-use crate::model::{Layer, Model, ProjectData, SavedView};
+use crate::model::{Layer, Model, Origin, ProjectData, SavedView};
+use crate::structural::StructuralPart;
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use web_time::Instant;
+
+/// A file that the model `model` refers to (a glTF buffer or image, an OBJ material library). Where
+/// the AI connection is held to the work folder (`managed::confined`), a model in the work folder
+/// may only refer to files in it, so opening it reads nothing outside. A model the user opened
+/// elsewhere is the user's own choice and is not limited.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn check_reference(model: &Path, file: &Path) -> Result<(), String> {
+    if crate::managed::confined() && crate::managed::confine(model).is_ok() {
+        crate::managed::confine(file).map_err(|e| format!("refers to a file outside the work folder: {e}"))?;
+    }
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn check_reference(_: &Path, _: &Path) -> Result<(), String> {
+    Ok(())
+}
 
 
 /// Where a model comes from: a file on disk (desktop, command line, remote control) or the bytes
@@ -160,10 +235,15 @@ pub trait Loader: Send + Sync {
     /// what else the file holds.
     fn load_with(&self, source: &Source, progress: &Progress) -> Result<Loaded, String> {
         progress.set(Phase::Read);
-        self.load(source).map(|layers| Loaded { layers, views: Vec::new(), project: ProjectData::default() })
+        self.load(source).map(|layers| Loaded { structural: Vec::new(), origin: None, layers, views: Vec::new(), project: ProjectData::default() })
     }
     /// True when the format is Y up and `load` converted it to Z up.
     fn source_y_up(&self) -> bool {
+        false
+    }
+    /// True when this loader opens a file by its whole lower-case name, whatever loader its
+    /// extension names (`tileset.json` of 3D Tiles before the CityJSON `.json`).
+    fn claims(&self, _name: &str) -> bool {
         false
     }
     /// Lower-case extensions of folders this loader opens as a whole (e.g. an Allplan `.prj`
@@ -171,13 +251,39 @@ pub trait Loader: Send + Sync {
     fn folder_extensions(&self) -> &'static [&'static str] {
         &[]
     }
+    /// True when this loader opens `folder` as a model whatever its name (a Tekla model folder,
+    /// which holds the model's DB1).
+    fn opens_folder(&self, _folder: &Path) -> bool {
+        false
+    }
+    /// True when files of this format layer over each other into one model (IFCX): a file added
+    /// to an open model of this format composes with it, see [`Loader::load_stack`].
+    fn composes(&self) -> bool {
+        false
+    }
+    /// Reads several files as one model, the later ones layered over the earlier ones (only
+    /// when [`Loader::composes`]; by default the last file alone).
+    fn load_stack(&self, sources: &[Source], progress: &Progress) -> Result<Loaded, String> {
+        self.load_with(sources.last().ok_or("no file")?, progress)
+    }
+    /// Where the format stands among those the start screen names (lower first); `None` for the
+    /// formats only the file dialog lists. See [`featured_formats`].
+    fn featured(&self) -> Option<u8> {
+        None
+    }
 }
 
-/// What a loader read: the layers and the views saved in the file.
+/// What a loader read: the layers, the views saved in the file and the structural analysis
+/// models.
 pub struct Loaded {
     pub layers: Vec<Layer>,
     pub views: Vec<SavedView>,
     pub project: ProjectData,
+    /// Structural analysis models, in f64 world metres of the file (no anchor subtracted).
+    pub structural: Vec<bim_structural::AnalysisModel>,
+    /// The anchor the loader subtracted from the layer positions (world metres, Z up), when the
+    /// format has one; it places the model when models are combined.
+    pub origin: Option<glam::DVec3>,
 }
 
 /// Loaders from other crates, see [`add`].
@@ -192,20 +298,92 @@ pub fn add(loaders: Vec<&'static dyn Loader>) {
 /// All available loaders.
 pub fn registry() -> Vec<&'static dyn Loader> {
     let builtin: Vec<&'static dyn Loader> = vec![
-        &skp::SkpLoader, &tekla::TeklaLoader, &gltf::GltfLoader, &obj::ObjLoader, &stl::StlLoader, &ply::PlyLoader,
-        &cityjson::CityJsonLoader, &landxml::LandXmlLoader,
-        &cad::CadLoader, &allplan::AllplanLoader, &dgn::DgnLoader, &archicad::ArchicadLoader,
+        &skp::SkpLoader, &tekla::TeklaLoader, &gltf::GltfLoader, &tiles::TilesLoader, &svx::SvxLoader, &obj::ObjLoader, &stl::StlLoader, &ply::PlyLoader,
+        &cityjson::CityJsonLoader, &landxml::LandXmlLoader, &threemf::ThreeMfLoader, &collada::ColladaLoader,
+        &fbx::FbxLoader, &off::OffLoader, &max3ds::Max3dsLoader, &geojson::GeoJsonLoader, &citygml::CityGmlLoader, &usd::UsdLoader,
+        &las::LasLoader, &e57::E57Loader, &xyz::PtsLoader, &ptx::PtxLoader, &pcd::PcdLoader, &splat::SpzLoader,
+        &shapefile::ShapefileLoader, &vrml::VrmlLoader, &amf::AmfLoader,
+        &ifcx::IfcxLoader, &step::StepLoader, &sam::SamLoader, &e2k::E2kLoader, &ifcfem::IfcFemLoader, &fem::VtkLoader, &fem::INP, &fem::BDF, &fem::MSH, &fem::S2K, &fem::SAF, &rhino::RhinoLoader, &vwx::VwxLoader, &sldprt::SldprtLoader, &solidedge::SolidEdgeLoader, &blend::BlendLoader, &fcstd::FcstdLoader, &dicom::DicomLoader, &xodr::XodrLoader, &urdf::UrdfLoader, &vox::VoxLoader, &cad::CadLoader, &allplan::AllplanLoader, &dgn::DgnLoader, &archicad::ArchicadLoader, &inventor::InventorLoader,
         #[cfg(not(target_arch = "wasm32"))]
         &rvt::RvtLoader,
         #[cfg(not(target_arch = "wasm32"))]
+        &vertex::VertexLoader,
+        #[cfg(not(target_arch = "wasm32"))]
+        &vertex::BtlLoader,
+        #[cfg(not(target_arch = "wasm32"))]
+        &smc::SmcLoader,
+        &tbp::TbpLoader,
         &ifc::IfcLoader,
+        // last: `.txt` and `.csv` are only point clouds when nothing else claims them
+        &xyz::XyzLoader,
     ];
     EXTRA.get().into_iter().flatten().copied().chain(builtin).collect()
+}
+
+/// The issues a coordination file brought along when it was loaded, once.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn take_file_issues() -> Option<(std::path::PathBuf, bim_bcf::issues::Issues)> {
+    smc::take_issues()
 }
 
 /// All supported extensions, for the file dialog filter.
 pub fn supported_extensions() -> Vec<&'static str> {
     registry().iter().flat_map(|l| l.extensions().iter().copied()).collect()
+}
+
+/// The formats the start screen names, from the same registry as the file dialog (so a build
+/// names only what it opens): the featured format names in order, and how many other formats
+/// this build opens.
+pub fn featured_formats() -> (Vec<&'static str>, usize) {
+    let loaders = registry();
+    let mut featured: Vec<(u8, &'static str)> = loaders.iter().filter_map(|l| l.featured().map(|rank| (rank, l.name()))).collect();
+    featured.sort();
+    featured.dedup_by_key(|(_, name)| *name);
+    let featured: Vec<&'static str> = featured.into_iter().map(|(_, name)| name).collect();
+    let mut others: Vec<&'static str> = loaders.iter().map(|l| l.name()).filter(|name| !featured.contains(name)).collect();
+    others.sort_unstable();
+    others.dedup();
+    (featured, others.len())
+}
+
+/// Where the desktop app is downloaded.
+pub const DESKTOP_DOWNLOAD: &str = "https://github.com/OpenAEC-Foundation/open-bim-suite/releases/latest";
+
+/// Formats the desktop app opens but the browser build cannot (their readers open the file in
+/// parts from disk or load a native library): the format name and its extensions.
+const DESKTOP_ONLY: &[(&str, &[&str])] = &[("Revit", &["rvt", "rfa"]), ("Vertex BD", &["vxz", "vxm"]), ("BTL", &["btl"]), ("Coordination model (SMC)", &["smc"])];
+
+/// The desktop-only format of files with extension `ext` (lower case) when none of `loaders`
+/// (this build's registry) opens them.
+fn desktop_only(ext: &str, loaders: &[&'static dyn Loader]) -> Option<&'static str> {
+    if loaders.iter().any(|l| l.extensions().contains(&ext)) {
+        return None;
+    }
+    DESKTOP_ONLY.iter().find(|(_, extensions)| extensions.contains(&ext)).map(|(name, _)| *name)
+}
+
+/// The message for a file of a desktop-only format, in Dutch or English: short, so it fits the
+/// status bar of a phone; the shell then offers the download ([`DESKTOP_DOWNLOAD`]) as a button.
+pub fn desktop_only_message(format: &str, dutch: bool) -> String {
+    match dutch {
+        true => format!("{format} vereist de desktop-app"),
+        false => format!("{format} needs the desktop app"),
+    }
+}
+
+/// The desktop-only format a load error is about, so the status bar can show the message in the
+/// chosen language (load errors are English).
+pub fn desktop_only_error(error: &str) -> Option<&'static str> {
+    DESKTOP_ONLY.iter().map(|(name, _)| *name).find(|name| error == desktop_only_message(name, false))
+}
+
+/// The error for a file whose extension none of `loaders` claims: a pointer to the desktop app
+/// for the formats only it opens, otherwise unsupported.
+fn unsupported(ext: &str, loaders: &[&'static dyn Loader]) -> String {
+    match desktop_only(ext, loaders) {
+        Some(format) => desktop_only_message(format, false),
+        None => format!("Unsupported file type: .{ext}"),
+    }
 }
 
 /// Loads a file with the loader matching its extension.
@@ -215,26 +393,84 @@ pub fn load(path: &Path) -> Result<Model, String> {
 
 /// As [`load`], for any source, reporting the steps to `progress`.
 pub fn load_with(source: &Source, progress: &Progress) -> Result<Model, String> {
+    load_stack(std::slice::from_ref(source), progress)
+}
+
+/// The loader for a file (or a project folder).
+fn loader_for(source: &Source) -> Result<&'static dyn Loader, String> {
     let ext = source.extension();
-    // A folder goes to the loader that opens folders with its extension.
-    let folder = source.path().is_some_and(Path::is_dir);
-    let loader = registry()
-        .into_iter()
-        .find(|l| if folder { l.folder_extensions() } else { l.extensions() }.contains(&ext.as_str()))
+    // A folder goes to the loader that opens folders with its extension, or that knows the
+    // folder as a model of its own.
+    let dir = source.path().filter(|p| p.is_dir());
+    let folder = dir.is_some();
+    let loaders = registry();
+    let name = source.name().to_lowercase();
+    if let Some(l) = loaders.iter().copied().find(|l| dir.is_none() && l.claims(&name)) {
+        return Ok(l);
+    }
+    loaders
+        .iter()
+        .copied()
+        .find(|l| match dir {
+            Some(dir) => l.folder_extensions().contains(&ext.as_str()) || l.opens_folder(dir),
+            None => l.extensions().contains(&ext.as_str()),
+        })
         .ok_or_else(|| match folder {
             true => format!("{}: folders open only as a project folder of a supported format", source.name()),
-            false => format!("Unsupported file type: .{ext}"),
-        })?;
+            false => unsupported(&ext, &loaders),
+        })
+}
+
+/// True when a loader opens `folder` as one model (an Allplan `.prj` folder, a Tekla model
+/// folder), rather than it being a folder of files to open one by one.
+pub fn opens_folder(folder: &Path) -> bool {
+    let ext = folder.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    registry().iter().any(|l| l.folder_extensions().contains(&ext.as_str()) || l.opens_folder(folder))
+}
+
+/// True when `source` is of a format whose files layer over each other (IFCX).
+pub fn composes(source: &Source) -> bool {
+    loader_for(source).is_ok_and(|l| l.composes())
+}
+
+/// Loads files that layer over each other as one model, the later ones stronger (see
+/// [`Loader::load_stack`]); one file loads as [`load_with`]. The model is named after the first.
+pub fn load_stack(sources: &[Source], progress: &Progress) -> Result<Model, String> {
+    let mut model = load_first(sources, progress)?;
+    model.complete();
+    Ok(model)
+}
+
+/// As [`load_stack`], without what the loader leaves for after the model shows (the drawings of
+/// a Revit project, see [`Model::complete`]): the window shows the model first.
+pub fn load_first(sources: &[Source], progress: &Progress) -> Result<Model, String> {
+    let source = sources.first().ok_or("no file to open")?;
+    let loader = loader_for(sources.last().unwrap_or(source))?;
     let start = Instant::now();
-    let loaded = loader.load_with(source, progress)?;
+    let loaded = match sources {
+        [one] => loader.load_with(one, progress)?,
+        _ => loader.load_stack(sources, progress)?,
+    };
     progress.set(Phase::Scene);
     let mut model = Model::new(source.model_path(), loader.name(), loaded.layers);
-    model.file_size = source.len();
+    model.file_size = sources.iter().map(Source::len).sum();
     model.views = loaded.views;
     model.project = loaded.project;
+    // one origin per analysis model (the first shared with the layers), all at the file's anchor:
+    // the origin index is the `model` of a structural object's key, so two analysis models of one
+    // file that number their objects alike keep apart
+    let origin = Origin { anchor: loaded.origin, shift: glam::DVec3::ZERO };
+    model.origins = vec![origin; loaded.structural.len().max(1)];
+    if !loaded.structural.is_empty() {
+        let parts = loaded.structural.into_iter().enumerate().map(|(k, m)| StructuralPart::new(k as u32, Arc::new(m))).collect();
+        model.set_structural(parts);
+    }
     model.load_time = start.elapsed();
     model.source_y_up = loader.source_y_up();
-    if model.layers.is_empty() {
+    // a file of only analysis objects (nodes and members, or only sections, materials or load
+    // cases, no triangles) opens too, as does one of only modelled elements (their meshes are
+    // made again from their definitions)
+    if model.layers.is_empty() && model.structural_index.is_empty() && model.project.elements.is_empty() {
         return Err(format!("{}: no geometry found", model.file_name()));
     }
     Ok(model)
@@ -297,7 +533,7 @@ mod tests {
 
     #[test]
     fn extracted_readers_remain_registered() {
-        for (extension, name) in [("skp", "SketchUp"), ("db1", "Tekla Structures"), ("ply", "PLY"), ("ndw", "Allplan"), ("dgn", "MicroStation DGN"), ("pln", "Archicad"), ("pla", "Archicad")] {
+        for (extension, name) in [("skp", "SketchUp"), ("db1", "Tekla Structures"), ("ply", "PLY"), ("ndw", "Allplan"), ("dgn", "MicroStation DGN"), ("pln", "Archicad"), ("pla", "Archicad"), ("ipt", "Inventor"), ("iam", "Inventor"), ("3mf", "3MF"), ("dae", "COLLADA"), ("fbx", "FBX"), ("off", "OFF"), ("3ds", "3DS"), ("geojson", "GeoJSON"), ("gml", "CityGML"), ("citygml", "CityGML"), ("usdz", "USD"), ("las", "LAS"), ("laz", "LAS"), ("e57", "E57"), ("xyz", "XYZ"), ("txt", "XYZ"), ("csv", "XYZ"), ("asc", "XYZ"), ("pts", "PTS"), ("ptx", "PTX"), ("pcd", "PCD"), ("shp", "Shapefile"), ("wrl", "VRML / X3D"), ("x3d", "VRML / X3D"), ("x3dv", "VRML / X3D"), ("amf", "AMF"), ("ifcx", "IFCX"), ("stp", "STEP"), ("step", "STEP"), ("stpz", "STEP"), ("3dm", "Rhino"), ("vwx", "Vectorworks"), ("sta", "Vectorworks"), ("sldprt", "SolidWorks"), ("sldasm", "SolidWorks"), ("par", "Solid Edge"), ("psm", "Solid Edge"), ("asm", "Solid Edge")] {
             let loader = registry().into_iter().find(|l| l.extensions().contains(&extension)).expect(extension);
             assert_eq!(loader.name(), name);
         }
@@ -317,6 +553,19 @@ mod tests {
         assert_eq!(layer.normals, [0.0, 0.0, 1.0].repeat(4));
         assert_eq!(layer.colors.as_ref().unwrap()[0], [255, 0, 0, 255]);
         assert_eq!(layer.colors.as_ref().unwrap()[2], [0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn a_tekla_model_folder_opens_as_its_model() {
+        let root = std::env::temp_dir().join(format!("o3v-tekla-folder-{}", std::process::id()));
+        let folder = root.join("Huis");
+        std::fs::create_dir_all(&folder).unwrap();
+        assert!(!opens_folder(&folder), "an empty folder is no model");
+        assert!(loader_for(&Source::from(folder.as_path())).is_err());
+        std::fs::write(folder.join("Huis.db1"), b"").unwrap();
+        assert!(opens_folder(&folder));
+        assert_eq!(loader_for(&Source::from(folder.as_path())).unwrap().name(), "Tekla Structures");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
@@ -344,7 +593,146 @@ mod tests {
     }
 
     #[test]
+    fn loads_the_model_a_dicom_file_carries() {
+        // an Encapsulated STL of a 40 x 20 x 10 mm block: millimetres become metres
+        let stl = load(&repo_file("test-models/dicom-implant-stl.dcm")).expect("DICOM STL");
+        assert_eq!(stl.format, "DICOM");
+        assert_eq!(stl.triangle_count(), 12);
+        let size = stl.bounds.size();
+        assert!((size[0] - 0.04).abs() < 1e-6 && (size[1] - 0.02).abs() < 1e-6 && (size[2] - 0.01).abs() < 1e-6, "{size:?}");
+        // an Encapsulated OBJ, coloured by the material library beside it, kept in its own frame
+        let obj = load(&repo_file("test-models/dicom-obj/model.dcm")).expect("DICOM OBJ");
+        assert_eq!(obj.triangle_count(), 4);
+        assert_eq!(obj.layers[0].color, [0.89, 0.85, 0.72]);
+        assert!((obj.bounds.max[2] - 0.03).abs() < 1e-6 && obj.bounds.min[1] >= 0.0, "{:?}", obj.bounds);
+        // the library alone says what it is
+        let error = load(&repo_file("test-models/dicom-obj/material.dcm")).unwrap_err();
+        assert!(error.contains("material library"), "{error}");
+    }
+
+    #[test]
+    fn loads_3mf_through_its_reader() {
+        let model = load(&repo_file("test-models/test-sphere.3mf")).expect("3MF sphere");
+        assert_eq!(model.format, "3MF");
+        assert!(model.triangle_count() > 1000, "{}", model.triangle_count());
+        // a 10 mm radius sphere, in metres
+        assert!(model.bounds.size().iter().all(|&s| (s - 0.02).abs() < 0.001), "{:?}", model.bounds.size());
+        assert!(model.props.values().any(|p| p.contains("\"Object id\"")));
+    }
+
+    #[test]
+    fn loads_an_opendrive_network_at_its_place() {
+        let model = load(&repo_file("test-models/opendrive-street.xodr")).expect("OpenDRIVE file");
+        assert_eq!(model.format, "OpenDRIVE");
+        let names: Vec<&str> = model.layers.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["biking", "border", "driving", "parking", "shoulder", "sidewalk", "reference lines"]);
+        // the lanes are pickable, with their road and lane
+        assert!(model.props.values().any(|p| p.contains("\"Road name\":\"Hoofdstraat\"") && p.contains("\"Lane\":\"-3\"")));
+        // the reference lines are lines, the lanes triangles
+        let lines = model.layers.last().unwrap();
+        assert!(lines.indices.is_empty() && !lines.lines.is_empty());
+        // placed by the header offset in the Dutch grid, which the file properties name
+        assert!(model.project.info.iter().any(|(k, v)| k == "Coordinate reference system" && v.contains("+proj=sterea")));
+        assert!(model.project.info.iter().any(|(k, v)| k == "OpenDRIVE world origin" && v == "155000, 463000, 0"));
+    }
+
+    #[test]
+    fn loads_a_urdf_robot_with_its_mesh_file() {
+        let model = load(&repo_file("test-models/urdf-arm/arm_description/urdf/arm.urdf")).expect("URDF file");
+        assert_eq!(model.format, "URDF");
+        let names: Vec<&str> = model.layers.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["base_link", "shoulder_link", "upper_arm_link", "upper_arm_link", "forearm_link", "tool_link"]);
+        // the gripper (an STL in millimetres) is read from the package, scaled and placed at the
+        // wrist, 0.9 m up and 0.5 m out, its fingers pointing on along X in the robot's orange
+        let gripper = model.layers.last().unwrap();
+        assert_eq!(gripper.color, [0.95, 0.45, 0.1]);
+        let xs = gripper.positions.chunks_exact(3).map(|p| p[0]);
+        let (lo, hi) = xs.fold((f32::MAX, f32::MIN), |(lo, hi), x| (lo.min(x), hi.max(x)));
+        assert!((lo - 0.49).abs() < 1e-4 && (hi - 0.56).abs() < 1e-4, "{lo} {hi}");
+        assert!(gripper.positions.chunks_exact(3).all(|p| (p[2] - 0.9).abs() < 0.013));
+        assert!(model.props.values().any(|p| p.contains("\"Joints\":\"base_turn › shoulder › elbow › wrist\"")));
+        // in the browser there is no package to find the mesh in: the rest still opens
+        let data = std::fs::read(repo_file("test-models/urdf-arm/arm_description/urdf/arm.urdf")).unwrap();
+        let source = Source::Bytes { name: "arm.urdf".into(), data: Arc::new(data) };
+        let bytes = load_with(&source, &Progress::default()).expect("URDF bytes");
+        assert_eq!(bytes.layers.len(), 5);
+        assert!(bytes.project.info.iter().any(|(k, v)| k == "Mesh files not read" && v.contains("gripper.stl")));
+    }
+
+    #[test]
+    fn loads_a_magicavoxel_scene() {
+        let model = load(&repo_file("test-models/voxel-house.vox")).expect("MagicaVoxel file");
+        assert_eq!(model.format, "MagicaVoxel");
+        let names: Vec<&str> = model.layers.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["Huis", "Boom links", "Boom rechts"]);
+        assert!(model.layers.iter().all(|l| l.colors.as_ref().is_some_and(|c| c.len() == l.vertex_count())));
+        // the two trees are one model placed twice
+        assert_eq!(model.layers[1].triangle_count(), model.layers[2].triangle_count());
+        assert!(model.props.values().any(|p| p.contains("\"Model\":\"1\"")));
+    }
+
+    #[test]
     fn rejects_unknown_extension() {
-        assert!(load(Path::new("x.unknownext")).is_err());
+        let error = load(Path::new("x.unknownext")).unwrap_err();
+        assert_eq!(error, "Unsupported file type: .unknownext");
+        assert_eq!(desktop_only_error(&error), None);
+    }
+
+    #[test]
+    fn registers_ifc_on_every_target() {
+        // the browser build opens IFC too (issue #92): the file dialog and the start screen offer it
+        let loader = registry().into_iter().find(|l| l.extensions().contains(&"ifc")).expect("IFC loader");
+        assert_eq!(loader.name(), "IFC");
+        assert!(loader.extensions().contains(&"ifczip"));
+        assert!(featured_formats().0.contains(&"IFC"));
+        assert_eq!(desktop_only("ifc", &registry()), None);
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn desktop_only_formats_are_the_desktop_loaders() {
+        // each format the browser points to the desktop app for is one the desktop opens
+        let desktop = registry();
+        for (name, extensions) in DESKTOP_ONLY {
+            for extension in *extensions {
+                let loader = desktop.iter().find(|l| l.extensions().contains(extension)).expect(extension);
+                assert_eq!(loader.name(), *name);
+                assert_eq!(desktop_only(extension, &desktop), None, "{extension}");
+            }
+        }
+        assert!(featured_formats().0.contains(&"Revit"));
+    }
+
+    #[test]
+    fn points_desktop_only_formats_to_the_desktop_app() {
+        // as in the browser build: the registry without the desktop-only loaders
+        let web: Vec<&'static dyn Loader> =
+            registry().into_iter().filter(|l| !DESKTOP_ONLY.iter().any(|(name, _)| *name == l.name())).collect();
+        for (extension, format) in [("rvt", "Revit"), ("rfa", "Revit"), ("vxz", "Vertex BD"), ("vxm", "Vertex BD"), ("btl", "BTL")] {
+            let error = unsupported(extension, &web);
+            assert_eq!(error, format!("{format} needs the desktop app"));
+            assert_eq!(desktop_only_error(&error), Some(format));
+            assert!(desktop_only_message(format, true).contains("vereist de desktop-app"));
+        }
+        assert_eq!(unsupported("abc", &web), "Unsupported file type: .abc");
+    }
+
+    #[test]
+    #[cfg(target_arch = "wasm32")]
+    fn browser_points_revit_to_the_desktop_app() {
+        let source = Source::Bytes { name: "house.RVT".into(), data: Arc::new(Vec::new()) };
+        let error = load_with(&source, &Progress::default()).unwrap_err();
+        assert_eq!(desktop_only_error(&error), Some("Revit"));
+        assert!(!featured_formats().0.contains(&"Revit"));
+    }
+
+    #[test]
+    fn featured_formats_come_from_the_registry_in_order() {
+        let (featured, others) = featured_formats();
+        let names: Vec<&str> = registry().iter().map(|l| l.name()).collect();
+        assert!(featured.iter().all(|name| names.contains(name)));
+        assert_eq!(&featured[..2], ["IFC", if cfg!(target_arch = "wasm32") { "SketchUp" } else { "Revit" }]);
+        assert!(featured.ends_with(&["SketchUp", "glTF", "OBJ", "STL", "PLY"]), "{featured:?}");
+        assert!(others > 20, "{others}");
     }
 }

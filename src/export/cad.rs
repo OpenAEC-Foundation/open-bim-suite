@@ -1,0 +1,270 @@
+//! A 2D drawing as a CAD drawing in the shared OpenCAD drawing model (`opencaddocument`, MPL-2.0),
+//! which writes it as DWG and DXF through its acadrust codec and as IFCCAD, the open 2D drawing
+//! profile on IFCX, through ifccad. Millimetres: a view 1:1, a sheet at paper size. One layer per
+//! pen, with the pen's line weight; lines of another width (what is cut and what is seen beyond it,
+//! as a view's kind of drawing draws them) go on a layer of their own, named after the pen and the
+//! width.
+
+use crate::drawing2d::{Align, Drawing2d, Pen, Space};
+use opencaddocument::entities::{Dimension, DimensionAligned, DimensionLinear, Line, Text, TextHorizontalAlignment};
+use opencaddocument::tables::{DimStyle, Layer};
+use opencaddocument::{Document, Dwg, Dxf, EntityType, Format, Ifcx, LineWeight, Vector3};
+
+/// Millimetres per metre.
+const MM: f64 = 1000.0;
+/// The dimension style of the drawing's dimensions.
+const STYLE: &str = "O3V";
+/// `INSUNITS` of millimetres.
+const MILLIMETRES: i16 = 4;
+
+/// A drawing point in millimetres.
+fn mm(q: [f64; 2]) -> Vector3 {
+    Vector3::new(q[0] * MM, q[1] * MM, 0.0)
+}
+
+/// The layer of the lines of `pen` that are `width` millimetres wide: the pen's own for its own
+/// width, else one named after the pen and the width in hundredths of a millimetre ("O3V-Cut-070").
+fn layer_of(pen: Pen, width: f64) -> String {
+    if (width - pen.weight_mm()).abs() < 1e-9 {
+        pen.name().to_string()
+    } else {
+        format!("{}-{:03}", pen.name(), (width * 100.0).round() as i64)
+    }
+}
+
+/// The drawing in the shared CAD model.
+pub fn cad_document(d: &Drawing2d) -> Document {
+    let mut doc = Document::new();
+    doc.header.insertion_units = MILLIMETRES;
+    for pen in Pen::ALL {
+        let mut widths = d.widths(pen);
+        if !widths.iter().any(|width| (*width - pen.weight_mm()).abs() < 1e-9) {
+            widths.push(pen.weight_mm());
+        }
+        for width in widths {
+            let name = layer_of(pen, width);
+            let mut layer = Layer::new(name.as_str());
+            layer.handle = doc.allocate_handle();
+            layer.line_weight = LineWeight::Value((width * 100.0).round() as i16);
+            let _ = doc.layers.add(layer);
+        }
+    }
+    // Use native CAD dimension entities and retain the view's paper style.
+    let unit = MM / d.paper_per_unit();
+    let mut styles = Vec::new();
+    for dim in &d.dimensions {
+        if styles.contains(&&dim.style) { continue; }
+        let index = styles.len();
+        styles.push(&dim.style);
+        let mut style = DimStyle::new(if index == 0 { STYLE.to_string() } else { format!("{STYLE}-{index}") });
+        style.handle = doc.allocate_handle();
+        style.dimtxt = dim.style.size * unit;
+        style.dimasz = dim.style.tick_size * unit;
+        style.dimtsz = 0.0;
+        match dim.style.tick {
+            crate::document::Tick::Slash => style.dimtsz = dim.style.tick_size * unit,
+            crate::document::Tick::Dot => style.dimblk_name = "_DOT".into(),
+            crate::document::Tick::None => style.dimblk_name = "_NONE".into(),
+            crate::document::Tick::Arrow => {}
+        }
+        style.dimexo = dim.style.gap * unit;
+        style.dimexe = dim.style.extension * unit;
+        style.dimgap = 0.001 * unit;
+        style.dimdec = dim.style.decimals as i16;
+        if dim.style.unit == crate::document::DimensionUnit::Metres { style.dimlfac = 0.001; }
+        style.dimtad = 1;
+        style.dimtih = false;
+        style.dimtoh = false;
+        let _ = doc.dim_styles.add(style);
+    }
+
+    for l in &d.lines {
+        let mut line = Line::from_points(mm(l.a), mm(l.b));
+        line.common.layer = layer_of(l.pen, l.width);
+        if let Some([r, g, b]) = l.color { line.common.color = opencaddocument::Color::from_rgb(r, g, b); }
+        let _ = doc.add_entity(EntityType::Line(line));
+    }
+    for t in &d.texts {
+        let mut text = Text::with_value(t.text.clone(), mm(t.at)).with_height(t.height * MM);
+        text.common.layer = t.pen.name().into();
+        let align = match t.align {
+            Align::Left => None,
+            Align::Center => Some(TextHorizontalAlignment::Center),
+            Align::Right => Some(TextHorizontalAlignment::Right),
+        };
+        if let Some(align) = align {
+            // aligned on `at`; the insertion point is where it starts, for a reader that does not
+            // align it again
+            let shift = if align == TextHorizontalAlignment::Center { t.width() / 2.0 } else { t.width() };
+            text.horizontal_alignment = align;
+            text.alignment_point = Some(mm(t.at));
+            text.insertion_point = mm([t.at[0] - shift * t.angle.cos(), t.at[1] - shift * t.angle.sin()]);
+        }
+        text.rotation = t.angle.to_degrees();
+        let _ = doc.add_entity(EntityType::Text(text));
+    }
+    for dim in &d.dimensions {
+        let Some((_, on_line)) = dim.line() else { continue };
+        let mut entity = if dim.witnesses == [dim.from, dim.to] {
+            let mut aligned = DimensionAligned::new(mm(dim.from), mm(dim.to));
+            aligned.definition_point = mm(on_line);
+            Dimension::Aligned(aligned)
+        } else {
+            let angle = (dim.to[1]-dim.from[1]).atan2(dim.to[0]-dim.from[0]);
+            let [a,b] = dim.witnesses.map(mm);
+            let mut linear = DimensionLinear::rotated(a, b, angle);
+            linear.definition_point = mm(on_line);
+            linear.base.actual_measurement = linear.measurement();
+            Dimension::Linear(linear)
+        };
+        let base = entity.base_mut();
+        let index = styles.iter().position(|s| **s == dim.style).unwrap_or(0);
+        base.style_name = if index == 0 { STYLE.to_string() } else { format!("{STYLE}-{index}") };
+        base.common.layer = Pen::Dimension.name().into();
+        // the middle of its text
+        let label = dim.label();
+        let (sin, cos) = label.angle.sin_cos();
+        base.text_middle_point = mm([label.at[0] - sin*label.height/2., label.at[1] + cos*label.height/2.]);
+        // on paper a dimension measures the model, not the paper
+        let geometric = (dim.to[0]-dim.from[0]).hypot(dim.to[1]-dim.from[1]);
+        if d.space == Space::Paper || dim.style.figure(geometric) != dim.label().text {
+            base.set_text_override(Some(dim.label().text));
+        }
+        let _ = doc.add_entity(EntityType::Dimension(Box::new(entity)));
+    }
+    doc
+}
+
+/// Writes the drawing in `format`.
+fn write(d: &Drawing2d, format: &dyn Format) -> Result<Vec<u8>, String> {
+    format.write(&cad_document(d)).map(|(bytes, _losses)| bytes).map_err(|e| format!("Cannot write {}: {e}", format.name()))
+}
+
+/// The drawing as a DWG file.
+pub fn dwg(d: &Drawing2d) -> Result<Vec<u8>, String> {
+    write(d, &Dwg)
+}
+
+/// The drawing as a DXF file.
+pub fn dxf(d: &Drawing2d) -> Result<Vec<u8>, String> {
+    write(d, &Dxf)
+}
+
+/// The drawing as an IFCCAD drawing (IFCX).
+pub fn ifccad(d: &Drawing2d) -> Result<Vec<u8>, String> {
+    write(d, &Ifcx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::drawing2d::{Align, Dim2d, Line2d, Pen, Space, Text2d};
+    use opencaddocument::{EntityType, Format, LineWeight};
+
+    /// Two cut walls of 8 m and 5 m, a line beyond, a text and an 8 m dimension, at 1:100.
+    fn drawing() -> Drawing2d {
+        Drawing2d {
+            polygons: Vec::new(),
+            images: Vec::new(),
+            name: "Begane grond".into(),
+            space: Space::Model { scale: 100.0 },
+            paper: None,
+            lines: vec![
+                Line2d::new(Pen::Cut, [0.0, 0.0], [8.0, 0.0]),
+                Line2d::new(Pen::Cut, [8.0, 0.0], [8.0, 5.0]),
+                Line2d::new(Pen::Beyond, [1.0, 1.0], [7.0, 1.0]),
+            ],
+            texts: vec![Text2d { family: None, bold: false, color: None, pen: Pen::Text, at: [1.0, 2.0], height: 0.25, text: "Kamer ë".into(), align: Align::Left, angle: 0.0 }],
+            dimensions: vec![Dim2d { first_witness: true, units_per_paper_metre: 100., witnesses: [[0.0, 0.0], [8.0, 0.0]], from: [0.0, 0.0], to: [8.0, 0.0], value: 8.0, offset: 0.6, text_height: 0.25, style: crate::document::DimensionStyle::standard() }],
+        }
+    }
+
+    /// The lines on a layer and the texts of a CAD drawing.
+    fn contents(doc: &opencaddocument::Document, layer: &str) -> (Vec<(f64, f64, f64, f64)>, Vec<String>) {
+        let mut lines = Vec::new();
+        let mut texts = Vec::new();
+        for e in doc.entities() {
+            match e {
+                EntityType::Line(l) if l.common.layer == layer => lines.push((l.start.x, l.start.y, l.end.x, l.end.y)),
+                EntityType::Text(t) => texts.push(t.value.clone()),
+                _ => {}
+            }
+        }
+        (lines, texts)
+    }
+
+    #[test]
+    fn units_are_millimetres() {
+        let doc = cad_document(&drawing());
+        assert_eq!(doc.header.insertion_units, 4);
+        let (cut, _) = contents(&doc, "O3V-Cut");
+        assert!(cut.contains(&(0.0, 0.0, 8000.0, 0.0)), "{cut:?}");
+    }
+
+    #[test]
+    fn a_drawing_round_trips_through_dwg_and_dxf() {
+        let d = drawing();
+        for (bytes, format) in [(dwg(&d).unwrap(), &opencaddocument::Dwg as &dyn Format), (dxf(&d).unwrap(), &opencaddocument::Dxf)] {
+            let (read, _) = format.read(&bytes).unwrap();
+            let (cut, texts) = contents(&read, "O3V-Cut");
+            let (beyond, _) = contents(&read, "O3V-Beyond");
+            assert_eq!((cut.len(), beyond.len()), (2, 1), "{}", format.name());
+            assert!(texts.iter().any(|t| t == "Kamer ë"), "{}: {texts:?}", format.name());
+            let layer = read.layers.get("O3V-Cut").expect("the cut layer");
+            assert_eq!(layer.line_weight, LineWeight::Value(50), "{}", format.name());
+            assert!(read.entities().any(|e| matches!(e, EntityType::Dimension(_))), "{}", format.name());
+        }
+    }
+
+    #[test]
+    fn a_sheet_dimension_shows_the_model_length() {
+        let d = Drawing2d {
+            polygons: Vec::new(),
+            images: Vec::new(),
+            name: "A01".into(),
+            space: Space::Paper,
+            paper: Some([0.42, 0.297]),
+            lines: Vec::new(),
+            texts: Vec::new(),
+            dimensions: vec![Dim2d { first_witness: true, units_per_paper_metre: 1., witnesses: [[0.1, 0.1], [0.18, 0.1]], from: [0.1, 0.1], to: [0.18, 0.1], value: 8.0, offset: 0.006, text_height: 0.0025, style: crate::document::DimensionStyle::standard() }],
+        };
+        for (bytes, format) in [(dwg(&d).unwrap(), &opencaddocument::Dwg as &dyn Format), (dxf(&d).unwrap(), &opencaddocument::Dxf)] {
+            let (read, _) = format.read(&bytes).unwrap();
+            let shown = read.entities().find_map(|e| match e {
+                EntityType::Dimension(dim) => Some(dim.base().text.clone()),
+                _ => None,
+            });
+            assert_eq!(shown.as_deref(), Some("8000"), "{}", format.name());
+        }
+    }
+
+    #[test]
+    fn texts_and_dimension_texts_stand_where_they_are_drawn() {
+        let mut d = drawing();
+        d.texts.push(Text2d { family: None, bold: false, color: None, pen: Pen::Text, at: [8.0, 6.0], height: 0.25, text: "Noord".into(), align: Align::Right, angle: 0.0 });
+        let doc = cad_document(&d);
+        let right = doc.entities().find_map(|e| match e {
+            EntityType::Text(t) if t.value == "Noord" => Some(t.clone()),
+            _ => None,
+        }).unwrap();
+        // aligned on its right end; its insertion point at its left end, about a text's width before
+        assert_eq!(right.alignment_point.map(|p| (p.x, p.y)), Some((8000.0, 6000.0)));
+        assert!(right.insertion_point.x < 8000.0 - 500.0 && right.insertion_point.x > 8000.0 - 2000.0, "{:?}", right.insertion_point);
+        let label = d.dimensions[0].label();
+        let middle = doc.entities().find_map(|e| match e {
+            EntityType::Dimension(dim) => Some(dim.base().text_middle_point),
+            _ => None,
+        }).unwrap();
+        assert!((middle.y - (label.at[1] + label.height / 2.0) * 1000.0).abs() < 1e-6, "{middle:?}");
+    }
+
+    #[test]
+    fn the_ifccad_drawing_reads_back() {
+        let bytes = ifccad(&drawing()).unwrap();
+        assert!(std::str::from_utf8(&bytes).is_ok_and(|s| s.contains("\"header\"")), "IFCX JSON");
+        let (read, _) = opencaddocument::Ifcx.read(&bytes).unwrap();
+        let (cut, texts) = contents(&read, "O3V-Cut");
+        assert_eq!(cut.len(), 2);
+        assert!(texts.iter().any(|t| t == "Kamer ë"), "{texts:?}");
+    }
+}

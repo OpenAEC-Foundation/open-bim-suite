@@ -1,11 +1,19 @@
-# Release of Open 3D Viewer Studio for Windows, macOS and Linux, after OpenAEC Blueprint
+# Release of Open BIM Suite for Windows, macOS and Linux, after OpenAEC Blueprint
 # 2026.44.1: tested first, then built and signed per platform, then published.
 #
 # A tag vYYYY.W.N starts it; Cargo.toml must carry YYYY.W.N. The signing keys are the secrets
 # of the OpenAEC organisation, under the same names as in the Blueprint. A platform whose keys
 # are missing is not signed; the release notes say so per file, and such a release is published
-# as a pre-release. The private format readers (rvt-dll and the standalone readers) are fetched
-# with the read-only deploy keys in FORMAT_CRATES_SSH_KEYS, as in build.yml.
+# as a pre-release. The private format readers (revit-dll and the standalone readers) are fetched
+# with their read-only deploy keys (the SSH_KEY_ secrets, .github/actions/reader-keys), as in build.yml.
+#
+# Linux is built for x86_64 and arm64 (the SuperCloud's servers are ARM), each tested without a
+# GPU. The SuperCloud builds its own image (OpenAEC Linux) from the AppImage, so no Docker image
+# of the viewer is built here (OpenAEC-Blueprint#61).
+#
+# The release is also copied to OpenAEC-Foundation/open-3d-viewer-studio, the repository that holds
+# only the viewer's releases and a README. That needs the secret VIEWER_STUDIO_RELEASE_TOKEN: a
+# token that may write the contents of that repository alone. Without it the copy is left out.
 #
 # A dry run (Run workflow on a branch, dry_run on, no tag) builds and signs everything with the
 # version in Cargo.toml and publishes nothing; the signatures are in the job summaries.
@@ -46,11 +54,27 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.TAG }}
-      - name: Read-only access to the private format readers
-        uses: webfactory/ssh-agent@e83874834305fe9a4a2997156cb26c5de65a8555
+      # The deploy keys of the private readers, each by its name: the action gets these and no
+      # other secret. A new reader's secret is named here and in the same step of build.yml,
+      # format-crates.yml and live.yml.
+      - &reader-keys
+        name: Read-only access to the private format readers
+        uses: ./.github/actions/reader-keys
         with:
-          ssh-private-key: ${{ secrets.FORMAT_CRATES_SSH_KEYS }}
-          log-public-key: false
+          keys: |
+            ${{ secrets.SSH_KEY_3DM_DLL }}
+            ${{ secrets.SSH_KEY_PLY_DLL }}
+            ${{ secrets.SSH_KEY_PLY_READER }}
+            ${{ secrets.SSH_KEY_REVIT_DLL }}
+            ${{ secrets.SSH_KEY_RHINO_DLL }}
+            ${{ secrets.SSH_KEY_RVT_DLL }}
+            ${{ secrets.SSH_KEY_SKETCHUP_DLL }}
+            ${{ secrets.SSH_KEY_SKP_READER }}
+            ${{ secrets.SSH_KEY_SOLIDWORKS_DLL }}
+            ${{ secrets.SSH_KEY_SOLIDEDGE_DLL }}
+            ${{ secrets.SSH_KEY_TEKLA_DLL }}
+            ${{ secrets.SSH_KEY_TEKLA_READER }}
+            ${{ secrets.SSH_KEY_VWX_DLL }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -82,26 +106,37 @@ jobs:
           cargo check --release --locked --target wasm32-unknown-unknown --lib --bin open-3d-viewer
 
   linux:
-    name: Linux
+    name: Linux ${{ matrix.arch }}
     needs: check
-    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-22.04
+            deb: amd64
+            machine: x86_64
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+            deb: arm64
+            machine: aarch64
+    runs-on: ${{ matrix.runner }}
     env:
       NUMBER: ${{ needs.check.outputs.number }}
+      # x64 or arm64 (.tar.gz), amd64 or arm64 (.deb, AppImage), x86_64 or aarch64 (.rpm, appimagetool)
+      ARCH: ${{ matrix.arch }}
+      DEB_ARCH: ${{ matrix.deb }}
+      MACHINE: ${{ matrix.machine }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.TAG }}
-      - name: Read-only access to the private format readers
-        uses: webfactory/ssh-agent@e83874834305fe9a4a2997156cb26c5de65a8555
-        with:
-          ssh-private-key: ${{ secrets.FORMAT_CRATES_SSH_KEYS }}
-          log-public-key: false
+      - *reader-keys
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: System libraries and packaging tools
         run: sudo apt-get update && sudo apt-get install -y pkg-config libxkbcommon-dev libwayland-dev libx11-dev libvulkan-dev libfontconfig1-dev rpm file
       - name: Build the viewer and the MCP server
-        run: cargo build --release --locked
+        run: cargo build --release --locked --bin open-3d-viewer --bin open-3d-viewer-mcp
       - name: Package
         run: |
           set -euo pipefail
@@ -109,18 +144,27 @@ jobs:
           viewer=target/release/open-3d-viewer
           mcp=target/release/open-3d-viewer-mcp
           desktop=packaging/linux/org.openaec.Open3DViewer.desktop
+          mime=packaging/linux/org.openaec.Open3DViewer.xml
           icon=assets/icons/icon.png
           stage=$(mktemp -d)
+          [[ "$(uname -m)" == "$MACHINE" ]] || { echo "::error::built on $(uname -m), expected $MACHINE"; exit 1; }
+          file "$viewer"
           # .tar.gz
-          dir="$stage/open-3d-viewer_${NUMBER}_linux-x64"
+          dir="$stage/open-3d-viewer_${NUMBER}_linux-${ARCH}"
           mkdir -p "$dir"
-          cp "$viewer" "$mcp" LICENSE README.md "$dir/"
-          tar -C "$stage" -czf "$out/open-3d-viewer_${NUMBER}_linux-x64.tar.gz" "open-3d-viewer_${NUMBER}_linux-x64"
+          # The Vertex BD / BTL reader (vendor/vertex) exists for Linux x86_64 only; without it the
+          # viewer runs and only those formats say the library is missing.
+          vertex=()
+          [[ "$ARCH" == x64 ]] && vertex=(vendor/vertex/libvertex.so)
+          cp "$viewer" "$mcp" "${vertex[@]}" LICENSE README.md "$dir/"
+          tar -C "$stage" -czf "$out/open-3d-viewer_${NUMBER}_linux-${ARCH}.tar.gz" "open-3d-viewer_${NUMBER}_linux-${ARCH}"
           # .deb
           deb="$stage/deb"
           install -Dm755 "$viewer" "$deb/usr/bin/open-3d-viewer"
           install -Dm755 "$mcp" "$deb/usr/bin/open-3d-viewer-mcp"
+          [[ ${#vertex[@]} -eq 0 ]] || install -Dm644 "${vertex[0]}" "$deb/usr/lib/open-3d-viewer/libvertex.so"
           install -Dm644 "$desktop" "$deb/usr/share/applications/org.openaec.Open3DViewer.desktop"
+          install -Dm644 "$mime" "$deb/usr/share/mime/packages/org.openaec.Open3DViewer.xml"
           install -Dm644 "$icon" "$deb/usr/share/icons/hicolor/512x512/apps/org.openaec.Open3DViewer.png"
           install -Dm644 LICENSE "$deb/usr/share/doc/open-3d-viewer/copyright"
           mkdir -p "$deb/DEBIAN"
@@ -129,36 +173,37 @@ jobs:
           Version: ${NUMBER}
           Section: graphics
           Priority: optional
-          Architecture: amd64
+          Architecture: ${DEB_ARCH}
           Maintainer: OpenAEC Foundation <info@open-aec.com>
-          Homepage: https://github.com/OpenAEC-Foundation/open-3d-viewer
+          Homepage: https://github.com/OpenAEC-Foundation/open-bim-suite
           Description: 3D model viewer for AEC files
            Opens IFC, Revit, SketchUp, Tekla, Archicad, DWG/DXF, CityJSON,
            LandXML, glTF, OBJ, STL and PLY models, measures and sections them,
            and saves them as IFC.
           EOF
           sed -i 's/^          //' "$deb/DEBIAN/control"
-          dpkg-deb --root-owner-group --build "$deb" "$out/open-3d-viewer_${NUMBER}_amd64.deb"
+          dpkg-deb --root-owner-group --build "$deb" "$out/open-3d-viewer_${NUMBER}_${DEB_ARCH}.deb"
           # .rpm
           rpmtop=$(mktemp -d)
           mkdir -p "$rpmtop"/{SOURCES,SPECS,RPMS,BUILD,BUILDROOT}
-          cp "$viewer" "$mcp" "$desktop" "$icon" LICENSE "$rpmtop/SOURCES/"
-          rpmbuild -bb --define "_topdir $rpmtop" --define "number $NUMBER" packaging/linux/open-3d-viewer.spec
-          cp "$rpmtop"/RPMS/x86_64/*.rpm "$out/open-3d-viewer_${NUMBER}_x86_64.rpm"
+          cp "$viewer" "$mcp" "${vertex[@]}" "$desktop" "$mime" "$icon" LICENSE "$rpmtop/SOURCES/"
+          rpmbuild -bb --define "_topdir $rpmtop" --define "number $NUMBER" --define "vertex ${#vertex[@]}" packaging/linux/open-3d-viewer.spec
+          cp "$rpmtop"/RPMS/"$MACHINE"/*.rpm "$out/open-3d-viewer_${NUMBER}_${MACHINE}.rpm"
           # AppImage
           app="$stage/AppDir"
           install -Dm755 "$viewer" "$app/usr/bin/open-3d-viewer"
           install -Dm755 "$mcp" "$app/usr/bin/open-3d-viewer-mcp"
+          [[ ${#vertex[@]} -eq 0 ]] || install -Dm644 "${vertex[0]}" "$app/usr/lib/open-3d-viewer/libvertex.so"
           cp "$desktop" "$app/"
           cp "$icon" "$app/org.openaec.Open3DViewer.png"
           ln -s usr/bin/open-3d-viewer "$app/AppRun"
-          curl -fsSL -o "$stage/appimagetool" https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          curl -fsSL -o "$stage/appimagetool" "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${MACHINE}.AppImage"
           chmod +x "$stage/appimagetool"
-          ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 "$stage/appimagetool" --no-appstream "$app" "$out/open-3d-viewer_${NUMBER}_amd64.AppImage"
+          ARCH="$MACHINE" APPIMAGE_EXTRACT_AND_RUN=1 "$stage/appimagetool" --no-appstream "$app" "$out/open-3d-viewer_${NUMBER}_${DEB_ARCH}.AppImage"
           ls -la "$out"
       - uses: actions/upload-artifact@v4
         with:
-          name: linux
+          name: linux-${{ matrix.arch }}
           path: dist/*
           if-no-files-found: error
 
@@ -166,31 +211,35 @@ jobs:
   # (OpenAEC-Blueprint#61): extracted (no FUSE), without a GPU, under labwc without a screen, with
   # a screenshot. The memory in use with no file open goes in the release notes.
   linux-headless:
-    name: Linux without a GPU
+    name: Linux ${{ matrix.arch }} without a GPU
     needs: linux
-    runs-on: ubuntu-24.04
-    outputs:
-      memory: ${{ steps.run.outputs.memory }}
+    strategy:
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.TAG }}
       - uses: actions/download-artifact@v4
         with:
-          name: linux
+          name: linux-${{ matrix.arch }}
           path: dist
       - name: labwc, grim and Mesa's software renderers
         run: sudo apt-get update && sudo apt-get install -y labwc grim mesa-vulkan-drivers libegl-mesa0 libgl1-mesa-dri vulkan-tools
+      # the memory at rest goes to `publish` in this job's artifact (a matrix job has one output)
       - name: Start the extracted AppImage and take screenshots
-        id: run
         run: |
           packaging/linux/headless-test.sh dist/*.AppImage test-models/test-cube.obj headless
-          echo "memory=$(cat headless/memory-mb.txt)" >> "$GITHUB_OUTPUT"
-          echo "### Linux without a GPU: started, drawn, $(cat headless/memory-mb.txt) MB at rest" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Linux ${{ matrix.arch }} without a GPU: started, drawn, $(cat headless/memory-mb.txt) MB at rest" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: linux-headless
+          name: linux-headless-${{ matrix.arch }}
           path: headless/
           if-no-files-found: ignore
 
@@ -206,11 +255,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.TAG }}
-      - name: Read-only access to the private format readers
-        uses: webfactory/ssh-agent@e83874834305fe9a4a2997156cb26c5de65a8555
-        with:
-          ssh-private-key: ${{ secrets.FORMAT_CRATES_SSH_KEYS }}
-          log-public-key: false
+      - *reader-keys
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build the viewer and the MCP server
@@ -218,9 +263,9 @@ jobs:
         env:
           RUSTFLAGS: -C target-feature=+crt-static
         run: |
-          cargo build --release --locked
+          cargo build --release --locked --bin open-3d-viewer --bin open-3d-viewer-mcp
           mkdir -p sign
-          cp target/release/open-3d-viewer.exe target/release/open-3d-viewer-mcp.exe sign/
+          cp target/release/open-3d-viewer.exe target/release/open-3d-viewer-mcp.exe vendor/vertex/vertex.dll sign/
       - name: Sign the programs
         continue-on-error: true
         uses: azure/trusted-signing-action@v0.5.0
@@ -232,7 +277,7 @@ jobs:
           trusted-signing-account-name: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME }}
           certificate-profile-name: ${{ secrets.AZURE_CERTIFICATE_PROFILE_NAME }}
           files-folder: ${{ github.workspace }}\sign
-          files-folder-filter: exe
+          files-folder-filter: exe,dll
           files-folder-depth: 1
           file-digest: SHA256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
@@ -297,6 +342,7 @@ jobs:
           $files = [ordered]@{
             "open-3d-viewer.exe" = "sign\open-3d-viewer.exe"
             "open-3d-viewer-mcp.exe" = "sign\open-3d-viewer-mcp.exe"
+            "vertex.dll" = "sign\vertex.dll"
             (Split-Path $setup -Leaf) = $setup
             "installed open-3d-viewer.exe" = "$installed\open-3d-viewer.exe"
             "installed open-3d-viewer-mcp.exe" = "$installed\open-3d-viewer-mcp.exe"
@@ -318,7 +364,7 @@ jobs:
           Copy-Item "installer\open-3d-viewer_$($env:NUMBER)_x64-setup.exe" dist\
           $app = "$env:RUNNER_TEMP\open-3d-viewer_$($env:NUMBER)_windows-x64"
           New-Item -ItemType Directory -Force $app | Out-Null
-          Copy-Item sign\open-3d-viewer.exe, sign\open-3d-viewer-mcp.exe, LICENSE, README.md $app
+          Copy-Item sign\open-3d-viewer.exe, sign\open-3d-viewer-mcp.exe, sign\vertex.dll, LICENSE, README.md $app
           Compress-Archive -Path $app -DestinationPath "dist\open-3d-viewer_$($env:NUMBER)_windows-x64.zip"
       - uses: actions/upload-artifact@v4
         with:
@@ -339,11 +385,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.TAG }}
-      - name: Read-only access to the private format readers
-        uses: webfactory/ssh-agent@e83874834305fe9a4a2997156cb26c5de65a8555
-        with:
-          ssh-private-key: ${{ secrets.FORMAT_CRATES_SSH_KEYS }}
-          log-public-key: false
+      - *reader-keys
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
@@ -352,7 +394,7 @@ jobs:
         run: |
           set -euo pipefail
           for t in aarch64-apple-darwin x86_64-apple-darwin; do
-            cargo build --release --locked --target "$t"
+            cargo build --release --locked --target "$t" --bin open-3d-viewer --bin open-3d-viewer-mcp
           done
           mkdir -p build
           for bin in open-3d-viewer open-3d-viewer-mcp; do
@@ -362,9 +404,9 @@ jobs:
       - name: Make the application bundle
         run: |
           set -euo pipefail
-          app="build/Open 3D Viewer Studio.app"
+          app="build/Open BIM Suite.app"
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-          cp build/open-3d-viewer build/open-3d-viewer-mcp "$app/Contents/MacOS/"
+          cp build/open-3d-viewer build/open-3d-viewer-mcp vendor/vertex/libvertex.dylib "$app/Contents/MacOS/"
           sed "s/@NUMBER@/$NUMBER/g" packaging/macos/Info.plist.in > "$app/Contents/Info.plist"
           cp assets/icons/icon.icns "$app/Contents/Resources/AppIcon.icns"
       - name: Prepare Developer ID signing and notarization
@@ -402,7 +444,7 @@ jobs:
         id: sign
         run: |
           set -euo pipefail
-          app="build/Open 3D Viewer Studio.app"
+          app="build/Open BIM Suite.app"
           dmg="build/open-3d-viewer_${NUMBER}_macos-universal.dmg"
           # hdiutil guesses the size of the image from the folder and on the GitHub runners that
           # guess is sometimes too small; give it the size of the folder plus room, and retry.
@@ -410,7 +452,7 @@ jobs:
             local mb=$(( $(du -sm "$1" | cut -f1) * 2 + 64 ))
             for attempt in 1 2 3; do
               rm -f "$2"
-              if hdiutil create -volname "Open 3D Viewer Studio" -srcfolder "$1" -size "${mb}m" -fs HFS+ -ov -format UDZO "$2"; then return; fi
+              if hdiutil create -volname "Open BIM Suite" -srcfolder "$1" -size "${mb}m" -fs HFS+ -ov -format UDZO "$2"; then return; fi
               echo "hdiutil failed (attempt $attempt), trying again"; sleep 10
             done
             return 1
@@ -429,6 +471,7 @@ jobs:
           if [[ -n "${SIGN_ID:-}" ]]; then
             # the MCP server first: the bundle's signature covers it
             codesign --force --options runtime --timestamp --sign "$SIGN_ID" --keychain "$SIGN_KC" "$app/Contents/MacOS/open-3d-viewer-mcp"
+            codesign --force --options runtime --timestamp --sign "$SIGN_ID" --keychain "$SIGN_KC" "$app/Contents/MacOS/libvertex.dylib"
             codesign --force --options runtime --timestamp --sign "$SIGN_ID" --keychain "$SIGN_KC" "$app"
             stage=$(mktemp -d); cp -R "$app" "$stage/"; ln -s /Applications "$stage/Applications"
             make_dmg "$stage" "$dmg"
@@ -466,14 +509,21 @@ jobs:
       NUMBER: ${{ needs.check.outputs.number }}
       WINDOWS_SIGNED: ${{ needs.windows.outputs.signed }}
       MACOS_SIGNED: ${{ needs.macos.outputs.signed }}
-      MEMORY_MB: ${{ needs.linux-headless.outputs.memory }}
     steps:
       - uses: actions/download-artifact@v4
         with:
           # the packages, not the screenshots of linux-headless
-          pattern: "{linux,windows,macos}"
+          pattern: "{linux-x64,linux-arm64,windows,macos}"
           path: assets
           merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: linux-headless-*
+          path: headless
+      - name: Memory at rest
+        run: |
+          echo "MEMORY_X64=$(cat headless/linux-headless-x64/memory-mb.txt)" >> "$GITHUB_ENV"
+          echo "MEMORY_ARM64=$(cat headless/linux-headless-arm64/memory-mb.txt)" >> "$GITHUB_ENV"
       - name: Checksums
         run: |
           cd assets
@@ -494,11 +544,21 @@ jobs:
           printf '%s\n' "$OPENAEC_GPG_PRIVATE_KEY" | gpg --batch --import
           fpr=$(tr -d ' ' <<< "$OPENAEC_GPG_FINGERPRINT")
           gpg --batch --list-secret-keys --with-colons | grep -q "$fpr" || { echo "::error::the imported key is not $fpr"; exit 1; }
-          for f in assets/SHA256SUMS assets/*.deb assets/*.rpm assets/*.AppImage assets/*_linux-x64.tar.gz; do
+          for f in assets/SHA256SUMS assets/*.deb assets/*.rpm assets/*.AppImage assets/*_linux-*.tar.gz; do
             gpg --batch --yes --pinentry-mode loopback --passphrase "$OPENAEC_GPG_PASSPHRASE" --local-user "$fpr" --armor --detach-sign --output "$f.asc" "$f"
             gpg --batch --verify "$f.asc" "$f"
           done
           echo "signed=true" >> "$GITHUB_OUTPUT"
+      - name: Release or pre-release
+        env:
+          GPG_SIGNED: ${{ steps.gpg.outputs.signed }}
+        run: |
+          if [[ "$WINDOWS_SIGNED" == true && "$MACOS_SIGNED" == true && "$GPG_SIGNED" == true ]]; then
+            echo "PRERELEASE=false" >> "$GITHUB_ENV"
+          else
+            echo "PRERELEASE=true" >> "$GITHUB_ENV"
+            echo "::warning::Windows, macOS or Linux is not signed; publishing as a pre-release"
+          fi
       - name: Build attestation
         uses: actions/attest-build-provenance@v2
         with:
@@ -519,19 +579,19 @@ jobs:
           set -euo pipefail
           yes() { [[ "$1" == true ]] && echo "ja" || echo "**nee**"; }
           cat > notes.md <<EOF
-          **Open 3D Viewer Studio** ${NUMBER}: de 3D-viewer voor bouwmodellen, met de MCP-server \`open-3d-viewer-mcp\` voor AI-agents. Zonder installatie: [open-3d-viewer.open-aec.com](https://open-3d-viewer.open-aec.com). Versie \`${NUMBER}\` volgt het schema jaar.week (\`JJJJ.W.N\`).
+          **Open BIM Suite** ${NUMBER}: de 3D-viewer voor bouwmodellen, met de MCP-server \`open-3d-viewer-mcp\` voor AI-agents. Zonder installatie: [open-3d-viewer.open-aec.com](https://open-3d-viewer.open-aec.com). Bekijk wat hij doet in de [productvideo](https://www.youtube.com/watch?v=cxHO8M8W2Ow) (73 s). Versie \`${NUMBER}\` volgt het schema jaar.week (\`JJJJ.W.N\`).
 
           | Systeem | Bestand |
           | --- | --- |
           | Windows 10/11 x64 | \`open-3d-viewer_${NUMBER}_x64-setup.exe\` (installeert zonder beheerdersrechten) of \`_windows-x64.zip\` |
           | macOS 11+ (Apple silicon en Intel) | \`open-3d-viewer_${NUMBER}_macos-universal.dmg\` |
-          | Ubuntu, Linux Mint | \`open-3d-viewer_${NUMBER}_amd64.deb\` |
-          | Fedora | \`open-3d-viewer_${NUMBER}_x86_64.rpm\` |
-          | Elke Linux | \`open-3d-viewer_${NUMBER}_amd64.AppImage\` of \`_linux-x64.tar.gz\` |
+          | Ubuntu, Linux Mint | \`open-3d-viewer_${NUMBER}_amd64.deb\` (ARM: \`_arm64.deb\`) |
+          | Fedora | \`open-3d-viewer_${NUMBER}_x86_64.rpm\` (ARM: \`_aarch64.rpm\`) |
+          | Elke Linux | \`open-3d-viewer_${NUMBER}_amd64.AppImage\` of \`_linux-x64.tar.gz\` (ARM: \`_arm64.AppImage\` of \`_linux-arm64.tar.gz\`) |
 
           IFC- en Revit-bestanden openen in de desktopapp; in de browser niet.
 
-          De AppImage draait ook uitgepakt (\`--appimage-extract\`, dan \`AppRun\`) en zonder GPU, zoals in OpenAEC Linux; dat is voor deze release getest onder labwc met software-rendering. Geheugengebruik in rust, zonder geopend bestand: ${MEMORY_MB} MB.
+          De AppImage draait ook uitgepakt (\`--appimage-extract\`, dan \`AppRun\`) en zonder GPU, zoals in OpenAEC Linux; dat is voor deze release getest onder labwc met software-rendering, op x86_64 en arm64. Geheugengebruik in rust, zonder geopend bestand: ${MEMORY_X64} MB (x86_64), ${MEMORY_ARM64} MB (arm64).
 
           ## Ondertekening
 
@@ -542,14 +602,42 @@ jobs:
           | Linux: \`SHA256SUMS\`, \`.deb\`, \`.rpm\`, AppImage en \`.tar.gz\` (OpenPGP, \`.asc\`) | $(yes "$GPG_SIGNED") |
           | Alle pakketten: build-attestatie via GitHub | ja |
 
-          Controleren: \`sha256sum -c SHA256SUMS\`, \`gpg --verify SHA256SUMS.asc SHA256SUMS\` (OpenAEC-sleutel \`${OPENAEC_GPG_FINGERPRINT}\`, publiek in [\`docs/openaec-releases.asc\`](https://github.com/OpenAEC-Foundation/open-3d-viewer/blob/main/docs/openaec-releases.asc)) en \`gh attestation verify BESTAND --repo OpenAEC-Foundation/open-3d-viewer\`.
+          Controleren: \`sha256sum -c SHA256SUMS\`, \`gpg --verify SHA256SUMS.asc SHA256SUMS\` (OpenAEC-sleutel \`${OPENAEC_GPG_FINGERPRINT}\`, publiek in [\`docs/openaec-releases.asc\`](https://github.com/OpenAEC-Foundation/open-bim-suite/blob/main/docs/openaec-releases.asc)) en \`gh attestation verify BESTAND --repo OpenAEC-Foundation/open-bim-suite\`.
 
           Alle tests en controles van de repository zijn geslaagd voordat deze release werd gebouwd.
           EOF
           sed -i 's/^          //' notes.md
           pre=()
-          if [[ "$WINDOWS_SIGNED" != true || "$MACOS_SIGNED" != true || "$GPG_SIGNED" != true ]]; then
+          if [[ "$PRERELEASE" == true ]]; then
             pre=(--prerelease)
-            echo "::warning::Windows, macOS or Linux is not signed; publishing as a pre-release"
           fi
-          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "Open 3D Viewer Studio ${NUMBER}" --notes-file notes.md "${pre[@]}" assets/*
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "Open BIM Suite ${NUMBER}" --notes-file notes.md "${pre[@]}" assets/*
+      # The viewer has a repository of its own that holds only the releases and a README: the same
+      # release goes there too, with a line above its notes that says where the source is. Whatever
+      # happens here, the release above stays as it is.
+      - name: Copy the release to open-3d-viewer-studio
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.VIEWER_STUDIO_RELEASE_TOKEN }}
+          COPY_TO: OpenAEC-Foundation/open-3d-viewer-studio
+        run: |
+          set -euo pipefail
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "::notice::VIEWER_STUDIO_RELEASE_TOKEN is not set; the release is not copied to $COPY_TO"; exit 0
+          fi
+          if gh release view "$TAG" --repo "$COPY_TO" > /dev/null 2>&1; then
+            echo "::notice::$COPY_TO already has a release $TAG; left as it is"; exit 0
+          fi
+          {
+            echo "Dit is een kopie van [de release in ${GITHUB_REPOSITORY#*/}](https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}), waar de broncode staat. De bestanden zijn dezelfde: hun controlesommen komen overeen."
+            echo
+            cat notes.md
+          } > copy-notes.md
+          pre=()
+          if [[ "$PRERELEASE" == true ]]; then
+            pre=(--prerelease)
+          fi
+          # that repository has no source: the tag goes on its main branch
+          gh release create "$TAG" --repo "$COPY_TO" --target main --title "Open BIM Suite ${NUMBER}" --notes-file copy-notes.md "${pre[@]}" assets/* || {
+            echo "::warning::the release $TAG was not copied to $COPY_TO"; exit 1
+          }

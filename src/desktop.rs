@@ -1,22 +1,35 @@
-//! Open 3D Viewer Studio, desktop app (iced + wgpu).
+//! Open BIM Suite, desktop app (iced + wgpu).
 //!
 //! Usage:
 //!   open-3d-viewer [FILE] [--theme light|dark|blueprint|high-contrast-dark|high-contrast-light]
-//!                  [--language en|nl] [--no-remote]
+//!                  [--language en|nl] [--product viewer|modeller|validator|docs|gis|ifcx|library|planner|pointcloud] [--no-remote]
 //!                  [--gpu-backend dx12|vulkan|gl] [--present-mode vsync|no_vsync|fifo|mailbox]
-//!   open-3d-viewer [FILE] --screenshot OUT.png [--size 1600x1000] [--mode solid|wireframe|edges]
+//!   open-3d-viewer [FILE] --screenshot OUT.png [--size 1600x1000] [--mode solid|wireframe|edges|hidden] [--cloud-color stored|elevation|intensity|class] [--flat-clouds] [--analysis N,Vy,Vz,Mx,My,Mz,deformed,reactions,supports,loads,next-set,larger]
 //!                  [--view iso|top|front|right] [--ortho] [--view-tab] [--theme ...] [--language ...]
-//!                  [--page workspace|file|settings|shortcuts] [--schedule NAME] [--sheet NUMBER]
-//!                  [--recent PATH]...
+//!                  [--product ...] [--mesh terrain|surface|closed|faces]
+//!                  [--page workspace|file|settings|shortcuts|ribbon|feedback|cloud] [--schedule NAME] [--sheet NUMBER] [--drawing NAME] [--draft NAME] [--project NAME]... [--zoom STEPS,X,Y]
+//!                  [--recent PATH]... [--docs FOLDER [--doc FILE]] [--gis PLACE (an address or coordinates: its parcels and buildings are fetched) [--map background|aerial] [--soundings] [--borings]]
 //!                  [--explode X,Y,Z (percent)] [--explode-mode storeys|elements]
+//!                  [--section X0,X1,Y0,Y1,Z0,Z1 (the section box, percent of the model)]
 //!   open-3d-viewer [FILE] --window-screenshot OUT.png   (real window, captured, then exits)
-//!   open-3d-viewer --bench FILE [--frames 300]
-//!   open-3d-viewer FILE --save-as OUT.ifc   (convert without a window)
+//!   open-3d-viewer --bench FILE|synthetic:N|structural:N[+...] [--frames 300]
+//!   open-3d-viewer FILE --save-as OUT.ifc [--schema IFC4X3]   (convert without a window)
+//!   open-3d-viewer FILE --build-film OUT.mp4|OUT.usda [--film-seconds 20]   (how it is built; .mp4 needs Blender)
+//!   open-3d-viewer FILE --render OUT.png   (a still rendered by Blender)
+//!   open-3d-viewer FILE.ifcx --element-drawings FOLDER [--drawing-format pdf|dxf|dwg|svg|png|ifccad]
+//!                  (a drawing of every prefab unit of the project's timber frames, without a window)
+//!   open-3d-viewer FILE.ifc --check OUT.html|json|csv [--ids FILE.ids] [--rules NAME] [--issues OUT.bcf]
+//!                  (the BIM Validator without a window: the report, and an issue per failed rule;
+//!                  ends with code 1 when a rule failed)
+//!
+//! In the OpenAEC SuperCloud (`managed`): OPENAEC_BEHEERD=1, OPENAEC_MAP (work folder),
+//! OPENAEC_TAAL, OPENAEC_THEMA, OPENAEC_OPEN (file to open), and OPENAEC_MCP_POORT with
+//! OPENAEC_MCP_GEHEIM (and optionally OPENAEC_MCP_ADRES) for the MCP endpoint over HTTP.
 
 use crate::app::{self, App, Message};
 use crate::viewport::camera::ViewPreset;
 use crate::viewport::render::RenderMode;
-use crate::{bench, explode, export, gpu, loaders, shell, INTER_REGULAR, INTER_SEMIBOLD};
+use crate::{bench, explode, export, gpu, loaders, managed, shell, INTER_REGULAR, INTER_SEMIBOLD};
 use openaec_ui::design::ThemeId;
 use openaec_ui::Language;
 use std::path::PathBuf;
@@ -27,28 +40,90 @@ struct Args {
     file: Option<PathBuf>,
     theme: Option<ThemeId>,
     language: Option<Language>,
+    /// What this binary is: the Studio or one product alone.
+    edition: crate::product::Edition,
+    /// The product to show (the switch at the top right).
+    product: Option<crate::product::Product>,
     /// For `--screenshot`: the page over the workspace and a schedule or sheet (by number) to show
     /// (Revit).
     page: shell::Page,
     schedule: Option<String>,
     sheet: Option<String>,
+    /// For `--screenshot`: a plan, section or elevation of the document (by name) to show in its tab.
+    drawing: Option<String>,
+    /// A view saved in the file to show, by its name (`--saved-view`).
+    saved_view: Option<String>,
+    /// For `--screenshot`: mesh the cloud opened (terrain or surface) and show the mesh over it.
+    mesh: Option<String>,
+    /// For `--screenshot`: a legend or drafting view of the file (by name) to show in its tab.
+    draft: Option<String>,
+    /// Views laid in the 3D view for `--screenshot` (the "In 3D" switch of a view), by name.
+    project: Vec<String>,
+    /// Zoom for `--screenshot`: wheel steps towards a point of the 3D view (x and y from -1 to 1).
+    zoom: Option<[f32; 3]>,
+    /// For `--screenshot` with `--draft`: the element of the file to pick in that drawing.
+    pick: Option<u64>,
+    /// For `--screenshot` of the Validator: a BCF file to open, an IDS to check on, and what
+    /// to run and show (`issues`, `check`, `clash`).
+    bcf: Option<PathBuf>,
+    ids: Option<PathBuf>,
+    collab: Option<String>,
+    /// Docs on this project folder, and the file in it to pick (its path in the folder).
+    docs: Option<PathBuf>,
+    doc: Option<String>,
     /// For `--screenshot`: recent files, besides FILE.
     recent: Vec<PathBuf>,
+    /// For `--screenshot`: a place whose surroundings the GIS tab fetches.
+    gis: Option<String>,
+    /// For `--screenshot` with `--gis`: the map laid under the place (`background` or `aerial`).
+    map: Option<crate::app::MapSource>,
+    /// For `--screenshot` with `--gis`: the soundings around the place are fetched too.
+    soundings: bool,
+    /// For `--screenshot` with `--gis`: the borings around the place and the model of the ground.
+    borings: bool,
     screenshot: Option<PathBuf>,
     window_screenshot: Option<PathBuf>,
     size: Option<(f32, f32)>,
     mode: Option<RenderMode>,
+    /// For `--screenshot`: how the points of a cloud are coloured.
+    cloud_color: Option<crate::cloud_color::CloudColor>,
+    /// For `--screenshot`: the clouds without their depth shading.
+    flat_clouds: bool,
+    /// For `--screenshot`: what of a structural analysis model is drawn, by name.
+    analysis: Vec<String>,
     view: Option<ViewPreset>,
     bench: Option<PathBuf>,
     ortho: bool,
     view_tab: bool,
     frames: Option<u32>,
+    /// `--bench` keeps two frames in flight and checks the 120 fps criterion.
+    throughput: bool,
     /// Do not take remote control commands (the MCP server).
     no_remote: bool,
     save_as: Option<PathBuf>,
+    /// `--build-film`: the film of how the model is built (`.mp4`, or `.usda` for its stage
+    /// alone), and how many seconds it runs.
+    build_film: Option<PathBuf>,
+    /// `--render`: a still of the model, rendered by Blender.
+    render: Option<PathBuf>,
+    film_seconds: Option<f32>,
+    /// `--element-drawings`: the folder to write the drawings of the timber frames' prefab units
+    /// into, and the format to write them in (PDF unless it says otherwise).
+    element_drawings: Option<PathBuf>,
+    drawing_format: Option<String>,
+    /// `--check`: the report to write; with the rule set to check on and the BCF file for the
+    /// issues of what failed.
+    check: Option<PathBuf>,
+    rules: Option<String>,
+    issues: Option<PathBuf>,
+    /// `--schema`: the IFC schema `--save-as` writes a `.ifc` in (IFC 4 when not given).
+    schema: export::IfcSchema,
     /// Exploded view for `--screenshot`: percent per axis, and the mode.
     explode: Option<[f32; 3]>,
     explode_mode: Option<explode::ExplodeMode>,
+    /// The section box for `--screenshot`: where each of its faces stands, in percent of the model
+    /// (low and high along x, y and z).
+    section: Option<[f32; 6]>,
     /// The graphics backend and present mode of the window, overriding the default (`gpu`).
     gpu_backend: Option<String>,
     present_mode: Option<String>,
@@ -63,29 +138,64 @@ fn parse_args() -> Result<Args, String> {
         match s.as_str() {
             "--theme" => args.theme = Some(shell::theme_from_arg(&value()?).ok_or("unknown theme")?),
             "--language" => {
-                args.language = Some(match value()?.as_str() {
-                    "en" => Language::English,
-                    "nl" => Language::Dutch,
-                    _ => return Err("--language en|nl".into()),
-                })
+                args.language = Some(Language::from_code(&value()?).ok_or("--language en|nl|de|fr")?)
             }
-            "--page" => args.page = shell::Page::parse(&value()?).ok_or("--page workspace|file|settings|shortcuts")?,
+            "--product" => args.product = Some(crate::product::Product::parse(&value()?).ok_or("--product viewer|modeller|validator|docs|gis|ifcx|library|planner|pointcloud")?),
+            "--page" => args.page = shell::Page::parse(&value()?).ok_or("--page workspace|file|settings|shortcuts|ribbon|extensions|feedback|cloud")?,
             "--schedule" => args.schedule = Some(value()?),
             "--sheet" => args.sheet = Some(value()?),
+            "--drawing" => args.drawing = Some(value()?),
+            "--saved-view" => args.saved_view = Some(value()?),
+            "--mesh" => args.mesh = Some(value()?),
+            "--draft" => args.draft = Some(value()?),
+            "--project" => args.project.push(value()?),
+            "--zoom" => {
+                let v: Vec<f32> = value()?.split(',').map(|p| p.trim().parse().map_err(|_| "--zoom STEPS,X,Y")).collect::<Result<_, _>>()?;
+                args.zoom = Some(<[f32; 3]>::try_from(v).map_err(|_| "--zoom STEPS,X,Y")?);
+            }
+            "--pick" => args.pick = Some(value()?.parse().map_err(|_| "--pick takes an element id")?),
+            "--bcf" => args.bcf = Some(PathBuf::from(value()?)),
+            "--ids" => args.ids = Some(PathBuf::from(value()?)),
+            "--collab" => args.collab = Some(value()?),
+            "--docs" => args.docs = Some(PathBuf::from(value()?)),
+            "--doc" => args.doc = Some(value()?),
             "--recent" => args.recent.push(PathBuf::from(value()?)),
             "--screenshot" => args.screenshot = Some(PathBuf::from(value()?)),
+            "--gis" => args.gis = Some(value()?),
+            "--map" => {
+                args.map = Some(match value()?.as_str() {
+                    "background" => crate::app::MapSource::Background,
+                    "aerial" => crate::app::MapSource::Aerial,
+                    _ => return Err("--map background|aerial".into()),
+                })
+            }
+            "--soundings" => args.soundings = true,
+            "--borings" => args.borings = true,
             "--window-screenshot" => args.window_screenshot = Some(PathBuf::from(value()?)),
             "--size" => {
                 let v = value()?;
                 let (w, h) = v.split_once('x').ok_or("--size WxH")?;
                 args.size = Some((w.parse().map_err(|_| "--size WxH")?, h.parse().map_err(|_| "--size WxH")?));
             }
+            "--flat-clouds" => args.flat_clouds = true,
+            "--analysis" => args.analysis.extend(value()?.split(',').map(|s| s.trim().to_string())),
+            "--cloud-color" => {
+                use crate::cloud_color::CloudColor as C;
+                args.cloud_color = Some(match value()?.as_str() {
+                    "stored" => C::Stored,
+                    "elevation" => C::Elevation,
+                    "intensity" => C::Intensity,
+                    "class" => C::Class,
+                    _ => return Err("--cloud-color stored|elevation|intensity|class".into()),
+                });
+            }
             "--mode" => {
                 args.mode = Some(match value()?.as_str() {
                     "solid" => RenderMode::Solid,
                     "wireframe" => RenderMode::Wireframe,
                     "edges" => RenderMode::SolidEdges,
-                    _ => return Err("--mode solid|wireframe|edges".into()),
+                    "hidden" => RenderMode::HiddenLine,
+                    _ => return Err("--mode solid|wireframe|edges|hidden".into()),
                 })
             }
             "--view" => {
@@ -98,6 +208,7 @@ fn parse_args() -> Result<Args, String> {
                 })
             }
             "--ortho" => args.ortho = true,
+            "--throughput" => args.throughput = true,
             "--view-tab" => args.view_tab = true,
             "--no-remote" => args.no_remote = true,
             "--gpu-backend" => args.gpu_backend = Some(gpu::parse_backend(&value()?)?),
@@ -105,9 +216,25 @@ fn parse_args() -> Result<Args, String> {
             "--bench" => args.bench = Some(PathBuf::from(value()?)),
             "--frames" => args.frames = Some(value()?.parse().map_err(|_| "--frames N")?),
             "--save-as" => args.save_as = Some(PathBuf::from(value()?)),
+            "--build-film" => args.build_film = Some(PathBuf::from(value()?)),
+            "--render" => args.render = Some(PathBuf::from(value()?)),
+            "--film-seconds" => args.film_seconds = Some(value()?.parse().map_err(|_| "--film-seconds N")?),
+            "--element-drawings" => args.element_drawings = Some(PathBuf::from(value()?)),
+            "--drawing-format" => args.drawing_format = Some(value()?),
+            "--check" => args.check = Some(PathBuf::from(value()?)),
+            "--rules" => args.rules = Some(value()?),
+            "--issues" => args.issues = Some(PathBuf::from(value()?)),
+            "--schema" => {
+                let v = value()?;
+                args.schema = export::IfcSchema::parse(&v).ok_or_else(|| format!("--schema IFC4|IFC4X3, not {v}"))?;
+            }
             "--explode" => {
                 let v: Vec<f32> = value()?.split(',').map(|p| p.trim().parse().map_err(|_| "--explode X,Y,Z")).collect::<Result<_, _>>()?;
                 args.explode = Some(<[f32; 3]>::try_from(v).map_err(|_| "--explode X,Y,Z")?);
+            }
+            "--section" => {
+                let v: Vec<f32> = value()?.split(',').map(|p| p.trim().parse().map_err(|_| "--section X0,X1,Y0,Y1,Z0,Z1")).collect::<Result<_, _>>()?;
+                args.section = Some(<[f32; 6]>::try_from(v).map_err(|_| "--section X0,X1,Y0,Y1,Z0,Z1")?);
             }
             "--explode-mode" => {
                 args.explode_mode = Some(match value()?.as_str() {
@@ -124,22 +251,41 @@ fn parse_args() -> Result<Args, String> {
             _ => args.file = Some(PathBuf::from(a)),
         }
     }
+    // Docs on a folder is the Docs product, unless another one was asked for
+    if args.docs.is_some() && args.product.is_none() {
+        args.product = Some(crate::product::Product::Docs);
+    }
     Ok(args)
 }
 
 /// Runs the desktop app with the command line of this process.
 pub fn main() {
+    main_as(crate::product::Edition::Studio)
+}
+
+/// The desktop app as `edition`: the Studio (`open-3d-viewer`) or one product alone
+/// (`open-bim-modeller`, `open-bim-validator`).
+pub fn main_as(edition: crate::product::Edition) {
     let args = match parse_args() {
-        Ok(a) => a,
+        Ok(a) => Args { edition, ..a },
         Err(e) => {
             eprintln!("error: {e}");
             std::process::exit(2);
         }
     };
+    keep_crashes();
     let code = if let Some(file) = &args.bench {
-        bench::run(file, args.frames.unwrap_or(300))
+        bench::run(file, args.frames.unwrap_or(300), args.throughput)
     } else if let Some(out) = &args.save_as {
         save_as(&args, out)
+    } else if let Some(out) = &args.build_film {
+        build_film(&args, out)
+    } else if let Some(out) = &args.render {
+        render_still(&args, out)
+    } else if let Some(out) = &args.element_drawings {
+        element_drawings(&args, out)
+    } else if let Some(out) = &args.check {
+        check(&args, out)
     } else if let Some(out) = &args.screenshot {
         screenshot(&args, out)
     } else if args.window_screenshot.is_some() {
@@ -153,14 +299,97 @@ pub fn main() {
     }
 }
 
+/// Writes what stops the app (a panic: its message, its place in the code and the thread) to
+/// `crash.log` in the settings folder, after the lines of earlier runs, and then to stderr as
+/// before: a window has no console, so without it nothing tells why the app went.
+fn keep_crashes() {
+    let before = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Some(dir) = crate::remote_link::settings_dir() {
+            use std::io::Write;
+            let _ = std::fs::create_dir_all(&dir);
+            if let Ok(mut log) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("crash.log")) {
+                let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |t| t.as_secs());
+                let thread = std::thread::current();
+                let _ = writeln!(log, "[{at}] {} {}: thread {:?}: {info}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"), thread.name().unwrap_or("unnamed"));
+                let _ = writeln!(log, "{}", std::backtrace::Backtrace::force_capture());
+            }
+        }
+        before(info);
+    }));
+}
+
+/// `--render`: loads the file and writes a still of it, rendered by Blender from where Blender
+/// finds it shows well.
+fn render_still(args: &Args, out: &std::path::Path) -> Result<(), String> {
+    let file = args.file.as_ref().ok_or("--render needs a FILE to render")?;
+    let model = loaders::load(file)?;
+    let start = web_time::Instant::now();
+    let said = crate::build_film::still(&model, out, None)?;
+    println!("{} -> {} ({said}) in {:.1} s", model.file_name(), out.display(), start.elapsed().as_secs_f32());
+    Ok(())
+}
+
+/// `--build-film`: loads the file and writes the film of how it is built (through Blender), or
+/// its USD stage.
+fn build_film(args: &Args, out: &std::path::Path) -> Result<(), String> {
+    let file = args.file.as_ref().ok_or("--build-film needs a FILE to film")?;
+    let model = loaders::load(file)?;
+    let start = web_time::Instant::now();
+    let said = crate::build_film::render(&model, out, args.film_seconds.unwrap_or(crate::build_film::SECONDS))?;
+    println!("{} -> {} ({said}) in {:.1} s", model.file_name(), out.display(), start.elapsed().as_secs_f32());
+    Ok(())
+}
+
 /// `--save-as`: loads the file and writes it in the format of `out`'s extension.
 fn save_as(args: &Args, out: &std::path::Path) -> Result<(), String> {
     let file = args.file.as_ref().ok_or("--save-as needs a FILE to convert")?;
     let model = loaders::load(file)?;
     let start = web_time::Instant::now();
-    export::save(&model, out)?;
+    export::save_schema(&model, &crate::document::Document::from_model(&model), out, true, args.schema)?;
     println!("{} -> {} in {:.2} s", model.file_name(), out.display(), start.elapsed().as_secs_f32());
     Ok(())
+}
+
+/// Writes a drawing of every prefab unit of the timber frames of project FILE into folder `out`,
+/// without a window: the element drawings a workshop makes the units from.
+fn element_drawings(args: &Args, out: &std::path::Path) -> Result<(), String> {
+    use export::drawing::DrawingFormat;
+    let file = args.file.as_ref().ok_or("--element-drawings needs a FILE: a project with timber frames")?;
+    let wanted = args.drawing_format.as_deref().unwrap_or("pdf").to_ascii_lowercase();
+    let format = DrawingFormat::ALL.into_iter().find(|f| f.extension() == wanted).ok_or_else(|| format!("--drawing-format pdf|dxf|dwg|svg|png|ifccad, not {wanted}"))?;
+    let mut app = App::default();
+    app.set_model(Arc::new(loaders::load(file)?));
+    let start = web_time::Instant::now();
+    let w = app.write_element_drawings(out, format, &[], args.language.unwrap_or(Language::English))?;
+    println!("{} element drawings of {} framed systems -> {} in {:.2} s", w.drawings, w.systems, out.display(), start.elapsed().as_secs_f32());
+    Ok(())
+}
+
+/// Checks FILE on a rule set without a window and writes the report: the BIM Validator from the
+/// command line, for scripts and build servers.
+#[cfg(feature = "validator")]
+fn check(args: &Args, out: &std::path::Path) -> Result<(), String> {
+    let file = args.file.as_ref().ok_or("--check needs a FILE to check")?;
+    let mut app = App::default();
+    if let Some(language) = args.language {
+        app.collab.language = language;
+    }
+    app.set_model(Arc::new(loaders::load(file)?));
+    let (lines, failed) = app.collab_check_to(args.rules.as_deref(), args.ids.as_deref(), out, args.issues.as_deref())?;
+    for line in lines {
+        println!("{line}");
+    }
+    println!("report: {}", out.display());
+    if failed > 0 {
+        return Err(format!("{failed} rules failed"));
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "validator"))]
+fn check(_: &Args, _: &std::path::Path) -> Result<(), String> {
+    Err("this build has no BIM Validator".into())
 }
 
 fn initial_state(args: &Args) -> App {
@@ -171,33 +400,108 @@ fn initial_state(args: &Args) -> App {
     if let Some(m) = args.mode {
         app.mode = m;
     }
+    if let Some(c) = args.cloud_color {
+        app.cloud_color = c;
+    }
+    if args.flat_clouds {
+        app.cloud_depth = false;
+    }
     app.camera.ortho = args.ortho;
     if args.view_tab {
         app.tab = app::RibbonTab::View;
+    }
+    // Docs on a project folder, read here (no message has run yet); also without a model
+    if let Some(folder) = &args.docs {
+        app.docs_at(folder.clone(), args.doc.as_deref());
     }
     app
 }
 
 /// The application window: the viewer inside the OpenAEC Blueprint shell (`shell`), with the
-/// preferences and own shortcuts in %APPDATA%\OpenAEC\Open 3D Viewer Studio (on Linux and macOS
+/// preferences and own shortcuts in %APPDATA%\OpenAEC\Open BIM Suite (on Linux and macOS
 /// under ~/.config, see `remote_link::settings_dir`).
 fn run_app(args: Args) -> iced::Result {
     let dir = crate::remote_link::settings_dir();
     if let Some(dir) = &dir {
         let _ = std::fs::create_dir_all(dir);
     }
+    // the MCP endpoint of the SuperCloud; its secret leaves the environment before any other
+    // thread or child process (a file dialog) can read it
+    let mcp_http = crate::mcp::HttpConfig::from_env(managed::managed());
+    std::env::remove_var("OPENAEC_MCP_GEHEIM");
     gpu::configure(args.gpu_backend.clone(), args.present_mode.clone(), dir.as_deref());
     let mut app = initial_state(&args);
     app.initial_view = args.view;
-    app.pending_open = args.file.clone();
+    app.background_cuts = true;
     // remote control for AI agents (open-3d-viewer-mcp); O3V_REMOTE=0 or --no-remote switch it off
     app.remote.enabled = !args.no_remote && std::env::var("O3V_REMOTE").as_deref() != Ok("0");
-    let mut studio = shell::Studio::new(app);
+    // the work folder, as an absolute path before the app moves into it; with the HTTP endpoint
+    // on, the MCP tools reach only files in it, also outside managed mode
+    managed::fix_work_folder(app.remote.enabled && matches!(mcp_http, Some(Ok(_))));
+    app.pending_open = managed::start_file(args.file.clone());
+    managed::enter_work_folder();
+    #[cfg(unix)]
+    stop_on_sigterm();
+    match mcp_http {
+        Some(Ok(config)) if app.remote.enabled => crate::remote::serve_mcp_http(config),
+        Some(Ok(_)) => eprintln!("MCP over HTTP: off, as remote control is off"),
+        Some(Err(e)) => eprintln!("MCP over HTTP: not started: {e}"),
+        None => {}
+    }
+    let mut studio = shell::Studio::new(app).with_edition(args.edition);
     if let Some(dir) = dir {
         studio = studio.with_settings_in(dir);
     }
-    studio.set_look(args.theme, args.language);
-    shell::run(studio, window_icon())
+    // a dev build of scripts/dev.ps1: the files open before its restart open again
+    if let Some(session) = std::env::var_os("O3V_DEV_SESSION").filter(|s| !s.is_empty()) {
+        studio = studio.with_dev_session(PathBuf::from(session), std::env::var("O3V_DEV_LABEL").ok().filter(|l| !l.is_empty()));
+    }
+    studio.set_look(args.theme.or_else(managed::theme), args.language.or_else(managed::language));
+    if let Some(product) = args.product {
+        studio.set_product(product);
+    }
+    shell::run(studio, window_icon(), true)
+}
+
+/// How long a save under way may take to finish after SIGTERM: within Docker's 10 s before it
+/// kills the process.
+#[cfg(unix)]
+const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// SIGTERM (the SuperCloud ends the session, the desktop logs out; OpenAEC-Blueprint#61): a save
+/// under way is finished first, for [`STOP_GRACE`] at most, else its temporary file is removed so
+/// no half file stays in the work folder; then the viewer stops. That is all the unsaved work
+/// there is: the viewer does not change models, and what it shows (camera, sections,
+/// measurements) is not kept between sessions.
+#[cfg(unix)]
+fn stop_on_sigterm() {
+    let mut signals = match signal_hook::iterator::Signals::new([signal_hook::consts::SIGTERM]) {
+        Ok(signals) => signals,
+        Err(e) => return eprintln!("SIGTERM: {e}"),
+    };
+    let stop = move || {
+        if signals.forever().next().is_none() {
+            return;
+        }
+        let until = std::time::Instant::now() + STOP_GRACE;
+        let saving = !export::writing().is_empty();
+        while !export::writing().is_empty() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let unfinished = export::writing();
+        for part in &unfinished {
+            let _ = std::fs::remove_file(part);
+            eprintln!("SIGTERM: a save was not finished; removed {}", part.display());
+        }
+        if saving && unfinished.is_empty() {
+            // the answer to the save_file call that waited for it goes out
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        std::process::exit(if unfinished.is_empty() { 0 } else { 1 });
+    };
+    if let Err(e) = std::thread::Builder::new().name("sigterm".into()).spawn(stop) {
+        eprintln!("SIGTERM: {e}");
+    }
 }
 
 /// The earlier stand-alone window (own ribbon and panels); kept for `--window-screenshot`.
@@ -207,6 +511,7 @@ fn run_app_standalone(args: Args) -> iced::Result {
     let boot = move || {
         let mut app = initial_state(&args);
         app.initial_view = args.view;
+        app.background_cuts = true;
         app.window_shot = args.window_screenshot.clone();
         let task = match &file {
             Some(path) => iced::Task::done(Message::Open(path.clone())),
@@ -233,8 +538,13 @@ fn run_app_standalone(args: Args) -> iced::Result {
 /// Renders one frame of the whole window headlessly (wgpu offscreen) and writes a PNG.
 fn screenshot(args: &Args, out: &std::path::Path) -> Result<(), String> {
     let (w, h) = args.size.unwrap_or((1440.0, 900.0));
-    let mut studio = shell::Studio::new(initial_state(args));
+    let mut studio = shell::Studio::new(initial_state(args)).with_edition(args.edition);
     studio.set_look(args.theme, args.language);
+    if let Some(product) = args.product {
+        studio.set_product(product);
+    }
+    // the window's width, as a real window reports it: what the ribbon and the title bar fit
+    let _ = studio.update(shell::Msg::Resized(w));
     studio.show(args.page);
     for path in args.recent.iter().rev().chain(&args.file) {
         studio.remember(path.clone());
@@ -242,17 +552,68 @@ fn screenshot(args: &Args, out: &std::path::Path) -> Result<(), String> {
     let viewport = studio.viewport_in(w, h);
     let app = &mut studio.app;
     app.viewport_size = viewport;
-    if let Some(file) = &args.file {
+    // a project file: its files, each put back where the project had it
+    let project = args.file.as_ref().and_then(|file| Some((file, crate::app::project_file::Project::peek(file)?)));
+    if let Some((file, project)) = project {
+        app.initial_view = args.view;
+        app.open_project_now(file, project)?;
+    } else if let Some(file) = &args.file {
         let model = loaders::load(file)?;
         eprintln!(
-            "loaded {}: {} layers, {} triangles in {:.2} s",
+            "loaded {}: {} layers, {} triangles, {} points in {:.2} s",
             model.file_name(),
             model.layers.len(),
             model.triangle_count(),
+            model.point_count(),
             model.load_time.as_secs_f32()
         );
         app.initial_view = args.view;
         app.set_model(Arc::new(model));
+        // the card of a cloud shows what its file holds: read here, as no message runs
+        #[cfg(feature = "pointcloud")]
+        if args.page == shell::Page::Cloud {
+            app.cloud.details = app.cloud().map(|cloud| (cloud.file.clone(), crate::app::pointcloud::details(&cloud.file)));
+        }
+        // the mesh of the cloud, added over it as the Pointcloud product does
+        #[cfg(feature = "pointcloud")]
+        if let Some(kind) = &args.mesh {
+            use crate::app::pointcloud::Mesh;
+            let kind = match kind.as_str() {
+                "terrain" => Mesh::Terrain,
+                "surface" => Mesh::Surface,
+                "closed" => Mesh::Closed,
+                "faces" => Mesh::Faces,
+                _ => return Err("--mesh terrain|surface|closed|faces".into()),
+            };
+            let cloud = app.cloud().ok_or("--mesh: the file is not a point cloud")?;
+            let done = crate::app::pointcloud::mesh(&cloud, kind, &app.cloud.settings, None, &std::sync::atomic::AtomicBool::new(false))?;
+            eprintln!("meshed {}: {} in {:.2} s", done.file.display(), done.figures(), done.seconds);
+            app.add_model(Arc::new(loaders::load(&done.file)?));
+            app.fit();
+        }
+        // the loads and results of a structural analysis model
+        for word in &args.analysis {
+            use crate::structural::diagrams::{Change, Force};
+            let change = match word.to_ascii_lowercase().as_str() {
+                "deformed" => Some(Change::Deformed),
+                "plates" => Some(Change::Plates),
+                "plate-mesh" => Some(Change::PlateMeshOn(true)),
+                value if value.starts_with("plate-value-") => value["plate-value-".len()..].parse().ok().map(Change::PlateValue),
+                "reactions-xyz" => Some(Change::ReactionsAs(crate::structural::diagrams::ReactionsAs::Components)),
+                "reactions" => Some(Change::Reactions),
+                "supports" => Some(Change::Supports),
+                "loads" => Some(Change::Loads),
+                "next-case" => Some(Change::Case(true)),
+                "next-set" => Some(Change::Set(true)),
+                "previous-set" => Some(Change::Set(false)),
+                "larger" => Some(Change::Scale(true)),
+                "smaller" => Some(Change::Scale(false)),
+                other => Force::parse(other).map(Change::Force),
+            };
+            if let Some(change) = change {
+                let _ = app.update(Message::Analysis(change));
+            }
+        }
         // the model pulled apart, framed as F would
         if let Some(amount) = args.explode {
             app.explode_mode = args.explode_mode.unwrap_or_default();
@@ -262,6 +623,13 @@ fn screenshot(args: &Args, out: &std::path::Path) -> Result<(), String> {
             }
             app.fit();
         }
+        // the section box, its faces where asked
+        if let Some(faces) = args.section {
+            let _ = app.update(Message::ToggleSection);
+            for (k, percent) in faces.into_iter().enumerate() {
+                let _ = app.update(Message::SectionSlider(k / 2, k % 2 == 0, percent));
+            }
+        }
         if let Some(name) = &args.schedule {
             // the window computes the schedules after the model shows; here, before the frame
             let model = app.model.clone().ok_or("no model")?;
@@ -270,11 +638,101 @@ fn screenshot(args: &Args, out: &std::path::Path) -> Result<(), String> {
             let i = app.schedules.iter().position(|s| &s.name == name).ok_or(format!("no schedule {name} in the file"))?;
             let _ = app.update(Message::OpenSchedule(i));
         }
-        if let Some(number) = &args.sheet {
+        if let Some(number) = args.sheet.as_ref().filter(|n| n.as_str() != "all") {
             let model = app.model.clone().ok_or("no model")?;
-            let i = model.project.sheets.iter().position(|s| &s.number == number).ok_or(format!("no sheet {number} in the file"))?;
-            let _ = app.update(Message::OpenSheet(i));
+            let native = app.document_now().sheets().iter().find(|s| &s.number == number).map(|s| s.path.clone());
+            if let Some(path) = native {
+                let _ = app.update(Message::OpenDocSheet(path.into()));
+            } else {
+                let i = model.project.sheets.iter().position(|s| &s.number == number).ok_or(format!("no sheet {number} in the file"))?;
+                let _ = app.update(Message::OpenSheet(i));
+            }
         }
+        if let Some(name) = &args.saved_view {
+            let model = app.model.clone().ok_or("no model")?;
+            let i = model.views.iter().position(|v| &v.name == name).ok_or(format!("no view {name} in the file"))?;
+            let _ = app.update(Message::ApplyView(i));
+            app.finish_animation();
+        }
+        if let Some(name) = &args.draft {
+            let model = app.model.clone().ok_or("no model")?;
+            let i = model.project.drafts.iter().position(|d| &d.name == name).ok_or_else(|| format!("no legend or drafting view {name} in the file; it has: {}", model.project.drafts.iter().map(|d| d.name.as_str()).collect::<Vec<_>>().join(" | ")))?;
+            let _ = app.update(Message::OpenDraft(i));
+            if let Some(element) = args.pick {
+                app.pick_drawn(element);
+            }
+        }
+        if let Some(name) = args.drawing.as_ref().filter(|n| n.as_str() != "all") {
+            let document = app.document_now();
+            let plan = document.plans().iter().find(|p| &p.name == name).map(|p| p.path.clone());
+            let path = plan.or_else(|| document.sections().iter().find(|s| &s.name == name).map(|s| s.path.clone())).ok_or(format!("no drawing {name} in the file"))?;
+            let _ = app.update(Message::OpenPlan(Arc::from(path.as_str())));
+            app.finish_animation();
+        }
+        for name in &args.project {
+            let document = app.document_now();
+            let plan = document.plans().iter().find(|p| &p.name == name).map(|p| p.path.clone());
+            let path = plan.or_else(|| document.sections().iter().find(|s| &s.name == name).map(|s| s.path.clone())).ok_or(format!("no drawing {name} in the file"))?;
+            let _ = app.update(Message::ProjectView(Arc::from(path.as_str())));
+        }
+        if let Some([steps, x, y]) = args.zoom {
+            app.finish_animation();
+            let aspect = app.aspect();
+            app.camera.zoom_at(steps, (x, y), aspect);
+        }
+    }
+    // `--gis PLACE`: the place found, its surroundings fetched and the GIS tab shown
+    if let Some(place) = &args.gis {
+        studio.app.open_place(place, args.language.unwrap_or(Language::English))?;
+        if let Some(source) = args.map {
+            studio.app.open_map(source, args.language.unwrap_or(Language::English))?;
+        }
+        if args.soundings {
+            studio.app.open_soundings(args.language.unwrap_or(Language::English))?;
+        }
+        if args.borings {
+            studio.app.open_borings(args.language.unwrap_or(Language::English))?;
+        }
+    }
+    #[cfg(feature = "validator")]
+    if let Some(language) = args.language {
+        studio.app.collab.language = language;
+    }
+    #[cfg(feature = "validator")]
+    studio.app.collab_now(args.bcf.as_deref(), args.ids.as_deref(), args.collab.as_deref())?;
+    // `--sheet all` and `--drawing all`: every sheet and every plan, section and elevation of the
+    // file, each in an image of its own (OUT-sheet-03.png); the one being drawn is named first,
+    // so a drawing that stops the app is known
+    let stem = out.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut every = false;
+    if args.sheet.as_deref() == Some("all") {
+        every = true;
+        let native: Vec<_> = studio.app.document_now().sheets().iter().map(|s| (s.number.clone(), s.path.clone())).collect();
+        for (i, (number, path)) in native.iter().enumerate() {
+            eprintln!("native sheet {i}: {number}");
+            let _ = studio.app.update(Message::OpenDocSheet(path.as_str().into()));
+            studio.snapshot(iced::Size::new(w, h), &out.with_file_name(format!("{stem}-native-sheet-{i:02}.png")))?;
+        }
+        let sheets = studio.app.model.as_ref().map_or(0, |m| m.project.sheets.len());
+        for i in 0..sheets {
+            eprintln!("sheet {i}: {}", studio.app.model.as_ref().map(|m| format!("{} {}", m.project.sheets[i].number, m.project.sheets[i].name)).unwrap_or_default());
+            let _ = studio.app.update(Message::OpenSheet(i));
+            studio.snapshot(iced::Size::new(w, h), &out.with_file_name(format!("{stem}-sheet-{i:02}.png")))?;
+        }
+    }
+    if args.drawing.as_deref() == Some("all") {
+        every = true;
+        let document = studio.app.document_now();
+        let paths: Vec<(String, String)> = document.plans().iter().map(|p| (p.name.clone(), p.path.clone())).chain(document.sections().iter().map(|s| (s.name.clone(), s.path.clone()))).collect();
+        for (i, (name, path)) in paths.iter().enumerate() {
+            eprintln!("drawing {i}: {name}");
+            let _ = studio.app.update(Message::OpenPlan(Arc::from(path.as_str())));
+            studio.app.finish_animation();
+            studio.snapshot(iced::Size::new(w, h), &out.with_file_name(format!("{stem}-drawing-{i:03}.png")))?;
+        }
+    }
+    if every {
+        return Ok(());
     }
     studio.snapshot(iced::Size::new(w, h), out)?;
     eprintln!("wrote {}", out.display());

@@ -1,4 +1,5 @@
-//! Adapter from the independent skp-reader file reader to the app's scene model.
+//! Adapter from the independent SketchUp reader (crate skp-reader, repository sketchup-dll) to
+//! the app's scene model.
 use super::{Loaded, Loader, Phase, Progress, Source};
 use crate::model::{Layer, ProjectData};
 
@@ -6,6 +7,7 @@ pub struct SkpLoader;
 
 impl Loader for SkpLoader {
     fn name(&self) -> &'static str { "SketchUp" }
+    fn featured(&self) -> Option<u8> { Some(2) }
     fn extensions(&self) -> &'static [&'static str] { &["skp"] }
     fn load(&self, source: &Source) -> Result<Vec<Layer>, String> {
         self.load_with(source, &Progress::default()).map(|loaded| loaded.layers)
@@ -16,9 +18,9 @@ impl Loader for SkpLoader {
         progress.set(Phase::Convert);
         let meshes = skp_reader::read(&data)?;
         let layers = meshes.into_iter().map(|mesh| Layer {
-            name: mesh.name, color: mesh.color, positions: mesh.positions, normals: mesh.normals, colors: mesh.colors, indices: mesh.indices, elements: mesh.elements, props: mesh.props, hidden: mesh.hidden
+            name: mesh.name, color: mesh.color, positions: mesh.positions, normals: mesh.normals, colors: mesh.colors, indices: mesh.indices, elements: mesh.elements, props: mesh.props, hidden: mesh.hidden, points: false, lines: Vec::new(), line_elements: Vec::new(), splats: None, texturing: None
         }).collect();
         let project = ProjectData::default();
-        Ok(Loaded { layers, views: Vec::new(), project })
+        Ok(Loaded { structural: Vec::new(), origin: None, layers, views: Vec::new(), project })
     }
 }

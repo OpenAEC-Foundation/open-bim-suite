@@ -4,11 +4,15 @@
 //! `ExplodeManager`.
 //!
 //! What moves together is a unit: an element (all its ranges, over all layers), the triangles of
-//! a layer outside its elements, or a whole layer without elements. The units and their bounds at
+//! a layer outside its elements, or a whole layer without elements. Structural nodes, members and
+//! surfaces are units too (their bounds a point or a segment box, their storey the nearest level
+//! below); a member with a solid shares one unit with its triangles. The units and their bounds at
 //! rest are indexed once per model; the renderer adds the offset of each vertex's unit in the
 //! vertex shader, so the geometry never changes and 0 % on every axis is the model as loaded.
+//! The same units carry the hidden and selected flags of `crate::units`.
 
 use crate::model::{Bounds, Model};
+use crate::units::FastHashMap;
 use crate::viewport::render::transform_bounds;
 use glam::{Mat4, Vec3};
 use std::collections::HashMap;
@@ -29,11 +33,24 @@ pub enum ExplodeMode {
     Elements,
 }
 
+/// What a unit is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UnitOwner {
+    Element(u64),
+    /// The triangles of a layer (index in `Model::layers`) outside its elements.
+    LayerRest(usize),
+}
+
 /// The units of a model at rest.
 #[derive(Debug)]
 pub struct ExplodeIndex {
     /// Per layer, the unit of every vertex (0: none, never moves).
     pub vertex_units: Vec<Vec<u32>>,
+    /// Per unit (0: none): the element it is, or the layer whose triangles outside elements it is.
+    owners: Vec<Option<UnitOwner>>,
+    /// The unit of every element, and per layer the unit of its triangles outside elements.
+    element_units: FastHashMap<u64, u32>,
+    rest_units: Vec<Option<u32>>,
     /// Per unit (0 unused): bounds at rest (model space).
     bounds: Vec<Bounds>,
     /// Per unit: storey, 0 for the lowest (None: no level).
@@ -45,16 +62,82 @@ pub struct ExplodeIndex {
     /// The units on a storey at rest (model space): the building, without site or terrain, for
     /// the storey spacing.
     building: Bounds,
+    /// The unit of every structural node, member and surface (by element id). Loads, supports,
+    /// hinges and the other decorations take the unit of the item they sit on
+    /// (`StructuralItem::unit_key`).
+    structural: HashMap<u64, u32>,
+    /// The unit of every item of the model's structural display (nodes, members), in display
+    /// order: written into the instances when they are uploaded.
+    display_units: Vec<u32>,
+    /// What the camera frames when it fits the model, when that is less than all of it: the
+    /// units without a few small ones that stand far from the rest (model space). See
+    /// [`framing`].
+    framed: Option<Bounds>,
+}
+
+/// A unit stands far from the rest when the gap between them is more than this many times the
+/// size of the rest (or of the unit, when that is larger)...
+const STRAY_GAP: f32 = 10.0;
+/// ...and the units that stand far hold together at most this part of the model's triangles.
+const STRAY_SHARE: f64 = 0.01;
+
+/// The bounds of the units (bounds, triangles) without the few small ones that stand far from
+/// the rest: an object far from zero in a file whose model lies elsewhere (a default cube
+/// thousands of kilometres from a map), which would leave the model a dot in the fitted view.
+/// None when no unit stands far, or when those that do hold more than [`STRAY_SHARE`] of the
+/// triangles: then they are part of the model.
+///
+/// The rest grows from the middle of the model (per axis the median of the units' centres,
+/// weighted by their triangles) outwards: a unit joins it unless the gap between them is more
+/// than [`STRAY_GAP`] times the size of the larger of the two.
+fn framing(units: &[(Bounds, u64)]) -> Option<Bounds> {
+    let units: Vec<(Bounds, u64)> = units.iter().filter(|(b, _)| b.is_valid()).map(|&(b, w)| (b, w.max(1))).collect();
+    if units.len() < 2 {
+        return None;
+    }
+    let total: u64 = units.iter().map(|u| u.1).sum();
+    let middle = [0, 1, 2].map(|axis| {
+        let mut centres: Vec<(f32, u64)> = units.iter().map(|(b, w)| (b.center()[axis], *w)).collect();
+        centres.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut seen = 0;
+        centres
+            .iter()
+            .find(|(_, w)| {
+                seen += w;
+                2 * seen >= total
+            })
+            .map_or(0.0, |c| c.0)
+    });
+    // the gap between two boxes (0 when they touch or overlap)
+    let gap = |a: &Bounds, b: &Bounds| (0..3).map(|i| (a.min[i] - b.max[i]).max(b.min[i] - a.max[i]).max(0.0).powi(2)).sum::<f32>().sqrt();
+    let diagonal = |b: &Bounds| 2.0 * b.radius();
+    let at_middle = Bounds { min: middle, max: middle };
+    let mut order: Vec<(f32, &(Bounds, u64))> = units.iter().map(|u| (gap(&u.0, &at_middle), u)).collect();
+    order.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let (mut framed, mut stray) = (Bounds::empty(), 0u64);
+    for (_, (b, w)) in order {
+        if framed.is_valid() && gap(&framed, b) > STRAY_GAP * diagonal(&framed).max(diagonal(b)).max(1e-6) {
+            stray += w;
+            continue;
+        }
+        framed.extend(b.min);
+        framed.extend(b.max);
+    }
+    (stray > 0 && stray as f64 <= STRAY_SHARE * total as f64).then_some(framed)
 }
 
 impl ExplodeIndex {
     pub fn new(model: &Model) -> Self {
         // per unit: the element it is (None: the rest of a layer)
         let mut elements: Vec<Option<u64>> = vec![None];
-        let mut element_units: HashMap<u64, u32> = HashMap::new();
+        let mut element_units: FastHashMap<u64, u32> = FastHashMap::default();
         let mut bounds = vec![Bounds::empty()];
+        // per unit: its triangles, for the framing
+        let mut triangles = vec![0u64];
         let mut vertex_units = Vec::with_capacity(model.layers.len());
-        for layer in &model.layers {
+        let mut owners: Vec<Option<UnitOwner>> = vec![None];
+        let mut rest_units = Vec::with_capacity(model.layers.len());
+        for (l, layer) in model.layers.iter().enumerate() {
             let mut units = vec![0u32; layer.vertex_count()];
             // index ranges with their element, the gaps between them included (sorted by first index)
             let mut runs = Vec::with_capacity(2 * layer.elements.len() + 1);
@@ -76,14 +159,18 @@ impl ExplodeIndex {
                 let unit = match element {
                     Some(id) => *element_units.entry(id).or_insert_with(|| {
                         elements.push(Some(id));
+                        owners.push(Some(UnitOwner::Element(id)));
                         elements.len() as u32 - 1
                     }),
                     None => *rest.get_or_insert_with(|| {
                         elements.push(None);
+                        owners.push(Some(UnitOwner::LayerRest(l)));
                         elements.len() as u32 - 1
                     }),
                 };
                 bounds.resize(elements.len(), Bounds::empty());
+                triangles.resize(elements.len(), 0);
+                triangles[unit as usize] += tris.len() as u64 / 3;
                 for &i in tris {
                     let Some(p) = layer.positions.get(3 * i as usize..3 * i as usize + 3) else { continue };
                     units[i as usize] = unit;
@@ -93,6 +180,20 @@ impl ExplodeIndex {
                 }
             }
             vertex_units.push(units);
+            rest_units.push(rest);
+        }
+        // structural units, after the layers: a member drawn as a solid keeps its triangles' unit
+        let mut structural = HashMap::new();
+        for (id, b) in model.structural_index.unit_bounds(&model.structural, &model.origins) {
+            let unit = *element_units.entry(id).or_insert_with(|| {
+                elements.push(Some(id));
+                owners.push(Some(UnitOwner::Element(id)));
+                elements.len() as u32 - 1
+            });
+            bounds.resize(elements.len(), Bounds::empty());
+            bounds[unit as usize].extend(b.min);
+            bounds[unit as usize].extend(b.max);
+            structural.insert(id, unit);
         }
 
         // storeys: the level of every element ("level" in its properties, Revit), low to high by
@@ -125,6 +226,13 @@ impl ExplodeIndex {
                 storey[u as usize] = Some(i as u32);
             }
         }
+        // a structural unit without a level of its own: the nearest storey at or below its base
+        for &u in structural.values() {
+            let base = bounds[u as usize].min[2];
+            if storey[u as usize].is_none() && base.is_finite() {
+                storey[u as usize] = order.iter().rposition(|(z, _)| *z <= base + 1e-3).map(|i| i as u32);
+            }
+        }
 
         let (mut rest, mut building) = (Bounds::empty(), Bounds::empty());
         for (b, storey) in bounds.iter().zip(&storey).filter(|(b, _)| b.is_valid()) {
@@ -136,7 +244,42 @@ impl ExplodeIndex {
             }
         }
         let storeys = if building.is_valid() { order.len() } else { 0 };
-        Self { vertex_units, bounds, storey, storeys, rest, building }
+        // the framing; a model with points (a cloud) is framed whole, its points are no units
+        triangles.resize(bounds.len(), 0);
+        let units: Vec<(Bounds, u64)> = bounds.iter().copied().zip(triangles.iter().copied()).skip(1).collect();
+        let framed = if model.layers.iter().any(|l| l.points) { None } else { framing(&units) };
+        let display_units = model
+            .structural_display
+            .as_ref()
+            .map(|d| d.items.iter().map(|i| structural.get(&i.element).copied().unwrap_or(0)).collect())
+            .unwrap_or_default();
+        Self { vertex_units, owners, element_units, rest_units, bounds, storey, storeys, rest, building, structural, display_units, framed }
+    }
+
+    /// What the camera frames when it fits the model at rest (model space), when that is less
+    /// than all of it: the model without a few small things far from the rest.
+    pub fn framed(&self) -> Option<Bounds> {
+        self.framed
+    }
+
+    /// All units at rest (model space).
+    pub fn rest(&self) -> Bounds {
+        self.rest
+    }
+
+    /// The unit of a structural node, member or surface.
+    pub fn structural_unit(&self, id: u64) -> Option<u32> {
+        self.structural.get(&id).copied()
+    }
+
+    /// The unit of every item of the model's structural display, in display order.
+    pub fn display_units(&self) -> &[u32] {
+        &self.display_units
+    }
+
+    /// The bounds of a unit at rest (model space).
+    pub fn unit_bounds(&self, unit: u32) -> Option<Bounds> {
+        self.bounds.get(unit as usize).copied().filter(Bounds::is_valid)
     }
 
     /// Units, the unused unit 0 included: the length of [`ExplodeIndex::offsets`].
@@ -157,6 +300,22 @@ impl ExplodeIndex {
     /// The unit of vertex `vertex` of layer `layer` (0 when unknown).
     pub fn unit(&self, layer: usize, vertex: u32) -> usize {
         self.vertex_units.get(layer).and_then(|u| u.get(vertex as usize)).map_or(0, |&u| u as usize)
+    }
+
+    /// The unit of element `id`.
+    pub fn element_unit(&self, id: u64) -> Option<usize> {
+        self.element_units.get(&id).map(|&u| u as usize)
+    }
+
+    /// The unit of the triangles of layer `layer` outside its elements (all of them for a layer
+    /// without elements).
+    pub fn layer_rest_unit(&self, layer: usize) -> Option<usize> {
+        self.rest_units.get(layer).copied().flatten().map(|u| u as usize)
+    }
+
+    /// What unit `unit` is (None for unit 0).
+    pub fn owner(&self, unit: usize) -> Option<UnitOwner> {
+        self.owners.get(unit).copied().flatten()
     }
 
     /// The offset (world, w unused) of every unit for `amount` (0..1 per axis) in `mode`, the
@@ -210,7 +369,7 @@ mod tests {
     use std::path::PathBuf;
 
     /// A unit cube of 8 vertices and 12 triangles at `at`.
-    fn cube(positions: &mut Vec<f32>, indices: &mut Vec<u32>, at: [f32; 3]) {
+    pub(super) fn cube(positions: &mut Vec<f32>, indices: &mut Vec<u32>, at: [f32; 3]) {
         let base = (positions.len() / 3) as u32;
         for k in 0..8 {
             positions.extend([0, 1, 2].map(|a| at[a] + ((k >> a) & 1) as f32));
@@ -324,5 +483,52 @@ mod tests {
         let index = ExplodeIndex::new(&model);
         let tri = |t: usize| model.layers[0].indices[3 * t..3 * t + 3].iter().map(|&v| index.unit(0, v)).collect::<Vec<_>>();
         assert_eq!((tri(0), tri(1)), (vec![1, 1, 1], vec![2, 2, 2]));
+    }
+}
+
+#[cfg(test)]
+mod framing_tests {
+    use super::*;
+    use crate::model::Layer;
+    use std::path::PathBuf;
+
+    /// A grid of 20 x 10 unit cubes 2 m apart (the model, from 0,0,0 to 39,19,1), each an element,
+    /// and unit cubes at `others`, each an element too.
+    fn site(others: &[[f32; 3]], points: bool) -> Model {
+        let (mut positions, mut indices, mut elements) = (Vec::new(), Vec::new(), Vec::new());
+        let grid = (0..200).map(|k| [2.0 * (k % 20) as f32, 2.0 * (k / 20) as f32, 0.0]);
+        for (id, at) in grid.chain(others.iter().copied()).enumerate() {
+            elements.push((id as u64 + 1, indices.len() as u32, 36));
+            super::tests::cube(&mut positions, &mut indices, at);
+        }
+        let mut layers = vec![Layer { name: "Model".into(), positions, indices, elements, ..Layer::default() }];
+        if points {
+            layers.push(Layer { name: "Cloud".into(), positions: vec![1.0, 1.0, 1.0, 3.0, 3.0, 3.0], points: true, ..Layer::default() });
+        }
+        Model::new(PathBuf::from("site.blend"), "Blender", layers)
+    }
+
+    const MODEL: Bounds = Bounds { min: [0.0, 0.0, 0.0], max: [39.0, 19.0, 1.0] };
+
+    #[test]
+    fn a_small_thing_far_away_is_left_out_of_the_framing() {
+        // a cube a thousand kilometres away, as a default cube left far from a map
+        let index = ExplodeIndex::new(&site(&[[1.0e6, -2.0e6, 0.0]], false));
+        assert_eq!(index.framed(), Some(MODEL));
+        // the model itself keeps it
+        assert_eq!(index.rest().max[0], 1.0e6 + 1.0);
+        // nothing stands far: the model is framed whole
+        assert_eq!(ExplodeIndex::new(&site(&[], false)).framed(), None);
+    }
+
+    #[test]
+    fn what_is_near_or_holds_much_of_the_model_is_framed() {
+        // a shed 30 m from the grid (less than ten times the grid's size)
+        assert_eq!(ExplodeIndex::new(&site(&[[70.0, 0.0, 0.0]], false)).framed(), None);
+        // five cubes far away: more than 1 % of the triangles, so part of the model
+        let far: Vec<[f32; 3]> = (0..5).map(|k| [1.0e6 + 2.0 * k as f32, 0.0, 0.0]).collect();
+        assert_eq!(ExplodeIndex::new(&site(&far, false)).framed(), None);
+        // a model with a point cloud is framed whole: its points are no units
+        assert_eq!(ExplodeIndex::new(&site(&[[1.0e6, 0.0, 0.0]], true)).framed(), None);
     }
 }

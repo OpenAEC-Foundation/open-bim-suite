@@ -1,0 +1,40 @@
+# Read-only access to the private format readers (revit-dll, rhino-dll, sketchup-dll, tekla-dll,
+# ply-dll, ..): one deploy key per repository, each private key in a secret of its own whose name
+# starts with SSH_KEY_ (SSH_KEY_REVIT_DLL, SSH_KEY_RHINO_DLL, ..), its comment the repository's
+# address (git@github.com:OpenAEC-Foundation/<repository>.git), which tells ssh-agent which key
+# opens which repository.
+#
+# The workflow names the secrets it passes, so this action gets the deploy keys and no other
+# secret. A new reader needs a new key, a new secret, and that secret's name in the step that
+# calls this action in build.yml, format-crates.yml, live.yml and release.yml.
+name: Private reader keys
+description: Loads the deploy keys of the private readers into ssh-agent for Cargo's git dependencies.
+inputs:
+  keys:
+    description: The private keys, one after another, each from its own SSH_KEY_ secret.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Collect the keys
+      shell: bash
+      env:
+        READER_KEYS: ${{ inputs.keys }}
+      run: |
+        # ssh-add rejects a key whose lines end with CRLF ("invalid format")
+        keys=$(printf '%s' "$READER_KEYS" | tr -d '\r')
+        count=$(printf '%s\n' "$keys" | grep -c "BEGIN OPENSSH PRIVATE KEY" || true)
+        echo "Private reader keys: $count"
+        {
+          echo 'READER_SSH_KEYS<<END_OF_READER_SSH_KEYS'
+          printf '%s\n' "$keys"
+          echo 'END_OF_READER_SSH_KEYS'
+        } >> "$GITHUB_ENV"
+    - name: Load them into ssh-agent
+      uses: webfactory/ssh-agent@e83874834305fe9a4a2997156cb26c5de65a8555
+      with:
+        ssh-private-key: ${{ env.READER_SSH_KEYS }}
+        log-public-key: false
+    - name: Forget them outside ssh-agent
+      shell: bash
+      run: echo "READER_SSH_KEYS=" >> "$GITHUB_ENV"

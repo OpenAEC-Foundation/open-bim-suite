@@ -2,7 +2,8 @@
 //!
 //! What differs from the desktop: files come from the browser's file picker, from drag and drop
 //! onto the page or from a `?file=URL` link, as bytes; "Save as" becomes a download; the
-//! preferences are not kept; there is no remote control.
+//! preferences are not kept; there is no remote control. In an OpenAEC SuperCloud environment the
+//! file comes from Docs and "Save as" stores it there ([`crate::host`]).
 
 use crate::app::{App, Message};
 use crate::loaders::Source;
@@ -16,10 +17,35 @@ use wasm_bindgen_futures::JsFuture;
 
 /// Starts the app in the page.
 pub fn main() {
+    main_as(crate::product::Edition::Studio)
+}
+
+/// Starts `edition` in the page: the Studio or one product alone.
+pub fn main_as(edition: crate::product::Edition) {
     console_error_panic_hook::set_once();
-    if let Err(e) = shell::run(shell::Studio::new(App::default()), None) {
-        web_sys::console::error_1(&format!("Open 3D Viewer: {e}").into());
-    }
+    wasm_bindgen_futures::spawn_local(async move {
+        // the overlay is smoothed with WebGPU only: on WebGL2 (most phones) iced's multisampled
+        // overlay pass keeps stale pixels, so a view cube stays behind after the layout moves
+        let antialiasing = webgpu().await.unwrap_or(false);
+        let mut studio = shell::Studio::new(App::default()).with_edition(edition);
+        // `?product=modeller` starts in that product
+        if let Some(product) = url_param("product").and_then(|p| crate::product::Product::parse(&p)) {
+            studio.set_product(product);
+        }
+        if let Err(e) = shell::run(studio, None, antialiasing) {
+            web_sys::console::error_1(&format!("Open 3D Viewer: {e}").into());
+        }
+    });
+}
+
+/// Whether the browser offers a WebGPU adapter, which wgpu then draws with; without one it falls
+/// back to WebGL2.
+async fn webgpu() -> Option<bool> {
+    let navigator = js_sys::Reflect::get(&js_sys::global(), &"navigator".into()).ok()?;
+    let gpu = js_sys::Reflect::get(&navigator, &"gpu".into()).ok().filter(|gpu| gpu.is_object())?;
+    let request: js_sys::Function = js_sys::Reflect::get(&gpu, &"requestAdapter".into()).ok()?.dyn_into().ok()?;
+    let adapter = request.call0(&gpu).ok()?.dyn_into::<js_sys::Promise>().ok()?;
+    Some(JsFuture::from(adapter).await.ok()?.is_object())
 }
 
 /// Waits until the browser has drawn the next frame, so a status change shows before a long,
@@ -35,6 +61,12 @@ pub async fn next_frame() {
         }
     });
     let _ = JsFuture::from(promise).await;
+}
+
+/// Opens `url` in a new browser tab (in the installed Android app: in Chrome).
+pub fn open_url(url: &str) -> Result<(), String> {
+    let window = web_sys::window().ok_or("no window")?;
+    window.open_with_url_and_target(url, "_blank").map(|_| ()).map_err(|e| format!("Open {url}: {e:?}"))
 }
 
 /// Hands `bytes` to the browser as a download named `name`.
@@ -67,15 +99,31 @@ pub fn files() -> impl Stream<Item = Message> {
             let _ = tx.send(message).await;
         });
     }
+    // in an environment: the file from Docs the page was opened for
+    let mut from_docs = tx.clone();
+    wasm_bindgen_futures::spawn_local(async move {
+        if let Some(opened) = crate::host::open_start().await {
+            let message = match opened {
+                Ok(source) => Message::Picked(Some(source)),
+                Err(e) => Message::Loaded(Err(e)),
+            };
+            let _ = from_docs.send(message).await;
+        }
+    });
     listen_for_drops(tx);
     rx
 }
 
 /// The `file` parameter of the page address, e.g. `?file=samples/house.skp`.
 fn start_url() -> Option<String> {
+    url_param("file")
+}
+
+/// A parameter of the page address, when it is there and not empty.
+fn url_param(name: &str) -> Option<String> {
     let search = web_sys::window()?.location().search().ok()?;
     let params = web_sys::UrlSearchParams::new_with_str(&search).ok()?;
-    params.get("file").filter(|f| !f.is_empty())
+    params.get(name).filter(|f| !f.is_empty())
 }
 
 /// Downloads a model file.

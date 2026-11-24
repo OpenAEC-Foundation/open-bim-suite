@@ -1,10 +1,13 @@
-//! Desktop IFC import through the standalone IFClite processing library.
+//! IFC import through the standalone IFClite processing library, on the desktop and in the browser.
+//! The desktop runs the geometry on IFClite's large-stack worker pool; the browser has no threads,
+//! so there it runs on the page's own thread (the page waits while a large file converts).
 //! Meshes are in metres, Z up. Preserve the model's world rotation while keeping
 //! georeferenced positions near the origin; record the removed anchor in project data.
+//! A zipped IFC (`.ifczip`, as buildingSMART defines it) opens the first `.ifc` in the archive.
 
 use super::{Loaded, Loader, Phase, Progress, Source};
-use crate::model::{Layer, ProjectData};
-use ifc_lite_processing::{process, run_on_geometry_pool, ProcessingRequest};
+use crate::model::{GridLine, Layer, ProjectData};
+use ifc_lite_processing::{process, ProcessingRequest};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub struct IfcLoader;
@@ -49,8 +52,12 @@ impl Loader for IfcLoader {
         "IFC"
     }
 
+    fn featured(&self) -> Option<u8> {
+        Some(0)
+    }
+
     fn extensions(&self) -> &'static [&'static str] {
-        &["ifc"]
+        &["ifc", "ifczip"]
     }
 
     fn load(&self, source: &Source) -> Result<Vec<Layer>, String> {
@@ -58,8 +65,17 @@ impl Loader for IfcLoader {
     }
 
     fn load_with(&self, source: &Source, progress: &Progress) -> Result<Loaded, String> {
+        self.read(source, progress, false)
+    }
+}
+
+impl IfcLoader {
+    /// Reads an IFC file; `bare` lets a file without shapes through for its grids and storeys
+    /// (a grid model of a project package), otherwise such a file is an error.
+    pub(super) fn read(&self, source: &Source, progress: &Progress, bare: bool) -> Result<Loaded, String> {
         progress.set(Phase::Read);
         let data = source.read()?;
+        let data = if data.starts_with(b"PK\x03\x04") { std::borrow::Cow::Owned(unzip_ifc(&data)?) } else { data };
         let mut header = data.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&data);
         while header.first().is_some_and(u8::is_ascii_whitespace) {
             header = &header[1..];
@@ -68,18 +84,23 @@ impl Loader for IfcLoader {
             return Err("IFC: expected an ISO-10303-21 STEP file".into());
         }
         progress.set(Phase::Convert);
-        // IFClite supplies a large-stack worker pool for nested placements/CSG.
         // Disable GPU instancing because this viewer consumes flat triangle meshes.
-        let result = run_on_geometry_pool(|| {
-            process(header, &ProcessingRequest::full_pass().instancing(false), &mut ())
-        })
-        .map_err(|error| format!("IFC: cannot start geometry processing: {error}"))?;
+        let request = ProcessingRequest::full_pass().instancing(false);
+        // IFClite supplies a large-stack worker pool for nested placements/CSG.
+        #[cfg(not(target_arch = "wasm32"))]
+        let result = ifc_lite_processing::run_on_geometry_pool(|| process(header, &request, &mut ()))
+            .map_err(|error| format!("IFC: cannot start geometry processing: {error}"))?;
+        // The browser cannot start threads: IFClite's parallel steps fall back to this thread.
+        #[cfg(target_arch = "wasm32")]
+        let result = process(header, &request, &mut ());
         let world = result.frame.world_mapper();
         let direction = result.frame.direction_mapper();
         let anchor = result.frame.to_world([0.0; 3]);
         let mut layers = BTreeMap::<(Option<Helper>, String), Layer>::new();
         let mut spatial_volume_ids = BTreeSet::new();
         let mut opening_ids = BTreeSet::new();
+        // the layers of the elements with a material layer set, to show among their properties
+        let materials = element_materials(header, result.metadata.length_unit_scale.unwrap_or(1.0));
         for mesh in result.meshes {
             if mesh.indices.is_empty() || mesh.positions.is_empty() {
                 continue;
@@ -131,12 +152,59 @@ impl Loader for IfcLoader {
             if let Some(global_id) = mesh.global_id {
                 props.insert("GlobalId".into(), global_id);
             }
-            if let Some(material) = mesh.material_name {
+            if let Some(material) = materials.names.get(&mesh.express_id).cloned().or(mesh.material_name) {
                 props.insert("Material".into(), material);
+            }
+            if let Some((name, layers)) = materials.layers.get(&mesh.express_id) {
+                // as a modelled element says them: each material and its thickness in millimetres
+                let said: Vec<String> = layers.iter().map(|(material, thickness)| format!("{material} {}", bim_library::millimetres(*thickness, bim_library::Lang::En))).collect();
+                props.insert("Layers".into(), said.join(", "));
+                if let Some(name) = name {
+                    props.insert("Type".into(), name.clone());
+                }
             }
             layer.props.push((id, serde_json::to_string(&props).map_err(|e| format!("IFC properties: {e}"))?));
         }
-        if layers.is_empty() {
+        // the curves of annotations (IfcAnnotation: Rhino's curves, dimensions and leaders, plan
+        // symbols): lines of their element, beside its triangles where it has them
+        let with_props: BTreeSet<u64> = layers.values().flat_map(|l| l.props.iter().map(|p| p.0)).collect();
+        for curve in annotation_curves(header, result.metadata.length_unit_scale.unwrap_or(1.0)) {
+            let name = curve.layer.clone().filter(|s| !s.is_empty()).unwrap_or_else(|| "IfcAnnotation".to_string());
+            let layer = layers.entry((None, name.clone())).or_insert_with(|| Layer { name, color: [0.15, 0.15, 0.15], colors: Some(Vec::new()), ..Layer::default() });
+            let rgba = curve.color.unwrap_or([38, 38, 38, 255]);
+            let first = u32::try_from(layer.lines.len()).map_err(|_| "IFC: layer exceeds the line index limit")?;
+            for polyline in &curve.polylines {
+                let base = u32::try_from(layer.vertex_count()).map_err(|_| "IFC: layer exceeds the mesh index limit")?;
+                for p in polyline {
+                    let w = *p;
+                    layer.positions.extend((0..3).map(|k| (w[k] - anchor[k]) as f32));
+                    layer.normals.extend([0.0; 3]);
+                }
+                if let Some(colors) = layer.colors.as_mut() {
+                    colors.extend(std::iter::repeat_n(rgba, polyline.len()));
+                }
+                layer.lines.extend((0..polyline.len() as u32 - 1).flat_map(|k| [base + k, base + k + 1]));
+            }
+            let count = u32::try_from(layer.lines.len()).map_err(|_| "IFC: layer exceeds the line index limit")? - first;
+            if count == 0 {
+                continue;
+            }
+            let id = u64::from(curve.id);
+            layer.line_elements.push((id, first, count));
+            if !with_props.contains(&id) {
+                let mut props = std::collections::HashMap::new();
+                props.insert("IfcType".to_string(), "IfcAnnotation".to_string());
+                props.insert("ExpressId".to_string(), curve.id.to_string());
+                if let Some(name) = curve.name {
+                    props.insert("Name".into(), name);
+                }
+                if let Some(global_id) = curve.global_id {
+                    props.insert("GlobalId".into(), global_id);
+                }
+                layer.props.push((id, serde_json::to_string(&props).map_err(|e| format!("IFC properties: {e}"))?));
+            }
+        }
+        if layers.is_empty() && !bare {
             return Err(format!("IFC: no supported geometry found ({})", result.metadata.schema_version));
         }
         let has_other_geometry = layers.values().any(|layer| !layer.hidden);
@@ -144,7 +212,27 @@ impl Loader for IfcLoader {
             // A file of only spaces or openings is still a useful model; do not open a blank scene.
             for layer in layers.values_mut() { layer.hidden = false; }
         }
-        let project = ProjectData {
+        // the storeys, in the frame of the meshes: above the building's placement, less the anchor
+        let scale = result.metadata.length_unit_scale.unwrap_or(1.0);
+        let building_z = result.building_transform.as_ref().and_then(|m| m.get(14)).copied().unwrap_or(0.0);
+        let mut levels: Vec<(String, f32)> =
+            storeys(header, scale).into_iter().map(|(name, z)| (name, (building_z + z - anchor[2]) as f32)).collect();
+        levels.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+        levels.dedup();
+        // the grids, as Revit's: at the level nearest the building's zero (peil 0)
+        let zero = building_z - anchor[2];
+        let ground = levels.iter().map(|l| l.1 as f64).min_by(|a, b| (a - zero).abs().total_cmp(&(b - zero).abs())).unwrap_or(zero);
+        let to_scene = |p: [f64; 3]| [(p[0] - anchor[0]) as f32, (p[1] - anchor[1]) as f32, ground as f32];
+        let mut grids: Vec<GridLine> = grid_lines(header, scale).into_iter().map(|(name, a, b)| GridLine { name, a: to_scene(a), b: to_scene(b) }).collect();
+        // one grid per storey (as Revit writes them) is the same grid: once, to the millimetre
+        let mut seen = std::collections::HashSet::new();
+        let mm = |p: [f32; 3]| [(p[0] * 1000.0).round() as i64, (p[1] * 1000.0).round() as i64];
+        grids.retain(|g| seen.insert((g.name.clone(), mm(g.a), mm(g.b))));
+        grids.sort_by(|a, b| a.name.cmp(&b.name));
+        let located = georeference(header, scale);
+        let mut project = ProjectData {
+            levels,
+            grids,
             info: vec![
                 ("IFC schema".into(), result.metadata.schema_version),
                 ("IFC world origin (metres)".into(), format!("{}, {}, {}", anchor[0], anchor[1], anchor[2])),
@@ -158,8 +246,399 @@ impl Loader for IfcLoader {
             ],
             ..ProjectData::default()
         };
-        Ok(Loaded { layers: layers.into_values().collect(), views: Vec::new(), project })
+        project.info.extend(located);
+        // the anchor subtracted above: it places this model when models are combined
+        let origin = Some(glam::DVec3::from_array(anchor));
+        Ok(Loaded { structural: Vec::new(), origin, layers: layers.into_values().collect(), views: Vec::new(), project })
     }
+}
+
+/// The first `.ifc` file in an `.ifczip` archive (the archive holds one, sometimes in a folder).
+fn unzip_ifc(data: &[u8]) -> Result<Vec<u8>, String> {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(data)).map_err(|e| format!("IFC zip: {e}"))?;
+    let index = (0..archive.len())
+        .find(|&i| archive.name_for_index(i).and_then(Result::ok).is_some_and(|name| name.to_lowercase().ends_with(".ifc")))
+        .ok_or("IFC zip: the archive holds no .ifc file")?;
+    let mut file = archive.by_index(index).map_err(|e| format!("IFC zip: {e}"))?;
+    let mut out = Vec::with_capacity(file.size() as usize);
+    std::io::Read::read_to_end(&mut file, &mut out).map_err(|e| format!("IFC zip: {e}"))?;
+    Ok(out)
+}
+
+/// The building storeys in file order: name (else long name) and elevation in metres above the
+/// building (`Elevation`, else the Z of the storey's own placement, which is relative to the
+/// building as `Elevation` is).
+fn storeys(content: &[u8], scale: f64) -> Vec<(String, f64)> {
+    use ifc_lite_core::{decode_ifc_string, EntityDecoder, EntityScanner};
+    let mut scanner = EntityScanner::new(content);
+    let mut decoder = EntityDecoder::new(content);
+    let mut out = Vec::new();
+    while let Some((id, keyword, start, end)) = scanner.next_entity() {
+        if !keyword.eq_ignore_ascii_case("IFCBUILDINGSTOREY") {
+            continue;
+        }
+        let Ok(storey) = decoder.decode_at(start, end) else { continue };
+        let text = |i: usize| storey.get_string(i).map(|s| decode_ifc_string(s).trim().to_string()).filter(|s| !s.is_empty());
+        let name = text(2).or_else(|| text(7)).unwrap_or_else(|| format!("Storey #{id}"));
+        let z = storey.get_float(9).or_else(|| placement_z(&mut decoder, storey.get_ref(5)?));
+        if let Some(z) = z.map(|z| z * scale).filter(|z| z.is_finite()) {
+            out.push((name, z));
+        }
+    }
+    out
+}
+
+/// Where the file says its model lies on the map, as project information: the map conversion
+/// (`IfcMapConversion`: eastings, northings and height in metres, and how far the model's x axis
+/// is turned from east) with the name of its coordinate system (`IfcProjectedCRS`), and the
+/// latitude and longitude of the site (`IfcSite`, degrees). For the Dutch national grid
+/// (EPSG:28992) the latitude and longitude of the map conversion are worked out as well.
+fn georeference(content: &[u8], scale: f64) -> Vec<(String, String)> {
+    use ifc_lite_core::{decode_ifc_string, EntityDecoder, EntityScanner};
+    let mut scanner = EntityScanner::new(content);
+    let mut decoder = EntityDecoder::new(content);
+    let mut out = Vec::new();
+    let (mut conversion, mut site) = (false, false);
+    while let Some((_, keyword, start, end)) = scanner.next_entity() {
+        if keyword.eq_ignore_ascii_case("IFCMAPCONVERSION") && !conversion {
+            let Ok(map) = decoder.decode_at(start, end) else { continue };
+            let (Some(east), Some(north)) = (map.get_float(2), map.get_float(3)) else { continue };
+            conversion = true;
+            // the map unit is the file's length unit unless the system names its own
+            let crs = map.get_ref(1).and_then(|id| decoder.decode_by_id(id).ok());
+            let name = crs.as_ref().and_then(|c| c.get_string(0)).map(|s| decode_ifc_string(s).trim().to_string()).filter(|s| !s.is_empty());
+            let (east, north, height) = (east * scale, north * scale, map.get_float(4).unwrap_or(0.0) * scale);
+            if let Some(name) = &name {
+                out.push(("Georeference coordinate system".into(), name.clone()));
+            }
+            out.push(("Georeference eastings, northings (m)".into(), format!("{east:.3}, {north:.3}")));
+            out.push(("Georeference height (m)".into(), format!("{height:.3}")));
+            if let (Some(a), Some(o)) = (map.get_float(5), map.get_float(6)) {
+                out.push(("Georeference rotation (degrees)".into(), format!("{:.4}", o.atan2(a).to_degrees())));
+            }
+            if name.as_deref().is_some_and(|n| n.replace(' ', "").eq_ignore_ascii_case("EPSG:28992")) {
+                let (lat, lon) = rd_to_wgs84(east, north);
+                out.push(("Georeference latitude, longitude".into(), format!("{lat:.6}, {lon:.6}")));
+            }
+        } else if keyword.eq_ignore_ascii_case("IFCSITE") && !site {
+            let Ok(entity) = decoder.decode_at(start, end) else { continue };
+            // degrees, minutes, seconds and millionths of a second
+            let angle = |i: usize| {
+                let parts: Vec<f64> = entity.get_list(i)?.iter().filter_map(|v| v.as_float().or_else(|| v.as_int().map(|n| n as f64))).collect();
+                (parts.len() >= 3).then(|| parts[0] + parts[1] / 60.0 + parts[2] / 3600.0 + parts.get(3).copied().unwrap_or(0.0) / 3.6e9)
+            };
+            let (Some(lat), Some(lon)) = (angle(9), angle(10)) else { continue };
+            // a site left at zero, zero is not placed
+            if lat == 0.0 && lon == 0.0 {
+                continue;
+            }
+            site = true;
+            out.push(("Site latitude, longitude".into(), format!("{lat:.6}, {lon:.6}")));
+        }
+    }
+    out
+}
+
+/// A point of the Dutch national grid (EPSG:28992, metres) as latitude and longitude (WGS 84,
+/// degrees), by the usual series around Amersfoort: good to about a metre within the Netherlands.
+fn rd_to_wgs84(x: f64, y: f64) -> (f64, f64) {
+    let (dx, dy) = ((x - 155_000.0) * 1e-5, (y - 463_000.0) * 1e-5);
+    let lat = 52.155_174_40
+        + (3235.653_89 * dy - 32.582_97 * dx * dx - 0.247_50 * dy * dy - 0.849_78 * dx * dx * dy - 0.065_50 * dy * dy * dy - 0.017_09 * dx * dx * dy * dy
+            - 0.007_38 * dx
+            + 0.005_30 * dx.powi(4)
+            - 0.000_39 * dx * dx * dy.powi(3)
+            + 0.000_33 * dx.powi(4) * dy
+            - 0.000_12 * dx * dy)
+            / 3600.0;
+    let lon = 5.387_206_21
+        + (5260.529_16 * dx + 105.946_84 * dx * dy + 2.455_09 * dx * dy * dy - 0.819_41 * dx.powi(3) + 0.055_94 * dx * dy.powi(3) - 0.055_60 * dx.powi(3) * dy
+            + 0.001_99 * dy
+            - 0.001_27 * dx.powi(3) * dy * dy
+            + 0.000_44 * dy * dy
+            + 0.000_22 * dx * dy.powi(4)
+            + 0.000_26 * dx.powi(5))
+            / 3600.0;
+    (lat, lon)
+}
+
+/// The axes of the file's grids (`IfcGrid`): each its tag and the two ends of its curve in the
+/// IFC world (metres), the grid's placement applied. An axis is a polyline (first to last point)
+/// or a line trimmed by points or parameters; other curves are left out.
+/// The curves of an `IfcAnnotation`: its polylines (IFC world metres, as the grids), name, id,
+/// presentation layer and colour (its curve style), from the `IfcIndexedPolyCurve` and
+/// `IfcPolyline` items of its representations, placed by its object placement.
+struct AnnotationCurves {
+    id: u32,
+    name: Option<String>,
+    global_id: Option<String>,
+    layer: Option<String>,
+    color: Option<[u8; 4]>,
+    polylines: Vec<Vec<[f64; 3]>>,
+}
+
+/// At most this many points of annotation curves are read from a file.
+const MAX_CURVE_POINTS: usize = 10_000_000;
+
+fn annotation_curves(content: &[u8], scale: f64) -> Vec<AnnotationCurves> {
+    use ifc_lite_core::{decode_ifc_string, EntityDecoder, EntityScanner, IfcType};
+    let mut scanner = EntityScanner::new(content);
+    let mut decoder = EntityDecoder::new(content);
+    // first the presentation layers and curve colours, by the representations and items
+    let mut layer_of = std::collections::HashMap::<u32, String>::new();
+    let mut color_of = std::collections::HashMap::<u32, [u8; 4]>::new();
+    let mut annotations = Vec::new();
+    while let Some((id, keyword, start, end)) = scanner.next_entity() {
+        if keyword.eq_ignore_ascii_case("IFCPRESENTATIONLAYERASSIGNMENT") {
+            let Ok(e) = decoder.decode_at(start, end) else { continue };
+            let name = e.get_string(0).map(|s| decode_ifc_string(s).to_string()).unwrap_or_default();
+            for item in e.get_refs(2).unwrap_or_default() {
+                layer_of.insert(item, name.clone());
+            }
+        } else if keyword.eq_ignore_ascii_case("IFCSTYLEDITEM") {
+            let Ok(e) = decoder.decode_at(start, end) else { continue };
+            let Some(item) = e.get_ref(0) else { continue };
+            for style in e.get_refs(1).unwrap_or_default() {
+                if let Some(c) = curve_colour(&mut decoder, style) {
+                    color_of.insert(item, c);
+                }
+            }
+        } else if keyword.eq_ignore_ascii_case("IFCANNOTATION") {
+            annotations.push((id, start, end));
+        }
+    }
+    let mut out = Vec::new();
+    let mut budget = MAX_CURVE_POINTS;
+    for (id, start, end) in annotations {
+        let Ok(a) = decoder.decode_at(start, end) else { continue };
+        let placement = match ifc_lite_geometry::placement::resolve_object_placement(&a, &mut decoder) {
+            Ok(Some(m)) => glam::DMat4::from_cols_slice(m.as_slice()),
+            Ok(None) => glam::DMat4::IDENTITY,
+            Err(_) => continue,
+        };
+        let place = |p: [f64; 3]| (placement.transform_point3(glam::DVec3::from_array(p)) * scale).to_array();
+        let mut curves = AnnotationCurves {
+            id,
+            name: a.get_string(2).map(|s| decode_ifc_string(s).to_string()).filter(|s| !s.is_empty()),
+            global_id: a.get_string(0).map(|s| s.to_string()),
+            layer: None,
+            color: None,
+            polylines: Vec::new(),
+        };
+        let Some(shape) = a.get_ref(6).and_then(|r| decoder.decode_by_id(r).ok()) else { continue };
+        for rep_id in shape.get_refs(2).unwrap_or_default() {
+            let Ok(rep) = decoder.decode_by_id(rep_id) else { continue };
+            if curves.layer.is_none() {
+                curves.layer = layer_of.get(&rep_id).cloned();
+            }
+            for item_id in rep.get_refs(3).unwrap_or_default() {
+                let Ok(item) = decoder.decode_by_id(item_id) else { continue };
+                let points: Vec<[f64; 3]> = match item.ifc_type {
+                    IfcType::IfcIndexedPolyCurve => {
+                        let Some(list) = item.get_ref(0).and_then(|r| decoder.decode_by_id(r).ok()) else { continue };
+                        list.get_list(0).unwrap_or_default().iter().filter_map(|v| coords(v.as_list()?)).collect()
+                    }
+                    IfcType::IfcPolyline => item.get_refs(0).unwrap_or_default().into_iter().filter_map(|r| decoder.get_cartesian_point_fast(r)).map(|(x, y, z)| [x, y, z]).collect(),
+                    _ => continue,
+                };
+                if points.len() < 2 || points.len() > budget {
+                    continue;
+                }
+                budget -= points.len();
+                if curves.color.is_none() {
+                    curves.color = color_of.get(&item_id).copied();
+                }
+                curves.polylines.push(points.into_iter().map(place).collect());
+            }
+        }
+        if !curves.polylines.is_empty() {
+            out.push(curves);
+        }
+    }
+    out
+}
+
+/// A point of a coordinate list: two or three numbers.
+fn coords(c: &[ifc_lite_core::AttributeValue]) -> Option<[f64; 3]> {
+    Some([c.first()?.as_float()?, c.get(1)?.as_float()?, c.get(2).and_then(|v| v.as_float()).unwrap_or(0.0)])
+}
+
+/// The colour of an `IfcCurveStyle` (or of one inside a style assignment), as sRGB.
+fn curve_colour(decoder: &mut ifc_lite_core::EntityDecoder, style: u32) -> Option<[u8; 4]> {
+    use ifc_lite_core::IfcType;
+    let s = decoder.decode_by_id(style).ok()?;
+    match s.ifc_type {
+        IfcType::IfcCurveStyle => {
+            let c = decoder.decode_by_id(s.get_ref(3)?).ok()?;
+            let v = |k: usize| (c.get_float(k).unwrap_or(0.0).clamp(0.0, 1.0) * 255.0).round() as u8;
+            Some([v(1), v(2), v(3), 255])
+        }
+        IfcType::IfcPresentationStyleAssignment => s.get_refs(0)?.into_iter().find_map(|r| curve_colour(decoder, r)),
+        _ => None,
+    }
+}
+
+fn grid_lines(content: &[u8], scale: f64) -> Vec<(String, [f64; 3], [f64; 3])> {
+    use ifc_lite_core::{decode_ifc_string, EntityDecoder, EntityScanner};
+    let mut scanner = EntityScanner::new(content);
+    let mut decoder = EntityDecoder::new(content);
+    let mut out = Vec::new();
+    while let Some((_, keyword, start, end)) = scanner.next_entity() {
+        if !keyword.eq_ignore_ascii_case("IFCGRID") {
+            continue;
+        }
+        let Ok(grid) = decoder.decode_at(start, end) else { continue };
+        let placement = match ifc_lite_geometry::placement::resolve_object_placement(&grid, &mut decoder) {
+            Ok(Some(m)) => glam::DMat4::from_cols_slice(m.as_slice()),
+            Ok(None) => glam::DMat4::IDENTITY,
+            Err(_) => continue,
+        };
+        let world = |p: [f64; 3]| (placement.transform_point3(glam::DVec3::from_array(p)) * scale).to_array();
+        // the U, V and W axes
+        for list in 7..=9 {
+            for id in grid.get_refs(list).unwrap_or_default() {
+                let Ok(axis) = decoder.decode_by_id(id) else { continue };
+                let tag = axis.get_string(0).map(|s| decode_ifc_string(s).trim().to_string()).unwrap_or_default();
+                let Some((a, b)) = axis.get_ref(1).and_then(|curve| curve_ends(&mut decoder, curve)) else { continue };
+                out.push((tag, world(a), world(b)));
+            }
+        }
+    }
+    out
+}
+
+/// The two ends of a grid axis's curve in its grid's frame (file units): a polyline's first and
+/// last point, or a trimmed line's trims (points, or parameters along its vector).
+fn curve_ends(decoder: &mut ifc_lite_core::EntityDecoder, curve: u32) -> Option<([f64; 3], [f64; 3])> {
+    use ifc_lite_core::IfcType;
+    let point = |decoder: &mut ifc_lite_core::EntityDecoder, id: u32| -> Option<[f64; 3]> {
+        let p = decoder.decode_by_id(id).ok()?;
+        let c = p.get_list(0)?;
+        Some([c.first()?.as_float()?, c.get(1)?.as_float()?, c.get(2).and_then(|v| v.as_float()).unwrap_or(0.0)])
+    };
+    let curve = decoder.decode_by_id(curve).ok()?;
+    match curve.ifc_type {
+        IfcType::IfcPolyline => {
+            let points = curve.get_refs(0)?;
+            Some((point(decoder, *points.first()?)?, point(decoder, *points.last()?)?))
+        }
+        IfcType::IfcTrimmedCurve => {
+            let line = decoder.decode_by_id(curve.get_ref(0)?).ok()?;
+            if line.ifc_type != IfcType::IfcLine {
+                return None;
+            }
+            let origin = glam::DVec3::from_array(point(decoder, line.get_ref(0)?)?);
+            let vector = decoder.decode_by_id(line.get_ref(1)?).ok()?;
+            let ratios = decoder.decode_by_id(vector.get_ref(0)?).ok()?;
+            let r = ratios.get_list(0)?;
+            let direction = glam::DVec3::new(r.first()?.as_float()?, r.get(1)?.as_float()?, r.get(2).and_then(|v| v.as_float()).unwrap_or(0.0));
+            let along = direction.normalize_or_zero() * vector.get_float(1).unwrap_or(1.0);
+            let mut trim = |list: usize| -> Option<[f64; 3]> {
+                let items = curve.get_list(list)?.to_vec();
+                // a point where there is one, else the parameter
+                if let Some(id) = items.iter().find_map(|v| v.as_entity_ref()) {
+                    return point(decoder, id);
+                }
+                let t = items.iter().find_map(|v| v.as_float())?;
+                Some((origin + along * t).to_array())
+            };
+            Some((trim(1)?, trim(2)?))
+        }
+        _ => None,
+    }
+}
+
+#[derive(Default)]
+struct ElementMaterials {
+    names: std::collections::HashMap<u32, String>,
+    layers: std::collections::HashMap<u32, (Option<String>, Vec<(String, f64)>)>,
+}
+
+/// Direct materials and the profiles of a steel section, in IFC attribute order.
+fn assigned_names(decoder: &mut ifc_lite_core::EntityDecoder, id: u32) -> Option<String> {
+    use ifc_lite_core::{decode_ifc_string, IfcType};
+    let material = decoder.decode_by_id(id).ok()?;
+    let ids = match material.ifc_type {
+        IfcType::IfcMaterial => return material.get_string(0).map(|s| decode_ifc_string(s).trim().to_owned()),
+        IfcType::IfcMaterialList => material.get_refs(0)?,
+        IfcType::IfcMaterialProfileSet | IfcType::IfcMaterialProfileSetUsage | IfcType::IfcMaterialProfileSetUsageTapering => {
+            let set = if material.ifc_type == IfcType::IfcMaterialProfileSet { material } else { decoder.decode_by_id(material.get_ref(0)?).ok()? };
+            set.get_refs(2)?.into_iter().filter_map(|id| decoder.decode_by_id(id).ok()?.get_ref(2)).collect()
+        }
+        _ => return None,
+    };
+    let names: std::collections::BTreeSet<_> = ids.into_iter().filter_map(|id| {
+        let material = decoder.decode_by_id(id).ok()?;
+        material.get_string(0).map(|s| decode_ifc_string(s).trim().to_owned()).filter(|s| !s.is_empty())
+    }).collect();
+    (!names.is_empty()).then(|| names.into_iter().collect::<Vec<_>>().join(", "))
+}
+
+fn element_materials(content: &[u8], scale: f64) -> ElementMaterials {
+    use ifc_lite_core::{decode_ifc_string, EntityDecoder, EntityScanner};
+    let mut scanner = EntityScanner::new(content);
+    let mut decoder = EntityDecoder::new(content);
+    let mut out = ElementMaterials::default();
+    let mut types = Vec::new();
+    while let Some((_, keyword, start, end)) = scanner.next_entity() {
+        if keyword.eq_ignore_ascii_case("IFCRELDEFINESBYTYPE") {
+            if let Ok(rel) = decoder.decode_at(start, end) {
+                if let (Some(ty), Some(ids)) = (rel.get_ref(5), rel.get_refs(4)) {
+                    types.extend(ids.into_iter().map(|id| (id, ty)));
+                }
+            }
+            continue;
+        }
+        if !keyword.eq_ignore_ascii_case("IFCRELASSOCIATESMATERIAL") {
+            continue;
+        }
+        let Ok(relation) = decoder.decode_at(start, end) else { continue };
+        let Some(material) = relation.get_ref(5) else { continue };
+        if let Some(name) = assigned_names(&mut decoder, material).filter(|s| !s.is_empty()) {
+            for id in relation.get_refs(4).unwrap_or_default() { out.names.insert(id, name.clone()); }
+            continue;
+        }
+        let Some(set) = layer_set(&mut decoder, material) else { continue };
+        let name = set.get_string(1).map(|s| decode_ifc_string(s).trim().to_string()).filter(|s| !s.is_empty());
+        let mut layers = Vec::new();
+        for id in set.get_refs(0).unwrap_or_default() {
+            let Ok(layer) = decoder.decode_by_id(id) else { continue };
+            let Some(thickness) = layer.get_float(1) else { continue };
+            let material = layer.get_ref(0).and_then(|m| decoder.decode_by_id(m).ok()).and_then(|m| m.get_string(0).map(|s| decode_ifc_string(s).trim().to_string()));
+            layers.push((material.unwrap_or_default(), thickness * scale));
+        }
+        if layers.is_empty() {
+            continue;
+        }
+        for element in relation.get_refs(4).unwrap_or_default() {
+            out.layers.insert(element, (name.clone(), layers.clone()));
+        }
+    }
+    for (id, ty) in types {
+        if let Some(name) = out.names.get(&ty).cloned() { out.names.entry(id).or_insert(name); }
+    }
+    out
+}
+
+/// The layer set `material` is or uses: an entity whose first attribute lists its layers, itself
+/// or the one its first attribute points to (a usage's `ForLayerSet`).
+fn layer_set(decoder: &mut ifc_lite_core::EntityDecoder, material: u32) -> Option<ifc_lite_core::DecodedEntity> {
+    let entity = decoder.decode_by_id(material).ok()?;
+    // a usage points to its set with one reference; a set lists its layers
+    let set = match entity.get_ref(0) {
+        Some(set) => decoder.decode_by_id(set).ok()?,
+        None => entity,
+    };
+    set.get_list(0).is_some().then_some(set)
+}
+
+/// The Z of a local placement's own offset (`IfcLocalPlacement` → `IfcAxis2Placement3D` →
+/// `IfcCartesianPoint`), in file units.
+fn placement_z(decoder: &mut ifc_lite_core::EntityDecoder, placement: u32) -> Option<f64> {
+    let placement = decoder.decode_by_id(placement).ok()?;
+    let axes = decoder.decode_by_id(placement.get_ref(1)?).ok()?;
+    let point = decoder.decode_by_id(axes.get_ref(0)?).ok()?;
+    point.get_list(0)?.get(2)?.as_float()
 }
 
 #[cfg(test)]
@@ -173,7 +652,26 @@ mod tests {
         let indices = vec![0,2,1, 0,3,2, 4,5,6, 4,6,7, 0,1,5, 0,5,4, 1,2,6, 1,6,5, 2,3,7, 2,7,6, 3,0,4, 3,4,7];
         let layer = Layer { name: "Box".into(), color: [0.8, 0.2, 0.1], positions, indices, ..Layer::default() };
         let model = Model::new("box.skp".into(), "SketchUp", vec![layer]);
-        crate::export::to_bytes(&model, "box.ifc").unwrap()
+        crate::export::to_bytes(&model, &crate::document::Document::from_model(&model), "box.ifc").unwrap()
+    }
+
+    #[test]
+    fn steel_materials_follow_the_profile_type_and_allow_an_occurrence_override() {
+        let step = b"ISO-10303-21;
+DATA;
+#1=IFCMATERIAL('S355J2',$,$);
+#2=IFCMATERIALPROFILE($,$,#1,$,$,$);
+#3=IFCMATERIALPROFILESET($,$,(#2),$);
+#4=IFCMATERIALPROFILESETUSAGE(#3,$,$);
+#5=IFCRELASSOCIATESMATERIAL('a',$,$,$,(#80),#4);
+#6=IFCRELDEFINESBYTYPE('b',$,$,$,(#70,#71),#80);
+#7=IFCMATERIAL('S235',$,$);
+#8=IFCRELASSOCIATESMATERIAL('c',$,$,$,(#71),#7);
+ENDSEC;
+END-ISO-10303-21;";
+        let materials = element_materials(step, 1.0);
+        assert_eq!(materials.names[&70], "S355J2");
+        assert_eq!(materials.names[&71], "S235");
     }
 
     #[test]
@@ -188,6 +686,10 @@ mod tests {
         }
         assert!(model.props.values().any(|p| p.contains("GlobalId") && p.contains("IfcType")));
         assert!(model.layers.iter().any(|l| l.colors.as_ref().is_some_and(|c| c.iter().any(|v| v[0] > v[1]))));
+        // the anchor the loader subtracted is kept as the model's origin, for combining
+        let anchor = model.origins[0].anchor.expect("an IFC keeps its anchor");
+        let text = format!("{}, {}, {}", anchor.x, anchor.y, anchor.z);
+        assert!(model.project.info.iter().any(|(k, v)| k == "IFC world origin (metres)" && *v == text), "{text}");
         assert!(crate::loaders::supported_extensions().contains(&"ifc"));
     }
 
@@ -201,6 +703,29 @@ mod tests {
         for (got, expected) in model.bounds.size().into_iter().zip([0.002, 0.003, 0.004]) {
             assert!((got - expected).abs() < 0.00001, "size {:?}", model.bounds.size());
         }
+    }
+
+    #[test]
+    fn opens_the_ifc_inside_an_ifczip() {
+        let mut zipped = std::io::Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(&mut zipped);
+        let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        writer.start_file("readme.txt", options).unwrap();
+        std::io::Write::write_all(&mut writer, b"not the model").unwrap();
+        writer.start_file("model/box.ifc", options).unwrap();
+        std::io::Write::write_all(&mut writer, &exported_box()).unwrap();
+        writer.finish().unwrap();
+        let source = Source::Bytes { name: "box.IFCZIP".into(), data: Arc::new(zipped.into_inner()) };
+        let model = crate::loaders::load_with(&source, &Progress::default()).expect("ifcZIP import");
+        assert_eq!(model.format, "IFC");
+        assert_eq!(model.triangle_count(), 12);
+        assert!(crate::loaders::supported_extensions().contains(&"ifczip"));
+        let mut no_ifc = std::io::Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(&mut no_ifc);
+        writer.start_file("readme.txt", options).unwrap();
+        writer.finish().unwrap();
+        let source = Source::Bytes { name: "empty.ifczip".into(), data: Arc::new(no_ifc.into_inner()) };
+        assert!(IfcLoader.load(&source).unwrap_err().contains("no .ifc file"));
     }
 
     #[test]
@@ -311,4 +836,145 @@ END-ISO-10303-21;"#;
         let props = model.props.get(&18).expect("pickable IFC wall");
         assert!(props.contains("Extruded wall") && props.contains("IfcWall"), "{props}");
     }
+
+    /// A building placed 10 m up its site with two storeys: the ground floor without an
+    /// `Elevation` (so its placement's 0 counts) and the first floor at 3 with a wall standing on
+    /// it, 3 high, and a grid placed 1 m east of the building: axes 1 and 2 at its x = 0 and 4
+    /// (polylines from y = -1 to 6), axis A at its y = 0 (a line trimmed by parameters, x = -1 to
+    /// 5), and the same grid again on the first floor, as Revit writes one per storey. Lengths are
+    /// given in `unit` (`$` metres, `.MILLI.` millimetres) times `scale`.
+    fn storeys_ifc(unit: &str, scale: f64) -> Vec<u8> {
+        let l = |v: f64| format!("{:.1}", v * scale);
+        format!(
+            r#"ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('ViewDefinition [ReferenceView]'),'2;1');
+FILE_NAME('storeys.ifc','2026-11-07T00:00:00',('OpenAEC'),('OpenAEC'),'test','test','');
+FILE_SCHEMA(('IFC4'));
+ENDSEC;
+DATA;
+#1=IFCCARTESIANPOINT((0.,0.,0.));
+#2=IFCDIRECTION((0.,0.,1.));
+#3=IFCDIRECTION((1.,0.,0.));
+#4=IFCAXIS2PLACEMENT3D(#1,#2,#3);
+#5=IFCGEOMETRICREPRESENTATIONCONTEXT($,'Model',3,1.E-5,#4,$);
+#6=IFCSIUNIT(*,.LENGTHUNIT.,{unit},.METRE.);
+#7=IFCUNITASSIGNMENT((#6));
+#8=IFCPROJECT('0YvctVUKr0kugbFTf53O9L',$,'Storeys',$,$,$,$,(#5),#7);
+#30=IFCLOCALPLACEMENT($,#4);
+#31=IFCSITE('2YvctVUKr0kugbFTf53O9L',$,'Site',$,$,#30,$,$,.ELEMENT.,$,$,$,$,$);
+#32=IFCCARTESIANPOINT((0.,0.,{building}));
+#33=IFCAXIS2PLACEMENT3D(#32,$,$);
+#34=IFCLOCALPLACEMENT(#30,#33);
+#35=IFCBUILDING('3YvctVUKr0kugbFTf53O9L',$,'Building',$,$,#34,$,$,.ELEMENT.,$,$,$);
+#36=IFCLOCALPLACEMENT(#34,#4);
+#37=IFCBUILDINGSTOREY('4YvctVUKr0kugbFTf53O9L',$,'00 Begane grond',$,$,#36,$,$,.ELEMENT.,$);
+#38=IFCCARTESIANPOINT((0.,0.,{first}));
+#39=IFCAXIS2PLACEMENT3D(#38,$,$);
+#40=IFCLOCALPLACEMENT(#34,#39);
+#41=IFCBUILDINGSTOREY('5YvctVUKr0kugbFTf53O9L',$,'01 Eerste verdieping \X2\00E9\X0\',$,$,#40,$,$,.ELEMENT.,{first});
+#42=IFCRELAGGREGATES('6YvctVUKr0kugbFTf53O9L',$,$,$,#8,(#31));
+#43=IFCRELAGGREGATES('7YvctVUKr0kugbFTf53O9L',$,$,$,#31,(#35));
+#44=IFCRELAGGREGATES('8YvctVUKr0kugbFTf53O9L',$,$,$,#35,(#41,#37));
+#9=IFCLOCALPLACEMENT(#40,#4);
+#10=IFCCARTESIANPOINT((0.,0.));
+#11=IFCAXIS2PLACEMENT2D(#10,$);
+#12=IFCRECTANGLEPROFILEDEF(.AREA.,'Wall',#11,{length},{thickness});
+#13=IFCEXTRUDEDAREASOLID(#12,#4,#2,{height});
+#14=IFCSHAPEREPRESENTATION(#5,'Body','SweptSolid',(#13));
+#15=IFCPRODUCTDEFINITIONSHAPE($,$,(#14));
+#16=IFCWALL('1YvctVUKr0kugbFTf53O9L',$,'Wall',$,$,#9,#15,$,.NOTDEFINED.);
+#45=IFCRELCONTAINEDINSPATIALSTRUCTURE('9YvctVUKr0kugbFTf53O9L',$,$,$,(#16),#41);
+#50=IFCCARTESIANPOINT(({one},0.,0.));
+#51=IFCAXIS2PLACEMENT3D(#50,$,$);
+#52=IFCLOCALPLACEMENT(#34,#51);
+#53=IFCCARTESIANPOINT((0.,{minus_one}));
+#54=IFCCARTESIANPOINT((0.,{six}));
+#55=IFCPOLYLINE((#53,#54));
+#56=IFCCARTESIANPOINT(({four},{minus_one}));
+#57=IFCCARTESIANPOINT(({four},{six}));
+#58=IFCPOLYLINE((#56,#57));
+#59=IFCCARTESIANPOINT((0.,0.));
+#60=IFCDIRECTION((2.,0.));
+#61=IFCVECTOR(#60,{one});
+#62=IFCLINE(#59,#61);
+#63=IFCTRIMMEDCURVE(#62,(IFCPARAMETERVALUE(-1.)),(IFCPARAMETERVALUE(5.)),.T.,.PARAMETER.);
+#64=IFCGRIDAXIS('1',#55,.T.);
+#65=IFCGRIDAXIS('2',#58,.T.);
+#66=IFCGRIDAXIS('A',#63,.T.);
+#67=IFCGRID('AYvctVUKr0kugbFTf53O9L',$,'Grid',$,$,#52,$,(#64,#65),(#66),$,.RECTANGULAR.);
+#68=IFCLOCALPLACEMENT(#40,#51);
+#69=IFCGRID('BYvctVUKr0kugbFTf53O9L',$,'Grid',$,$,#68,$,(#64,#65),(#66),$,.RECTANGULAR.);
+ENDSEC;
+END-ISO-10303-21;"#,
+            building = l(10.0),
+            first = l(3.0),
+            one = l(1.0),
+            minus_one = l(-1.0),
+            four = l(4.0),
+            six = l(6.0),
+            length = l(4.0),
+            thickness = l(0.2),
+            height = l(3.0),
+        )
+        .into_bytes()
+    }
+
+    fn load_bytes(name: &str, data: Vec<u8>) -> crate::model::Model {
+        let source = Source::Bytes { name: name.into(), data: Arc::new(data) };
+        crate::loaders::load_with(&source, &Progress::default()).expect("IFC import")
+    }
+
+    fn assert_levels(model: &crate::model::Model, expected: &[(&str, f32)]) {
+        let got = &model.project.levels;
+        assert_eq!(got.len(), expected.len(), "{got:?}");
+        for ((name, z), (want_name, want_z)) in got.iter().zip(expected) {
+            assert_eq!(name, want_name, "{got:?}");
+            assert!((z - want_z).abs() < 0.001, "{got:?}");
+        }
+    }
+
+    #[test]
+    fn reads_building_storeys_as_levels_in_the_frame_of_the_meshes() {
+        let model = load_bytes("storeys.ifc", storeys_ifc("$", 1.0));
+        // the building's 10 m counts; the wall stands on the first floor
+        assert_levels(&model, &[("00 Begane grond", 10.0), ("01 Eerste verdieping é", 13.0)]);
+        assert!((model.bounds.min[2] - 13.0).abs() < 0.001, "{:?}", model.bounds);
+    }
+
+    #[test]
+    fn reads_storey_elevations_in_millimetre_files_as_metres() {
+        let model = load_bytes("storeys-mm.ifc", storeys_ifc(".MILLI.", 1000.0));
+        assert_levels(&model, &[("00 Begane grond", 10.0), ("01 Eerste verdieping é", 13.0)]);
+    }
+
+    /// Grids are shown at the level nearest the building's zero (peil 0), as Revit's are.
+    #[test]
+    fn reads_grids_at_the_level_of_the_buildings_zero_in_metres_and_millimetres() {
+        for (name, unit, scale) in [("grids.ifc", "$", 1.0), ("grids-mm.ifc", ".MILLI.", 1000.0)] {
+            let model = load_bytes(name, storeys_ifc(unit, scale));
+            let grids = &model.project.grids;
+            let names: Vec<&str> = grids.iter().map(|g| g.name.as_str()).collect();
+            assert_eq!(names, ["1", "2", "A"], "{name}: the first floor's copy is the same grid");
+            let close = |p: [f32; 3], q: [f32; 3]| p.iter().zip(q).all(|(a, b)| (a - b).abs() < 0.001);
+            let ends = |i: usize| (grids[i].a, grids[i].b);
+            assert!(close(ends(0).0, [1.0, -1.0, 10.0]) && close(ends(0).1, [1.0, 6.0, 10.0]), "{name}: {grids:?}");
+            assert!(close(ends(1).0, [5.0, -1.0, 10.0]) && close(ends(1).1, [5.0, 6.0, 10.0]), "{name}: {grids:?}");
+            assert!(close(ends(2).0, [0.0, 0.0, 10.0]) && close(ends(2).1, [6.0, 0.0, 10.0]), "{name}: {grids:?}");
+        }
+    }
+
+    #[test]
+    fn levels_saved_as_ifc_read_back_as_the_same_levels() {
+        let positions = vec![0.,0.,3., 2.,0.,3., 2.,3.,3., 0.,3.,3., 0.,0.,6., 2.,0.,6., 2.,3.,6., 0.,3.,6.];
+        let indices = vec![0,2,1, 0,3,2, 4,5,6, 4,6,7, 0,1,5, 0,5,4, 1,2,6, 1,6,5, 2,3,7, 2,7,6, 3,0,4, 3,4,7];
+        let layer = Layer { name: "Box".into(), positions, indices, ..Layer::default() };
+        let mut model = Model::new("levels.skp".into(), "SketchUp", vec![layer]);
+        model.project.levels = vec![("Level 0".into(), 0.0), ("Level 1".into(), 3.0), ("Roof".into(), 6.5)];
+        let document = crate::document::Document::from_model(&model);
+        let bytes = crate::export::to_bytes(&model, &document, "levels.ifc").unwrap();
+        let model = load_bytes("levels.ifc", bytes);
+        assert_levels(&model, &[("Level 0", 0.0), ("Level 1", 3.0), ("Roof", 6.5)]);
+    }
 }
+

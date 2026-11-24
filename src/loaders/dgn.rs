@@ -43,7 +43,7 @@ pub fn read(data: &[u8]) -> Result<Loaded, String> {
     }).collect();
     let mut project = ProjectData::default();
     project.info = scene.info;
-    Ok(Loaded { layers, views: Vec::new(), project })
+    Ok(Loaded { structural: Vec::new(), origin: None, layers, views: Vec::new(), project })
 }
 
 /// Files written in the tests from the clean-room specification (`dgn_read::synth`): V7 from the

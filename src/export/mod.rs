@@ -2,12 +2,27 @@
 //! [`save`] picks the writer by extension.
 //!
 //! To add a format: implement [`Writer`] in a new module and add it to [`registry`].
+//!
+//! The drawings of views and sheets ([`crate::drawing2d`]) are exported apart from the model:
+//! [`cad`] (DWG, DXF, IFCCAD), [`pdf`] and [`svg`] (SVG, PNG). Schedules go to a workbook ([`xlsx`]).
 
-mod ifc;
+pub mod cad;
+pub mod drawing;
+pub(crate) mod ifc;
+pub(crate) mod ifcx;
+pub mod pdf;
+mod pdf_font;
+pub mod report;
+pub mod svg;
+pub mod xlsx;
 
+pub use ifc::Schema as IfcSchema;
+
+use crate::document::Document;
 use crate::model::Model;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 /// A file format writer.
 pub trait Writer: Send + Sync {
@@ -19,13 +34,15 @@ pub trait Writer: Send + Sync {
     fn mime(&self) -> &'static str {
         "application/octet-stream"
     }
-    /// Writes the model as the file `file_name` to `out`.
-    fn write(&self, model: &Model, file_name: &str, out: &mut dyn io::Write) -> io::Result<()>;
+    /// Writes the model, with what the document adds to it (levels), as the file `file_name` to
+    /// `out`.
+    fn write(&self, model: &Model, document: &Document, file_name: &str, out: &mut dyn io::Write) -> io::Result<()>;
 }
 
-/// All available writers, in the order of the save dialog's filters.
+/// All available writers, in the order of the save dialog's filters; the first is the default,
+/// IFCX, the viewer's own project file (model, levels and drawings).
 pub fn registry() -> Vec<Box<dyn Writer>> {
-    vec![Box::new(ifc::IfcWriter)]
+    vec![Box::new(ifcx::IfcxWriter), Box::new(ifc::IfcWriter)]
 }
 
 /// The writer for the extension of `file_name`.
@@ -40,32 +57,91 @@ pub fn writer_for(file_name: &str) -> Result<Box<dyn Writer>, String> {
         .ok_or_else(|| format!("Cannot save as .{ext}"))
 }
 
-/// Saves a model with the writer matching the extension of `path`. Writes next to the target and
-/// renames, so a failed save leaves no half file behind.
-pub fn save(model: &Model, path: &Path) -> Result<(), String> {
+/// The writer for the extension of `file_name`, a `.ifc` in `ifc`'s schema.
+pub fn writer_for_schema(file_name: &str, ifc: IfcSchema) -> Result<Box<dyn Writer>, String> {
+    let writer = writer_for(file_name)?;
+    Ok(if ifc == IfcSchema::Ifc4x3 && writer.extensions() == ["ifc"] { Box::new(ifc::Ifc4x3Writer) } else { writer })
+}
+
+/// Saves a model with the writer matching the extension of `path`, through [`write_file`]: a failed
+/// save leaves no half file behind, and an existing file is only replaced when `replace`.
+pub fn save(model: &Model, document: &Document, path: &Path, replace: bool) -> Result<(), String> {
+    save_schema(model, document, path, replace, IfcSchema::Ifc4)
+}
+
+/// As [`save`], a `.ifc` in `ifc`'s schema.
+pub fn save_schema(model: &Model, document: &Document, path: &Path, replace: bool, ifc: IfcSchema) -> Result<(), String> {
     let file_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let writer = writer_for(&file_name)?;
+    let writer = writer_for_schema(&file_name, ifc)?;
+    write_file(path, replace, |out| writer.write(model, document, &file_name, out)).map_err(|e| format!("Cannot save {file_name}: {e}"))
+}
+
+/// The temporary files of the writes under way, so a stop (SIGTERM) can wait for them or clean up.
+static WRITING: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+/// The temporary files of the writes under way.
+pub fn writing() -> Vec<PathBuf> {
+    WRITING.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Writes `path` through a temporary file next to it (`<path>.part`) that is renamed into place at
+/// the end, so a failed write leaves no half file. The temporary file is always a new one, never
+/// written through a link someone left at its name. Without `replace`, a file at `path` is never
+/// replaced, also not one made while writing (a large model takes minutes to save).
+pub fn write_file(path: &Path, replace: bool, write: impl FnOnce(&mut dyn io::Write) -> io::Result<()>) -> io::Result<()> {
     let mut part = path.as_os_str().to_owned();
     part.push(".part");
     let part = PathBuf::from(part);
-    let written = (|| -> io::Result<()> {
-        let mut out = io::BufWriter::with_capacity(1 << 20, std::fs::File::create(&part)?);
-        writer.write(model, &file_name, &mut out)?;
-        out.into_inner().map_err(|e| e.into_error())?.sync_all()
-    })();
-    match written.and_then(|()| std::fs::rename(&part, path)) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = std::fs::remove_file(&part);
-            Err(format!("Cannot save {file_name}: {e}"))
+    let create = || std::fs::OpenOptions::new().write(true).create_new(true).open(&part);
+    let file = match create() {
+        // left by a stop, or a link: remove that name itself (not what a link leads to)
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            std::fs::remove_file(&part)?;
+            create()?
         }
+        other => other?,
+    };
+    WRITING.lock().unwrap_or_else(|e| e.into_inner()).push(part.clone());
+    let written = (|| {
+        let mut out = io::BufWriter::with_capacity(1 << 20, file);
+        write(&mut out)?;
+        out.into_inner().map_err(|e| e.into_error())?.sync_all()?;
+        put_in_place(&part, path, replace)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&part);
+    }
+    WRITING.lock().unwrap_or_else(|e| e.into_inner()).retain(|p| *p != part);
+    written
+}
+
+fn put_in_place(part: &Path, path: &Path, replace: bool) -> io::Result<()> {
+    if replace {
+        return std::fs::rename(part, path);
+    }
+    let exists = || io::Error::new(io::ErrorKind::AlreadyExists, format!("{} exists (made while writing); nothing replaced", path.display()));
+    // a hard link is never made over anything at `path`, which a rename would replace
+    match std::fs::hard_link(part, path) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(part);
+            Ok(())
+        }
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(exists()),
+        // a file system without hard links: check, then rename
+        Err(_) if path.symlink_metadata().is_ok() => Err(exists()),
+        Err(_) => std::fs::rename(part, path),
     }
 }
 
 /// The model as the file `file_name`, in memory (the web app hands it to the browser).
-pub fn to_bytes(model: &Model, file_name: &str) -> Result<Vec<u8>, String> {
+pub fn to_bytes(model: &Model, document: &Document, file_name: &str) -> Result<Vec<u8>, String> {
+    to_bytes_schema(model, document, file_name, IfcSchema::Ifc4)
+}
+
+/// As [`to_bytes`], a `.ifc` in `ifc`'s schema.
+pub fn to_bytes_schema(model: &Model, document: &Document, file_name: &str, ifc: IfcSchema) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
-    writer_for(file_name)?.write(model, file_name, &mut out).map_err(|e| format!("Cannot save {file_name}: {e}"))?;
+    writer_for_schema(file_name, ifc)?.write(model, document, file_name, &mut out).map_err(|e| format!("Cannot save {file_name}: {e}"))?;
     Ok(out)
 }
 
@@ -78,6 +154,13 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel)
     }
 
+    /// Save as offers IFCX first, the viewer's own project file; IFC stays a choice.
+    #[test]
+    fn ifcx_is_the_default_save_format() {
+        let formats: Vec<&str> = super::registry().iter().map(|w| w.extensions()[0]).collect();
+        assert_eq!(formats, ["ifcx", "ifc"]);
+    }
+
     /// Every test model of the repository (all formats the viewer opens) saves as IFC.
     #[test]
     fn saves_test_models_as_ifc() {
@@ -87,14 +170,132 @@ mod tests {
         for entry in std::fs::read_dir(repo_file("test-models")).unwrap() {
             let path = entry.unwrap().path();
             let Ok(model) = loaders::load(&path) else { continue };
+            // point clouds are left out of IFC: nothing to save
+            if model.triangle_count() == 0 {
+                continue;
+            }
             let out = dir.join(path.file_stem().unwrap()).with_extension("ifc");
-            super::save(&model, &out).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            super::save(&model, &crate::document::Document::from_model(&model), &out, true).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
             let text = std::fs::read_to_string(&out).unwrap();
             assert!(text.starts_with("ISO-10303-21;") && text.trim_end().ends_with("END-ISO-10303-21;"));
             assert!(text.contains("IFCTRIANGULATEDFACESET("), "{}: no geometry", path.display());
+            // and as IFC 4x3
+            super::save_schema(&model, &crate::document::Document::from_model(&model), &out, true, super::IfcSchema::Ifc4x3).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            let text = std::fs::read_to_string(&out).unwrap();
+            assert!(text.contains("FILE_SCHEMA(('IFC4X3_ADD2'));") && text.contains("IFCTRIANGULATEDFACESET("), "{}", path.display());
             saved += 1;
         }
         let _ = std::fs::remove_dir_all(&dir);
         assert!(saved >= 3, "only {saved} test models saved");
+    }
+
+    /// Every Rhino test model saves as IFC: polysurfaces, extrusions, meshes and SubD as
+    /// IfcBuildingElementProxy with their Rhino object type and id, curves, texts and hatches as
+    /// IfcAnnotation (curves as polylines), each with its Rhino properties.
+    #[test]
+    fn saves_rhino_models_as_ifc() {
+        let dir = std::env::temp_dir().join(format!("o3v-rhino-ifc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut saved = 0;
+        for entry in std::fs::read_dir(repo_file("test-models/rhino")).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|e| e != "3dm") {
+                continue;
+            }
+            let model = loaders::load(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            let out = dir.join(path.file_stem().unwrap()).with_extension("ifc");
+            super::save(&model, &crate::document::Document::from_model(&model), &out, true).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            let text = std::fs::read_to_string(&out).unwrap();
+            assert!(text.trim_end().ends_with("END-ISO-10303-21;"), "{}", path.display());
+            // triangles, or only curves (linetypes.3dm) as polylines
+            let geometry = text.contains("IFCTRIANGULATEDFACESET(") || text.contains("=IFCINDEXEDPOLYCURVE(");
+            assert!(geometry, "{}: no geometry", path.display());
+            assert!(text.contains("IFCPROPERTYSET(") && text.contains("'Rhino'"), "{}: no Rhino properties", path.display());
+            if path.file_stem().is_some_and(|s| s == "lights") {
+                // five lights with a place, as annotations; the box a proxy
+                assert_eq!(text.matches("=IFCANNOTATION(").count(), 5, "{}", path.display());
+                assert_eq!(text.matches("=IFCBUILDINGELEMENTPROXY(").count(), 1, "{}", path.display());
+            }
+            if path.file_stem().is_some_and(|s| s == "clipping") {
+                assert_eq!(text.matches("=IFCANNOTATION(").count(), 3, "{}", path.display());
+            }
+            if path.file_stem().is_some_and(|s| s == "drafting") {
+                // 7 curves, 6 texts and 5 hatches
+                assert_eq!(text.matches("=IFCANNOTATION(").count(), 18);
+                assert!(text.matches("=IFCINDEXEDPOLYCURVE(").count() >= 7);
+                assert!(text.contains("'Annotation','Curve3D'") && text.contains("'Annotation','Tessellation'"));
+                assert!(text.contains("IFCCURVESTYLE("));
+                assert!(!text.contains("=IFCBUILDINGELEMENTPROXY("));
+            }
+            // read back, the curves are lines again: of their elements, in their places
+            if path.file_stem().is_some_and(|s| s == "drafting" || s == "linetypes") {
+                let back = loaders::load(&out).unwrap_or_else(|e| panic!("{}: {e}", out.display()));
+                let lines: usize = back.layers.iter().map(|l| l.lines.len() / 2).sum();
+                let curve_elements: usize = back.layers.iter().map(|l| l.line_elements.len()).sum();
+                let before: usize = model.layers.iter().map(|l| l.lines.len() / 2).sum();
+                assert_eq!(lines, before, "{}: line segments read back", path.display());
+                assert!(curve_elements >= 7, "{}: {curve_elements} curve elements", path.display());
+                let size = |m: &crate::model::Model| m.bounds.size();
+                let (a, b) = (size(&model), size(&back));
+                assert!((0..3).all(|k| (a[k] - b[k]).abs() < 1e-4), "{}: {a:?} against {b:?}", path.display());
+            }
+            if path.file_stem().is_some_and(|s| s == "dimensions") {
+                // 9 dimensions, 2 leaders and 2 circles (curves)
+                assert_eq!(text.matches("=IFCANNOTATION(").count(), 13);
+                assert!(text.contains("'Dimension'") && text.contains("'Leader'"));
+            }
+            // the triangles of a small model (the stair is 4.4 mm high) are not lost to the
+            // coordinate grid
+            if path.file_stem().is_some_and(|s| s == "stairs") {
+                let written: usize = text
+                    .split("IFCTRIANGULATEDFACESET(")
+                    .skip(1)
+                    .map(|set| set.split(",$)").next().unwrap_or("").matches("),(").count() + 1)
+                    .sum();
+                let drawn = model.triangle_count();
+                assert!(written as f64 >= 0.98 * drawn as f64, "stairs: {written} of {drawn} triangles written");
+            }
+            if path.file_stem().is_some_and(|s| s == "primitives") {
+                assert!(text.contains("=IFCBUILDINGELEMENTPROXY(") && text.contains("'Polysurface'"), "object type");
+                assert!(!text.contains("=IFCANNOTATION("));
+            }
+            saved += 1;
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(saved >= 10, "only {saved} Rhino models saved");
+    }
+
+    /// Files are written new and put in place at the end: an existing file only with `replace`,
+    /// and never through a link left at the temporary name.
+    #[test]
+    fn writes_new_files_and_replaces_only_when_asked() {
+        let dir = std::env::temp_dir().join(format!("o3v-write-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.ifc");
+        let write = |text: &'static [u8]| move |out: &mut dyn std::io::Write| out.write_all(text);
+        super::write_file(&path, false, write(b"one")).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"one");
+        // made while a save without overwrite ran: kept
+        let err = super::write_file(&path, false, write(b"two")).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&path).unwrap(), b"one");
+        super::write_file(&path, true, write(b"three")).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"three");
+        // a stale temporary file is no obstacle, and nothing is left behind
+        std::fs::write(dir.join("b.ifc.part"), b"stale").unwrap();
+        super::write_file(&dir.join("b.ifc"), false, write(b"b")).unwrap();
+        #[cfg(unix)]
+        {
+            let outside = dir.join("outside");
+            std::fs::write(&outside, b"keep").unwrap();
+            std::os::unix::fs::symlink(&outside, dir.join("c.ifc.part")).unwrap();
+            super::write_file(&dir.join("c.ifc"), false, write(b"c")).unwrap();
+            assert_eq!(std::fs::read(&outside).unwrap(), b"keep", "written through the link");
+            assert_eq!(std::fs::read(dir.join("c.ifc")).unwrap(), b"c");
+        }
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.path().extension().is_some_and(|x| x == "part")).collect();
+        assert!(left.is_empty(), "{left:?}");
+        assert!(!super::writing().iter().any(|p| p.starts_with(&dir)));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

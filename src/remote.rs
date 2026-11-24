@@ -8,9 +8,10 @@ use crate::app::{face_at, pick_triangle, App, Message, Status};
 use crate::explode::ExplodeMode;
 use crate::model::{Bounds, Model, ViewKind};
 use crate::remote_link::{self, Announcement};
+use crate::selection::Pickable;
 use crate::section::{SectionBox, SectionPlane};
 use crate::viewport::camera::ViewPreset;
-use crate::viewport::render::RenderMode;
+use crate::viewport::render::{transform_bounds, RenderMode};
 use glam::Vec3;
 use iced::futures::{SinkExt, Stream, StreamExt};
 use iced::{window, Task};
@@ -61,6 +62,8 @@ pub struct RemoteState {
     pub pending_load: Vec<RemoteCall>,
     /// `screenshot` calls waiting for the capture.
     pub pending_shots: Vec<RemoteCall>,
+    /// `save_file` calls waiting until the file is written.
+    pub pending_save: Vec<RemoteCall>,
     /// Size of the last viewport screenshot handed out: screen coordinates in commands are in its
     /// pixels.
     pub shot_image: Option<(u32, u32)>,
@@ -101,9 +104,14 @@ const LINK_CHANGED: &str = "_link";
 pub fn serve() -> impl Stream<Item = Message> {
     iced::stream::channel(16, async |mut output| {
         let (tx, mut rx) = iced::futures::channel::mpsc::unbounded::<RemoteCall>();
+        // the HTTP endpoint does not need the control port: it keeps its commands coming when
+        // that cannot be bound or announced (no settings folder, port taken)
+        let http = start_mcp_http(&tx);
         if let Err(e) = listen(tx) {
             eprintln!("remote control: {e}");
-            return;
+            if !http {
+                return;
+            }
         }
         while let Some(call) = rx.next().await {
             if output.send(Message::Remote(call)).await.is_err() {
@@ -111,6 +119,45 @@ pub fn serve() -> impl Stream<Item = Message> {
             }
         }
     })
+}
+
+/// The MCP endpoint over HTTP to start with the control port (OpenAEC SuperCloud), if any.
+#[cfg(not(target_arch = "wasm32"))]
+static MCP_HTTP: Mutex<Option<crate::mcp::HttpConfig>> = Mutex::new(None);
+
+/// Serves MCP over HTTP from this viewer, besides the control port: the same tools as
+/// `open-3d-viewer-mcp`, with the SuperCloud's names, and every call goes through
+/// [`App::remote`] as a call from the MCP server does.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn serve_mcp_http(config: crate::mcp::HttpConfig) {
+    *MCP_HTTP.lock().unwrap_or_else(|e| e.into_inner()) = Some(config);
+}
+
+/// Starts the MCP endpoint over HTTP, if one is set; whether it serves.
+#[cfg(not(target_arch = "wasm32"))]
+fn start_mcp_http(tx: &iced::futures::channel::mpsc::UnboundedSender<RemoteCall>) -> bool {
+    let Some(config) = MCP_HTTP.lock().unwrap_or_else(|e| e.into_inner()).take() else { return false };
+    let tx = Mutex::new(tx.clone());
+    let served = config.serve(move |body| {
+        let tx = tx.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        crate::mcp::handle_text(body, true, &mut |cmd: &str, args: &Value, timeout| {
+            let (call, rx) = RemoteCall::new(cmd, args.clone());
+            tx.unbounded_send(call).map_err(|_| "the viewer is closing".to_string())?;
+            rx.recv_timeout(timeout).unwrap_or_else(|e| match e {
+                mpsc::RecvTimeoutError::Timeout => Err(format!("the viewer did not answer within {} s", timeout.as_secs())),
+                mpsc::RecvTimeoutError::Disconnected => Err("the viewer dropped the command".to_string()),
+            })
+        })
+    });
+    if let Err(e) = &served {
+        eprintln!("MCP over HTTP: {e}");
+    }
+    served.is_ok()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn start_mcp_http(_: &iced::futures::channel::mpsc::UnboundedSender<RemoteCall>) -> bool {
+    false
 }
 
 fn listen(tx: iced::futures::channel::mpsc::UnboundedSender<RemoteCall>) -> std::io::Result<()> {
@@ -192,6 +239,48 @@ fn flag(a: &Value, key: &str) -> Option<bool> {
     a.get(key)?.as_bool()
 }
 
+/// The most entries a listing gives in one answer.
+const MAX_LIST: usize = 200;
+
+/// `offset` and `limit` of a listing: `limit` defaults to `default` and is at most `max`, so an
+/// answer stays small for the assistant (the SuperCloud contract asks for at most about 30,000
+/// characters); the rest comes with a next `offset`.
+pub(crate) fn page(a: &Value, default: usize, max: usize) -> (usize, usize) {
+    let offset = a.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let limit = a.get("limit").and_then(Value::as_u64).map_or(default, |l| l as usize).min(max);
+    (offset, limit)
+}
+
+/// One page of `items` as `{total, offset, returned, truncated, <key>: [...]}`.
+pub(crate) fn paged(key: &str, items: Vec<Value>, (offset, limit): (usize, usize)) -> Value {
+    let total = items.len();
+    let shown: Vec<Value> = items.into_iter().skip(offset).take(limit).collect();
+    let mut out = json!({ "total": total, "offset": offset, "returned": shown.len(), "truncated": offset.saturating_add(shown.len()) < total });
+    out[key] = Value::Array(shown);
+    out
+}
+
+/// A path from a remote client: in the work folder of the SuperCloud (`managed::confine`).
+fn confine(path: &str) -> Result<PathBuf, String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    return crate::managed::confine(std::path::Path::new(path));
+    #[cfg(target_arch = "wasm32")]
+    Ok(PathBuf::from(path))
+}
+
+/// Where a screenshot's `save_to` writes: a `.png` in the work folder, and an existing file only
+/// with `overwrite`, as `save_file` (so a screenshot never replaces a model).
+fn shot_target(path: &Value, a: &Value) -> Result<PathBuf, String> {
+    let path = confine(path.as_str().ok_or("save_to must be a path")?)?;
+    if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("png")) {
+        return Err(format!("save_to {}: a screenshot is saved as .png", path.display()));
+    }
+    if path.symlink_metadata().is_ok() && !flag(a, "overwrite").unwrap_or(false) {
+        return Err(format!("{} exists; pass overwrite: true to replace it, or another path", path.display()));
+    }
+    Ok(path)
+}
+
 fn vec3(v: &Value) -> Option<Vec3> {
     match v {
         Value::Array(a) if a.len() == 3 => Some(Vec3::new(a[0].as_f64()? as f32, a[1].as_f64()? as f32, a[2].as_f64()? as f32)),
@@ -229,6 +318,7 @@ fn mode_name(m: RenderMode) -> &'static str {
         RenderMode::Solid => "solid",
         RenderMode::Wireframe => "wireframe",
         RenderMode::SolidEdges => "edges",
+        RenderMode::HiddenLine => "hidden",
     }
 }
 
@@ -262,8 +352,13 @@ impl App {
     /// Runs a remote command. Most answer at once; `open_file` answers when the model is in and
     /// `screenshot` when the window is captured.
     pub fn remote(&mut self, call: RemoteCall) -> Task<Message> {
+        if !self.annotates && (matches!(call.cmd.as_str(), "save_file" | "place_model_point" | "drag_handle" | "tool_type" | "click_drawing" | "element_drawings") || call.cmd.starts_with("collab_")) {
+            call.answer(Err("The Viewer is read-only.".into()));
+            return Task::none();
+        }
         match call.cmd.as_str() {
             "open_file" => return self.remote_open(call),
+            "save_file" => return self.remote_save(call),
             "get_schedule" => {
                 let (answer, task) = self.remote_schedule(&call.args);
                 call.answer(answer);
@@ -274,7 +369,31 @@ impl App {
                 call.answer(answer);
                 return task;
             }
+            #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
+            "collab_export" if matches!(call.args.get("kind").and_then(|v| v.as_str()), Some("pdf" | "issues_pdf")) => {
+                let (answer, task) = self.collab_pdf_remote(&call.args);
+                call.answer(answer);
+                return task;
+            }
+            #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
+            "collab_clashes" if matches!(call.args.get("action").and_then(|v| v.as_str()), None | Some("run" | "")) && call.args.get("selection").and_then(|v| v.as_bool()) == Some(true) => {
+                let (answer, task) = self.collab_selection_run();
+                call.answer(answer);
+                return task;
+            }
+            // an issue made of clashes takes its picture after the answer
+            #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
+            "collab_clashes" if matches!(call.args.get("action").and_then(|v| v.as_str()), Some("issue" | "issues")) => {
+                let (answer, task) = self.collab_clash_issue_remote(&call.args);
+                call.answer(answer);
+                return task;
+            }
             "screenshot" => {
+                // a wrong save_to is refused before the capture
+                if let Some(Err(e)) = call.args.get("save_to").map(|p| shot_target(p, &call.args)) {
+                    call.answer(Err(e));
+                    return Task::none();
+                }
                 self.finish_animation();
                 self.remote.pending_shots.push(call);
                 if self.remote.pending_shots.len() > 1 {
@@ -294,7 +413,7 @@ impl App {
         Task::none()
     }
 
-    fn finish_animation(&mut self) {
+    pub(crate) fn finish_animation(&mut self) {
         if let Some((_, to, _)) = self.anim.take() {
             self.camera = to;
         }
@@ -307,18 +426,151 @@ impl App {
             "get_state" => Ok(self.state_json()),
             "list_layers" => self.list_layers(a),
             "set_layer_visibility" => self.set_layer_visibility(a),
-            "list_views" => self.list_views(),
+            "list_views" => self.list_views(a),
             "apply_view" => self.remote_apply_view(a),
-            "get_project_info" => self.project_info(),
+            "get_project_info" => self.project_info(a),
             "list_schedules" => self.schedules_json(),
             "list_sheets" => self.sheets_json(),
             "find_elements" => self.find_elements(a),
+            "list_structural" => crate::structural::remote::list(&*self.require_model()?),
+            "get_structural_issues" => crate::structural::remote::issues(&*self.require_model()?, a),
+            "get_structural_element" => crate::structural::remote::element(&*self.require_model()?, a, &self.model_matrix()),
+            "find_structural" => crate::structural::remote::find(&*self.require_model()?, a, &self.model_matrix()),
             "get_element" => {
                 let id = a.get("id").and_then(id_of).ok_or("id is required")?;
                 self.element_json(id)
             }
             "select" => self.remote_select(a),
+            "hide_elements" => self.remote_hide(a, Message::HideSelection),
+            "isolate_elements" => self.remote_hide(a, Message::IsolateSelection),
+            "show_all_elements" => {
+                let _ = self.update(Message::ShowAllElements);
+                Ok(self.visibility_json())
+            }
+            "undo" => {
+                let _ = self.update(Message::Undo);
+                Ok(self.visibility_json())
+            }
+            "redo" => {
+                let _ = self.update(Message::Redo);
+                Ok(self.visibility_json())
+            }
+            "place_model_point" => self.place_model_point(a.get("x").and_then(Value::as_f64).ok_or("x in metres required")?, a.get("y").and_then(Value::as_f64).ok_or("y in metres required")?),
             "pick" => self.remote_pick(a),
+            "place_cursor" => {
+                let (x, y) = (num(a, "x").ok_or("x is required")?, num(a, "y").ok_or("y is required")?);
+                if !self.has_cursor3d() {
+                    return Err("the 3D cursor is the Modeller's, on a modelled project".into());
+                }
+                let (vx, vy) = self.to_viewport(x, y);
+                let (w, h) = self.viewport_size;
+                let _ = self.update(Message::Navigate(crate::viewport::Navigate::Cursor3d { x: vx, y: vy, width: w, height: h }));
+                Ok(json!({ "cursor": self.modeller.cursor3d.at.to_array() }))
+            }
+            "click_drawing" => {
+                let points: Vec<(f32, f32)> = a.get("points").and_then(Value::as_array).map(|l| l.iter().filter_map(Self::screen_xy).map(|(x, y)| self.to_viewport(x, y)).collect()).unwrap_or_default();
+                if points.is_empty() {
+                    return Err("points: [[x, y], ...] is required".into());
+                }
+                let sent = self.click_marks(&points).ok_or("no drawing is shown: open a floor plan, a section or an elevation first (open_drawing)")?;
+                Ok(json!({ "clicks": points.len(), "messages": sent }))
+            }
+            "drag_handle" => self.remote_drag_handle(a),
+            "drag" => {
+                let point = |key: &str| -> Result<(f32, f32), String> {
+                    let p = a.get(key).and_then(|v| v.as_array()).filter(|p| p.len() == 2).ok_or_else(|| format!("{key} is required: [x, y]"))?;
+                    Ok((p[0].as_f64().ok_or("a number")? as f32, p[1].as_f64().ok_or("a number")? as f32))
+                };
+                let ((x0, y0), (x1, y1)) = (point("from")?, point("to")?);
+                if !self.drag_selects() {
+                    return Err("a drag selects only in the Modeller with the Select tool on: switch the tool that is on off first".into());
+                }
+                let add = a.get("add").and_then(|v| v.as_bool()).unwrap_or(false);
+                let (width, height) = self.viewport_size;
+                let grids_before = self.modeller.model.grids().to_vec();
+                for done in [false, true] {
+                    let _ = self.update(Message::Navigate(crate::viewport::Navigate::Box { x0, y0, x1, y1, width, height, done, add }));
+                }
+                let moved = self.modeller.model.grids() != grids_before.as_slice();
+                Ok(json!({ "moved_grid_lines": moved, "selected_elements": self.sel.items().len(), "picked_grid_lines": self.grids_picked() }))
+            }
+            "open_drawing" => {
+                // the project's own drawings: its floor plans, sections and elevations, and sheets
+                let plans = self.document.plans().iter().map(|p| ("plan", p.name.clone(), p.path.clone()));
+                let sections = self.document.sections().iter().map(|s| ("section", s.name.clone(), s.path.clone()));
+                let sheets = self.document.sheets().iter().map(|s| ("sheet", s.title.clone(), s.path.clone()));
+                let all: Vec<(&str, String, String)> = plans.chain(sections).chain(sheets).collect();
+                let Some(name) = a.get("name").and_then(|v| v.as_str()) else {
+                    let drafts = self.model.as_ref().map(|m| m.project.drafts.iter().map(|d| json!({ "kind": "2d drawing", "name": d.name })).collect::<Vec<_>>()).unwrap_or_default();
+                    return Ok(json!({ "drawings": all.iter().map(|(kind, name, _)| json!({ "kind": kind, "name": name })).chain(drafts).collect::<Vec<_>>() }));
+                };
+                let wanted = name.to_lowercase();
+                let found = all.iter().find(|d| d.1.to_lowercase() == wanted).or_else(|| all.iter().find(|d| d.1.to_lowercase().contains(&wanted)));
+                // else a drawing the model's file holds without a model: a legend, a drafting
+                // view, a 2D drawing
+                if found.is_none() {
+                    let drafts = self.model.as_ref().map(|m| m.project.drafts.iter().map(|d| d.name.to_lowercase()).collect::<Vec<_>>()).unwrap_or_default();
+                    if let Some(i) = drafts.iter().position(|d| *d == wanted).or_else(|| drafts.iter().position(|d| d.contains(&wanted))) {
+                        let _ = self.update(Message::OpenDraft(i));
+                        return Ok(json!({ "opened": drafts[i], "kind": "2d drawing" }));
+                    }
+                }
+                let (kind, name, path) = found.ok_or_else(|| format!("no drawing named '{name}'; call open_drawing without a name to list them"))?.clone();
+                let message = if kind == "sheet" { Message::OpenDocSheet(path.as_str().into()) } else { Message::OpenPlan(path.as_str().into()) };
+                let _ = self.update(message);
+                Ok(json!({ "opened": name, "kind": kind }))
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            "export_drawing" => {
+                let path = a.get("path").and_then(|v| v.as_str()).ok_or("path is required")?;
+                let bytes = self.export_shown_to(std::path::Path::new(path))?;
+                Ok(json!({ "saved": path, "bytes": bytes }))
+            }
+            "tool_type" => {
+                let language = a.get("language").and_then(|v| v.as_str()).and_then(openaec_ui::Language::from_code).unwrap_or(openaec_ui::Language::English);
+                let (types, picked) = self.tool_types(language).ok_or("no tool with types is on: press a tool of the Modeller first (Wall, Slab, Column, Beam, Curtain wall)")?;
+                let listed = |picked: &Option<String>| json!({ "picked": picked, "types": types.iter().map(|(id, name)| json!({ "id": id, "name": name })).collect::<Vec<_>>() });
+                let Some(wanted) = a.get("type").and_then(|v| v.as_str()).map(str::to_lowercase) else { return Ok(listed(&picked)) };
+                let is = |t: &&(Option<String>, String)| t.0.as_deref().is_some_and(|id| id.to_lowercase() == wanted) || t.1.to_lowercase() == wanted;
+                let holds = |t: &&(Option<String>, String)| t.0.as_deref().is_some_and(|id| id.to_lowercase().contains(&wanted)) || t.1.to_lowercase().contains(&wanted);
+                let found = types.iter().find(is).or_else(|| types.iter().find(holds)).ok_or_else(|| format!("no type '{wanted}'; call tool_type without a type to list them"))?.clone();
+                self.pick_tool_type(found.0.clone());
+                Ok(json!({ "picked": found.0, "name": found.1 }))
+            }
+            "tool_option" => {
+                let language = a.get("language").and_then(|v| v.as_str()).and_then(openaec_ui::Language::from_code).unwrap_or(openaec_ui::Language::English);
+                let lists = self.tool_options(language);
+                if lists.is_empty() {
+                    return Err("the tool that is on has no such list: press a tool of the MEP tab first (Duct, Pipe, Cable tray, Appliance)".into());
+                }
+                if let (Some(list), Some(value)) = (a.get("list").and_then(|v| v.as_str()), a.get("value").and_then(|v| v.as_str())) {
+                    if !self.pick_tool_option(list, value, language) {
+                        return Err(format!("no '{value}' in list '{list}'; call tool_option without a value to see the lists"));
+                    }
+                }
+                let lists: Vec<_> = self.tool_options(language).into_iter().map(|(name, options, picked)| json!({ "list": name, "picked": picked, "options": options.iter().map(|(en, own)| json!({ "name": en, "shown": own })).collect::<Vec<_>>() })).collect();
+                Ok(json!({ "lists": lists }))
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            "element_drawings" => {
+                let folder = a.get("folder").and_then(|v| v.as_str()).ok_or("folder is required")?;
+                let wanted = a.get("format").and_then(|v| v.as_str()).unwrap_or("pdf").to_ascii_lowercase();
+                let format = crate::export::drawing::DrawingFormat::ALL.into_iter().find(|f| f.extension() == wanted).ok_or_else(|| format!("format is pdf, svg, dxf, dwg, png or ifccad, not '{wanted}'"))?;
+                let language = a.get("language").and_then(|v| v.as_str()).and_then(openaec_ui::Language::from_code).unwrap_or(openaec_ui::Language::English);
+                let only = if a.get("selection").and_then(|v| v.as_bool()).unwrap_or(false) { self.selected_modelled() } else { Vec::new() };
+                if a.get("selection").and_then(|v| v.as_bool()).unwrap_or(false) && only.is_empty() {
+                    return Err("nothing modelled is selected".into());
+                }
+                let w = self.write_element_drawings(std::path::Path::new(folder), format, &only, language)?;
+                Ok(json!({ "folder": folder, "systems": w.systems, "drawings": w.drawings, "files": w.files.iter().map(|f| f.file_name().map(|n| n.to_string_lossy().to_string())).collect::<Vec<_>>() }))
+            }
+            "hover" => {
+                let (x, y) = (num(a, "x").ok_or("x is required")?, num(a, "y").ok_or("y is required")?);
+                let (vx, vy) = self.to_viewport(x, y);
+                let (w, h) = self.viewport_size;
+                let _ = self.update(Message::Navigate(crate::viewport::Navigate::Hover { x: vx, y: vy, width: w, height: h }));
+                Ok(json!({ "hovering": [x, y] }))
+            }
             "set_view" => self.remote_set_view(a),
             "set_camera" => self.set_camera(a),
             "navigate" => self.navigate(a),
@@ -339,6 +591,8 @@ impl App {
                 self.measurements.clear();
                 Ok(json!({ "cleared": n }))
             }
+            #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
+            cmd if cmd.starts_with("collab_") => self.collab_command(cmd, a),
             "cancel" => {
                 let _ = self.update(Message::Escape);
                 Ok(json!({ "placing_section_plane": self.plane_picking, "selection": self.selection_json() }))
@@ -354,11 +608,52 @@ impl App {
     // ---- files ----
 
     fn remote_open(&mut self, call: RemoteCall) -> Task<Message> {
-        let Some(path) = call.args.get("path").and_then(Value::as_str).map(PathBuf::from) else {
-            call.answer(Err("path is required".into()));
+        // several files at once: all added (the first opened, without `add`), the scene built once
+        if let Some(list) = call.args.get("paths").and_then(Value::as_array) {
+            let mut sources = Vec::new();
+            for p in list.iter().filter_map(Value::as_str) {
+                match confine(p) {
+                    // a file, or a model kept as a folder (a Tekla model folder)
+                    Ok(path) if path.is_file() || crate::loaders::opens_folder(&path) => sources.push(crate::loaders::Source::File(path)),
+                    Ok(path) => {
+                        call.answer(Err(format!("no such file: {}", path.display())));
+                        return Task::none();
+                    }
+                    Err(e) => {
+                        call.answer(Err(e));
+                        return Task::none();
+                    }
+                }
+            }
+            if sources.is_empty() || matches!(self.status, Status::Loading { .. }) {
+                call.answer(Err("paths is empty, or another file is still loading".into()));
+                return Task::none();
+            }
+            let add = call.args.get("add").and_then(Value::as_bool).unwrap_or(false) && self.model.is_some();
+            let task = if add {
+                self.update(Message::AddSeveral(sources))
+            } else {
+                let first = sources.remove(0);
+                let crate::loaders::Source::File(first) = first else { return Task::none() };
+                let task = self.update(Message::Open(first));
+                self.queue_added(sources);
+                task
+            };
+            self.remote.pending_load.push(call);
+            return task;
+        }
+        let Some(path) = call.args.get("path").and_then(Value::as_str) else {
+            call.answer(Err("path or paths is required".into()));
             return Task::none();
         };
-        if !path.is_file() {
+        let path = match confine(path) {
+            Ok(p) => p,
+            Err(e) => {
+                call.answer(Err(e));
+                return Task::none();
+            }
+        };
+        if !path.is_file() && !crate::loaders::opens_folder(&path) {
             call.answer(Err(format!("no such file: {}", path.display())));
             return Task::none();
         }
@@ -366,9 +661,87 @@ impl App {
             call.answer(Err("another file is still loading".into()));
             return Task::none();
         }
-        let task = self.update(Message::Open(path));
+        // beside the models open, as Add does, or in their place
+        let add = call.args.get("add").and_then(Value::as_bool).unwrap_or(false) && self.model.is_some();
+        let task = self.update(if add { Message::AddPicked(Some(crate::loaders::Source::File(path))) } else { Message::Open(path) });
         self.remote.pending_load.push(call);
         task
+    }
+
+    /// Where `save_file` writes: `path` (in the work folder), else next to the open file as IFCX.
+    /// Only formats the viewer writes, and an existing file only with `overwrite`. The default is
+    /// never the open file itself: the viewer's IFCX is a re-export (triangles, the properties it
+    /// shows), so an open `a.ifcx` is saved as `a-viewer.ifcx` beside it.
+    pub(crate) fn save_target(&self, a: &Value) -> Result<PathBuf, String> {
+        let model = self.require_model()?;
+        if matches!(self.status, Status::Loading { .. } | Status::Saving { .. }) {
+            return Err("a file is still loading or saving".into());
+        }
+        let default_ext = crate::export::registry()[0].extensions()[0];
+        let mut path = match a.get("path").and_then(Value::as_str).filter(|p| !p.trim().is_empty()) {
+            Some(p) => confine(p)?,
+            None if model.path.as_os_str().is_empty() => return Err("the model has no file; give a path".into()),
+            None => {
+                let mut path = model.path.with_extension(default_ext);
+                if model.path.extension().is_some_and(|e| e.eq_ignore_ascii_case(default_ext)) {
+                    let stem = model.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                    path.set_file_name(format!("{stem}-viewer.{default_ext}"));
+                }
+                confine(&path.to_string_lossy())?
+            }
+        };
+        if path.extension().is_none() {
+            path.set_extension(default_ext);
+        }
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        crate::export::writer_for(&name).map_err(|e| format!("{e}: the viewer saves models as IFCX (.ifcx) or IFC (.ifc)"))?;
+        if path.parent().is_some_and(|d| !d.as_os_str().is_empty() && !d.is_dir()) {
+            return Err(format!("the folder of {} does not exist", path.display()));
+        }
+        if path.exists() && !flag(a, "overwrite").unwrap_or(false) {
+            return Err(format!("{} exists; pass overwrite: true to replace it, or another path", path.display()));
+        }
+        Ok(path)
+    }
+
+    /// The schema `save_file` writes a `.ifc` in: `schema` (IFC4, IFC4X3), else IFC 4. Only for a
+    /// `.ifc`.
+    pub(crate) fn save_schema_of(a: &Value, path: &std::path::Path) -> Result<crate::export::IfcSchema, String> {
+        let Some(name) = a.get("schema").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) else {
+            return Ok(crate::export::IfcSchema::Ifc4);
+        };
+        let schema = crate::export::IfcSchema::parse(name).ok_or_else(|| format!("unknown schema {name}: IFC4 or IFC4X3"))?;
+        if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("ifc")) {
+            return Err("a schema is for a .ifc path".into());
+        }
+        Ok(schema)
+    }
+
+    fn remote_save(&mut self, call: RemoteCall) -> Task<Message> {
+        match self.save_target(&call.args).and_then(|path| Self::save_schema_of(&call.args, &path).map(|schema| (path, schema))) {
+            Ok((path, schema)) => {
+                self.save_schema = schema;
+                let task = self.start_save(path, flag(&call.args, "overwrite").unwrap_or(false));
+                self.remote.pending_save.push(call);
+                task
+            }
+            Err(e) => {
+                call.answer(Err(e));
+                Task::none()
+            }
+        }
+    }
+
+    /// Answers the `save_file` calls once the file is written (one save runs at a time, see
+    /// [`App::start_save`], so this result is theirs).
+    pub fn remote_saved(&mut self, result: &Result<(PathBuf, f32), String>) {
+        let answer = result.clone().map(|(path, secs)| {
+            let bytes = std::fs::metadata(&path).map(|m| m.len()).ok();
+            json!({ "saved": path.display().to_string(), "bytes": bytes, "seconds": round(secs) })
+        });
+        for call in self.remote.pending_save.drain(..) {
+            call.answer(answer.clone());
+        }
     }
 
     /// Answers the `open_file` calls once a load has finished.
@@ -421,9 +794,11 @@ impl App {
             self.remote.shot_image = Some((w, h));
             out["note"] = json!("Screen coordinates for pick, select, section_plane and measure are pixels of this image.");
         }
-        if let Some(path) = a.get("save_to").and_then(Value::as_str) {
-            std::fs::write(path, &png).map_err(|e| format!("save_to {path}: {e}"))?;
-            out["saved_to"] = json!(path);
+        if let Some(path) = a.get("save_to") {
+            let path = shot_target(path, a)?;
+            crate::export::write_file(&path, flag(a, "overwrite").unwrap_or(false), |out| out.write_all(&png))
+                .map_err(|e| format!("save_to {}: {e}", path.display()))?;
+            out["saved_to"] = json!(path.display().to_string());
         }
         out["png_base64"] = json!(base64(&png));
         Ok(out)
@@ -434,7 +809,7 @@ impl App {
     fn model_json(&self) -> Value {
         let Some(m) = &self.model else { return Value::Null };
         let elements: usize = element_layers(m).len();
-        json!({
+        let mut out = json!({
             "file": m.path.display().to_string(),
             "format": m.format,
             "file_size_bytes": m.file_size,
@@ -442,6 +817,7 @@ impl App {
             "layers": m.layers.len(),
             "vertices": m.vertex_count(),
             "triangles": m.triangle_count(),
+            "points": m.point_count(),
             "elements": elements,
             "views": m.views.len(),
             "levels": m.project.levels.len(),
@@ -450,7 +826,19 @@ impl App {
             "bounds": self.world_bounds().map(|b| jbounds(&b)),
             "units": "metres (Revit, SketchUp, glTF); OBJ, STL and PLY keep the file's own units",
             "up_axis": "Z",
-        })
+        });
+        if !m.structural.is_empty() {
+            let count = |f: fn(&bim_structural::AnalysisModel) -> usize| m.structural.iter().map(|p| f(&p.doc)).sum::<usize>();
+            out["structural"] = json!({
+                "models": m.structural.len(),
+                "nodes": count(|d| d.nodes.len()),
+                "members": count(|d| d.members.len()),
+                "surfaces": count(|d| d.surfaces.len()),
+                "objects": m.structural_index.len(),
+                "note": "structural objects are elements: get_element, find_elements and the *_structural tools take their ids",
+            });
+        }
+        out
     }
 
     fn camera_json(&self) -> Value {
@@ -498,9 +886,27 @@ impl App {
         }
     }
 
-    /// The selected elements (or layer) and the first one's properties.
+    /// The selected elements (or layer) and the first one's properties; structural objects listed
+    /// apart (`structural`), their first one's properties shown when no mesh element is
+    /// selected.
     fn selection_json(&self) -> Value {
-        let (Some(model), Some((layer, element))) = (&self.model, self.selected) else { return Value::Null };
+        let Some(model) = &self.model else { return Value::Null };
+        // a picked grid line, picked alone
+        if let Some(grid) = self.picked_grid.and_then(|g| model.project.grids.get(g)) {
+            return grid_json(grid);
+        }
+        let structural: Vec<Value> = self.structural.selected.iter().map(|&id| crate::structural::id_json(id)).collect();
+        let Some((layer, element)) = self.selected else {
+            let Some(&first) = self.structural.selected.first() else { return Value::Null };
+            return json!({
+                "layer": Value::Null,
+                "element": crate::structural::id_json(first),
+                "elements": [],
+                "structural": structural,
+                "properties": props_json(model.element_props(first)),
+                "bounds": self.selection_bounds().map(|b| jbounds(&b)),
+            });
+        };
         let mut ids: Vec<u64> = self
             .selection
             .iter()
@@ -513,6 +919,7 @@ impl App {
             "element": element,
             "elements": ids,
             "properties": element.map(|id| props_json(model.element_props(id))),
+            "structural": structural,
             "bounds": self.selection_bounds().map(|b| jbounds(&b)),
         })
     }
@@ -540,6 +947,8 @@ impl App {
             "section_plane": self.plane_json(),
             "placing_section_plane": self.plane_picking,
             "selection": self.selection_json(),
+            "selection_count": self.sel.len(),
+            "hidden_count": self.hidden.len(),
             "active_view": self.active_view.and_then(|i| self.model.as_ref()?.views.get(i).map(|v| v.name.clone())),
             "shown_sheet": self.active_sheet.and_then(|i| self.model.as_ref()?.project.sheets.get(i).map(|s| s.title.clone())),
             "shown_schedule": self.active_schedule.and_then(|i| self.schedules.get(i).map(|s| s.name.clone())),
@@ -565,12 +974,13 @@ impl App {
                     "name": l.name,
                     "visible": self.visible.get(i).copied().unwrap_or(true),
                     "triangles": l.triangle_count(),
+                    "points": l.point_count(),
                     "elements": l.elements.len(),
                     "color": format!("#{r:02x}{g:02x}{b:02x}"),
                 })
             })
             .collect();
-        Ok(json!({ "count": layers.len(), "layers": layers }))
+        Ok(paged("layers", layers, page(a, 100, MAX_LIST)))
     }
 
     /// Layer indices for a list of indices and/or names (exact name first, else name contains).
@@ -627,7 +1037,7 @@ impl App {
         Ok(json!({ "changed": layers.len(), "visible_layers": shown.len(), "hidden_layers": model.layers.len() - shown.len() }))
     }
 
-    fn list_views(&self) -> Answer {
+    fn list_views(&self, a: &Value) -> Answer {
         let model = self.require_model()?;
         let views: Vec<Value> = model
             .views
@@ -635,7 +1045,7 @@ impl App {
             .enumerate()
             .map(|(i, v)| json!({ "index": i, "name": v.name, "kind": kind_name(v.kind), "level": v.level, "active": self.active_view == Some(i) }))
             .collect();
-        Ok(json!({ "count": views.len(), "views": views }))
+        Ok(paged("views", views, page(a, 100, MAX_LIST)))
     }
 
     fn remote_apply_view(&mut self, a: &Value) -> Answer {
@@ -661,20 +1071,36 @@ impl App {
         Ok(json!({ "view": model.views[i].name, "camera": self.camera_json(), "section_box": self.section_json() }))
     }
 
-    fn project_info(&self) -> Answer {
+    fn project_info(&self, a: &Value) -> Answer {
         let model = self.require_model()?;
         let p = &model.project;
+        // levels and grids up to MAX_LIST; rooms (with all their parameters) a page at a time
+        let (offset, limit) = page(a, 20, 50);
+        let rooms: Vec<Value> = p.rooms.iter().skip(offset).take(limit).map(|r| json!({
+            "number": r.number,
+            "name": r.name,
+            "level": r.level,
+            "parameters": Value::Object(r.extra.iter().map(|(k, v)| (k.clone(), json!(v))).collect()),
+        })).collect();
+        let authored = self.modeller.in_modeller && self.modeller.shown.is_some();
+        let (level_count, levels): (usize, Vec<Value>) = if authored {
+            let levels = self.document.levels();
+            (levels.len(), levels.iter().take(MAX_LIST).map(|l| json!({"name": l.name, "elevation": l.elevation})).collect())
+        } else {
+            (p.levels.len(), p.levels.iter().take(MAX_LIST).map(|(n,z)| json!({"name":n, "elevation":round(*z)})).collect())
+        };
+        let truncated = level_count > MAX_LIST || p.grids.len() > MAX_LIST || offset.saturating_add(rooms.len()) < p.rooms.len();
         Ok(json!({
             "info": Value::Object(p.info.iter().map(|(k, v)| (k.clone(), json!(v))).collect()),
-            "levels": p.levels.iter().map(|(n, z)| json!({ "name": n, "elevation": round(*z) })).collect::<Vec<_>>(),
+            "levels": levels,
+            "level_count": level_count,
             "phases": p.phases,
-            "grids": p.grids.iter().map(|g| json!({ "name": g.name, "a": g.a, "b": g.b })).collect::<Vec<_>>(),
-            "rooms": p.rooms.iter().map(|r| json!({
-                "number": r.number,
-                "name": r.name,
-                "level": r.level,
-                "parameters": Value::Object(r.extra.iter().map(|(k, v)| (k.clone(), json!(v))).collect()),
-            })).collect::<Vec<_>>(),
+            "grids": p.grids.iter().take(MAX_LIST).map(|g| json!({ "name": g.name, "a": g.a, "b": g.b })).collect::<Vec<_>>(),
+            "grid_count": p.grids.len(),
+            "rooms": rooms,
+            "room_count": p.rooms.len(),
+            "rooms_offset": offset,
+            "truncated": truncated,
         }))
     }
 
@@ -690,11 +1116,23 @@ impl App {
             .map(|o| o.iter().map(|(k, v)| (k.to_lowercase(), v.as_str().map_or_else(|| v.to_string(), str::to_string).to_lowercase())).collect())
             .unwrap_or_default();
         let group_by = a.get("group_by").and_then(Value::as_str);
-        let limit = a.get("limit").and_then(Value::as_u64).unwrap_or(50) as usize;
-        let offset = a.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
+        let (offset, limit) = page(a, 50, 100);
 
-        let mut matches: Vec<(u64, Vec<usize>, Vec<(String, String)>)> = Vec::new();
-        for (id, layers) in element_layers(&model) {
+        // elements with triangles (listed under their first layer), then structural objects
+        // drawn from their document (listed under their analysis model)
+        let drawn = element_layers(&model);
+        let structural: Vec<crate::structural::StructuralItem> = if model.structural.is_empty() {
+            Vec::new()
+        } else {
+            model.structural_index.all(&model.structural).into_iter().filter(|item| !drawn.contains_key(&item.element)).collect()
+        };
+        let passes = |id: u64, props: &[(String, String)]| {
+            let value = |key: &str| props.iter().find(|(k, _)| k.to_lowercase() == key).map(|(_, v)| v.to_lowercase());
+            conditions.iter().all(|(k, v)| value(k).is_some_and(|x| x == *v || x.contains(v.as_str())))
+                && (text.is_empty() || props.iter().any(|(_, v)| v.to_lowercase().contains(&text)) || id.to_string() == text)
+        };
+        let mut matches: Vec<(u64, Listed, Vec<(String, String)>)> = Vec::new();
+        for (id, layers) in drawn {
             if !layer.is_empty() && !layers.iter().any(|&l| model.layers[l].name.to_lowercase().contains(&layer)) {
                 continue;
             }
@@ -702,14 +1140,24 @@ impl App {
             if !props.iter().any(|(k, _)| k == "category") {
                 props.push(("category".into(), model.layers[layers[0]].name.clone()));
             }
-            let value = |key: &str| props.iter().find(|(k, _)| k.to_lowercase() == key).map(|(_, v)| v.to_lowercase());
-            if !conditions.iter().all(|(k, v)| value(k).is_some_and(|x| x == *v || x.contains(v.as_str()))) {
+            if passes(id, &props) {
+                matches.push((id, Listed::Layer(layers[0]), props));
+            }
+        }
+        for item in structural {
+            if !layer.is_empty() && !format!("structural: {}", item.doc().name.to_lowercase()).contains(&layer) {
                 continue;
             }
-            if !text.is_empty() && !props.iter().any(|(_, v)| v.to_lowercase().contains(&text)) && id.to_string() != text {
+            // a structural object's category is its class: test it before building properties
+            let class = crate::structural::class_name(item.kind());
+            if conditions.iter().any(|(k, v)| (k == "category" || k == "class") && !class.to_lowercase().contains(v.as_str())) {
                 continue;
             }
-            matches.push((id, layers, props));
+            let mut props = item.props();
+            props.push(("category".into(), class.into()));
+            if passes(item.element, &props) {
+                matches.push((item.element, Listed::Structural(item.part_index as usize), props));
+            }
         }
         let total = matches.len();
         if let Some(key) = group_by {
@@ -724,14 +1172,22 @@ impl App {
             .into_iter()
             .skip(offset)
             .take(limit)
-            .map(|(id, layers, props)| {
+            .map(|(id, listed, props)| {
+                let (layer, structural) = match listed {
+                    Listed::Layer(l) => (model.layers[l].name.clone(), false),
+                    Listed::Structural(p) => (format!("Structural: {}", model.structural[p].doc.name), true),
+                };
                 let keep = ["category", "family", "type", "name", "level", "class"];
-                let summary: Map<String, Value> =
-                    props.into_iter().filter(|(k, _)| keep.contains(&k.as_str())).map(|(k, v)| (k, Value::String(v))).collect();
-                json!({ "id": id, "layer": model.layers[layers[0]].name, "properties": summary })
+                let keep_structural = ["Class", "Number", "Name", "Kind", "Section", "Support"];
+                let summary: Map<String, Value> = props
+                    .into_iter()
+                    .filter(|(k, _)| keep.contains(&k.as_str()) || (structural && keep_structural.contains(&k.as_str())))
+                    .map(|(k, v)| (k, Value::String(v)))
+                    .collect();
+                json!({ "id": crate::structural::id_json(id), "layer": layer, "properties": summary })
             })
             .collect();
-        Ok(json!({ "total": total, "offset": offset, "returned": shown.len(), "elements": shown }))
+        Ok(json!({ "total": total, "offset": offset, "returned": shown.len(), "truncated": offset.saturating_add(shown.len()) < total, "elements": shown }))
     }
 
     /// The triangles of an element in world space.
@@ -755,7 +1211,8 @@ impl App {
         let model = self.require_model()?;
         let ranges = model.element_ranges(id);
         if ranges.is_empty() {
-            return Err(format!("no element {id}"));
+            // a structural object: drawn from its document, not from triangles
+            return crate::structural::remote::as_element(&model, id, &self.model_matrix()).ok_or_else(|| format!("no element {id}"));
         }
         let tris = self.element_triangles(&model, id);
         let mut b = Bounds::empty();
@@ -775,7 +1232,7 @@ impl App {
         let mut layers: Vec<&str> = ranges.iter().map(|r| model.layers[r.0].name.as_str()).collect();
         layers.dedup();
         Ok(json!({
-            "id": id,
+            "id": crate::structural::id_json(id),
             "layers": layers,
             "properties": props_json(model.element_props(id)),
             "triangles": tris.len(),
@@ -797,19 +1254,56 @@ impl App {
             v => vec![id_of(v).ok_or("target: \"model\", \"selection\", an element id or a list of ids")?],
         };
         let mut b = Bounds::empty();
+        let mm = self.model_matrix();
         for id in ids {
-            for t in self.element_triangles(&model, id) {
+            let tris = self.element_triangles(&model, id);
+            for t in &tris {
                 t.iter().for_each(|p| b.extend(p.to_array()));
+            }
+            // a structural object: its point, segment or target box
+            if let Some(s) = model.structural_item(id).filter(|_| tris.is_empty()).and_then(|item| item.bounds(&model.origins)) {
+                let w = transform_bounds(&s, &mm);
+                b.extend(w.min);
+                b.extend(w.max);
             }
         }
         if b.is_valid() { Ok(b) } else { Err("no such elements".into()) }
     }
 
+    /// `hide_elements` and `isolate_elements`: the elements in `ids`, or else the selection, as
+    /// Hide (which clears the selection) and Isolate (which keeps it) do.
+    fn remote_hide(&mut self, a: &Value, message: Message) -> Answer {
+        let model = self.require_model()?;
+        if let Some(Value::Array(list)) = a.get("ids") {
+            let ids: Vec<u64> = list.iter().filter_map(id_of).collect();
+            hideable(&model, self.explode_index.as_deref(), &ids)?;
+            self.sel.clear();
+            self.sel.extend(ids.into_iter().map(Pickable::Element));
+            self.selection_changed();
+        }
+        if self.sel.is_empty() {
+            return Err("ids (list of element ids) is required when nothing is selected".into());
+        }
+        let _ = self.update(message);
+        Ok(self.visibility_json())
+    }
+
+    /// What is hidden and what undo can do, after a visibility command.
+    fn visibility_json(&self) -> Value {
+        json!({
+            "hidden_count": self.hidden.len(),
+            "selection_count": self.sel.len(),
+            "can_undo": self.can_undo(),
+            "can_redo": self.can_redo(),
+        })
+    }
+
     fn remote_select(&mut self, a: &Value) -> Answer {
         let model = self.require_model()?;
         if flag(a, "clear").unwrap_or(false) {
-            self.selected = None;
-            self.selection.clear();
+            self.sel.clear();
+            self.selection_changed();
+            self.set_structural_selection(Vec::new());
             return Ok(Value::Null);
         }
         let ids: Vec<u64> = match (a.get("ids"), a.get("id")) {
@@ -817,17 +1311,35 @@ impl App {
             (_, Some(v)) => vec![id_of(v).ok_or("id must be an element id")?],
             _ => return Err("ids (list of element ids), id or clear is required".into()),
         };
-        let mut selection = Vec::new();
-        for &id in &ids {
-            let ranges = model.element_ranges(id);
-            if ranges.is_empty() {
-                return Err(format!("no element {id}"));
-            }
-            selection.extend(ranges);
+        if ids.is_empty() {
+            return Err("no elements given".into());
         }
-        let Some(&(layer, ..)) = selection.first() else { return Err("no elements given".into()) };
-        self.selected = Some((layer, Some(ids[0])));
-        self.selection = selection;
+        let drawn: std::collections::HashSet<u64> = model.layers.iter().flat_map(|l| l.elements.iter().map(|e| e.0)).collect();
+        // a structural object is drawn from its document: a node or member itself, a load or line
+        // support through the item it sits on
+        let mut structural = Vec::new();
+        for &id in ids.iter().filter(|id| !drawn.contains(id)) {
+            match model.structural_item(id) {
+                Some(item) if item.unit_key().is_some() => structural.push(id),
+                Some(item) => {
+                    return Err(format!(
+                        "{id} is a structural {} without a place in the model (nothing to select); get_element and get_structural_element take its id",
+                        crate::structural::kind_name(item.kind())
+                    ))
+                }
+                None => return Err(not_drawn(&model, id, "selecting")),
+            }
+        }
+        let add = flag(a, "add").unwrap_or(false);
+        if !add {
+            self.sel.clear();
+        }
+        self.sel.extend(ids.iter().filter(|id| drawn.contains(id)).map(|&id| Pickable::Element(id)));
+        self.selection_changed();
+        let mut chosen = if add { self.structural.selected.clone() } else { Vec::new() };
+        let mut seen: std::collections::HashSet<u64> = chosen.iter().copied().collect();
+        chosen.extend(structural.into_iter().filter(|id| seen.insert(*id)));
+        self.set_structural_selection(chosen);
         if flag(a, "zoom").unwrap_or(false) {
             if let Some(b) = self.selection_bounds() {
                 self.frame(&b);
@@ -866,7 +1378,7 @@ impl App {
         // the exploded view moves the triangles: their offsets back in model space
         let back = mm.inverse();
         let shift = |l: usize, i: u32| back.transform_vector3(self.explode_offset(l, i));
-        let (layer, triangle) = pick_triangle(&model, &self.visible, origin, dir, &shift, &keep, None)?;
+        let (layer, triangle) = pick_triangle(&model, &self.visible, origin, dir, &shift, &keep, &self.hidden_test(), None)?;
         let s = model.layers[layer].indices.get(3 * triangle).map_or(Vec3::ZERO, |&i| shift(layer, i));
         let (point, normal) = face_at(&model.layers[layer], triangle, origin - s, dir)?;
         let (point, mut normal) = (mm.transform_point3(point + s), mm.transform_vector3(normal).normalize_or_zero());
@@ -899,13 +1411,63 @@ impl App {
         })
     }
 
+    /// The handles the viewport shows (edit mode's points, a sketch's, the grips of the selected
+    /// element), and one of them dragged: pressed at `from`, moved to `to` and let go, as the
+    /// mouse does. Without `from` the handles are only listed, in pixels of the last screenshot.
+    fn remote_drag_handle(&mut self, a: &Value) -> Answer {
+        let shown = self.handles_shown().ok_or("no handles: select one modelled element, or open edit mode or a sketch with Tab")?;
+        let (w, h) = self.viewport_size;
+        // viewport pixels back to those of the last screenshot
+        let (sx, sy) = match self.remote.shot_image {
+            Some((iw, ih)) => (iw as f32 / w, ih as f32 / h),
+            None => (1.0, 1.0),
+        };
+        let handles: Vec<Value> = shown.iter().map(|p| p.map_or(Value::Null, |(x, y)| json!([(x * sx).round(), (y * sy).round()]))).collect();
+        let Some(from) = a.get("from").and_then(Self::screen_xy) else { return Ok(json!({ "handles": handles })) };
+        let to = a.get("to").and_then(Self::screen_xy).ok_or("to: [x, y] is required with from")?;
+        let index = self.drag_handle(self.to_viewport(from.0, from.1), self.to_viewport(to.0, to.1)).ok_or("no handle within reach of from; call drag_handle without arguments to list them")?;
+        Ok(json!({ "dragged": index, "handles": handles.len(), "message": self.modeller.refusal.map(|r| r.reason()) }))
+    }
+
     fn remote_pick(&mut self, a: &Value) -> Answer {
         self.require_model()?;
         let (x, y) = (num(a, "x").ok_or("x is required")?, num(a, "y").ok_or("y is required")?);
         let (vx, vy) = self.to_viewport(x, y);
         let hit = self.hit_at(vx, vy);
+        let (w, h) = self.viewport_size;
+        // a grid line drawn there (its bubble, or within 5 px of its line where it is seen), as a
+        // click takes it first (unless it measures or places a plane)
+        // a tool of the Modeller takes the click before a grid line does (see `App::pick`)
+        let tool = self.modeller.transform.is_some() || self.modeller.grid_tool || self.modeller.tool.is_some() || self.modeller.edit.is_some();
+        let clicks = self.measure.tool.is_none() && !self.plane_picking && !(tool && flag(a, "select").unwrap_or(false));
+        let grid = self.grid_under(vx, vy, w, h, hit.as_ref().map(|h| h.point)).filter(|_| clicks);
+        if let (Some(g), Some(model)) = (grid, self.model.clone()) {
+            if flag(a, "select").unwrap_or(false) {
+                self.pick_grid(Some(g));
+            }
+            let mut out = grid_json(&model.project.grids[g]);
+            out["hit"] = json!(true);
+            return Ok(out);
+        }
+        let structural = self.pick_structural(vx, vy, w, h, hit.as_ref().map(|h| h.point));
         if flag(a, "select").unwrap_or(false) {
-            self.pick(vx, vy, self.viewport_size.0, self.viewport_size.1);
+            match &structural {
+                // what was found is selected, as a click would (no second pick)
+                Some(s) if self.measure.tool.is_none() && !self.plane_picking => self.click_structural(s.element, false),
+                _ => self.pick(vx, vy, w, h, false),
+            }
+        }
+        // a structural node or member drawn there (within 8 px of a node, 6 px of a member)
+        if let (Some(s), Some(model)) = (structural, self.model.as_ref()) {
+            return Ok(json!({
+                "hit": true,
+                "structural": if s.node { "node" } else { "member" },
+                "element": crate::structural::id_json(s.element),
+                "point": jv(s.world),
+                "pixels_away": round(s.px),
+                "properties": props_json(model.element_props(s.element)),
+                "distance_from_camera": round(s.world.distance(self.camera.eye())),
+            }));
         }
         Ok(match hit {
             Some(h) => {
@@ -1020,7 +1582,8 @@ impl App {
                 "solid" => RenderMode::Solid,
                 "wireframe" => RenderMode::Wireframe,
                 "edges" => RenderMode::SolidEdges,
-                _ => return Err(format!("unknown mode '{m}': solid, wireframe, edges")),
+                "hidden" => RenderMode::HiddenLine,
+                _ => return Err(format!("unknown mode '{m}': solid, wireframe, edges, hidden")),
             };
         }
         if let Some(v) = flag(a, "grid") {
@@ -1028,6 +1591,15 @@ impl App {
         }
         if let Some(v) = flag(a, "grid_lines") {
             self.show_grids = v;
+        }
+        if let Some(v) = flag(a, "grid_dimensions") {
+            self.grid_dims = v;
+        }
+        if let Some(v) = flag(a, "levels_3d") {
+            self.levels_3d = v;
+        }
+        if let Some(v) = flag(a, "grid_heads_hidden") {
+            self.grid_heads_hidden = v;
         }
         if let Some(v) = flag(a, "section_fill") {
             self.section_fill = v;
@@ -1220,7 +1792,7 @@ impl App {
         let idb = a.get("b").and_then(id_of).ok_or("b (element id) is required")?;
         let (ta, tb) = (self.element_triangles(&model, ida), self.element_triangles(&model, idb));
         if ta.is_empty() || tb.is_empty() {
-            return Err(format!("no element {}", if ta.is_empty() { ida } else { idb }));
+            return Err(not_drawn(&model, if ta.is_empty() { ida } else { idb }, "measuring between"));
         }
         let (d, p, q) = closest_between(&ta, &tb);
         self.add_measurement(a, vec![p, q], format!("{d:.3} m"));
@@ -1235,6 +1807,45 @@ impl App {
 }
 
 /// Element id → the layers that draw it, for every element in the model.
+/// Where `find_elements` lists a match: the first layer of its triangles, or the structural part
+/// it is in (names resolved for the page shown only).
+enum Listed {
+    Layer(usize),
+    Structural(usize),
+}
+
+/// Whether every one of `ids` can be hidden: an element with triangles, or a structural node,
+/// member or surface (a unit of its own in `index`, which Hide and Isolate reach through the
+/// units texture). Else why not.
+fn hideable(model: &Model, index: Option<&crate::explode::ExplodeIndex>, ids: &[u64]) -> Result<(), String> {
+    let drawn: std::collections::HashSet<u64> = model.layers.iter().flat_map(|l| l.elements.iter().map(|e| e.0)).collect();
+    for &id in ids.iter().filter(|id| !drawn.contains(id)) {
+        if index.is_some_and(|index| index.structural_unit(id).is_some()) {
+            continue;
+        }
+        return Err(match model.structural_item(id) {
+            Some(item) => format!(
+                "{id} is a structural {}: only nodes, members and surfaces can be hidden; get_element and get_structural_element take its id",
+                crate::structural::kind_name(item.kind())
+            ),
+            None => format!("no element {id}"),
+        });
+    }
+    Ok(())
+}
+
+/// Why an element without triangles cannot be measured: a structural object is drawn from its
+/// document (measuring between those is not supported yet), anything else does not exist.
+fn not_drawn(model: &Model, id: u64, what: &str) -> String {
+    match model.structural_item(id) {
+        Some(item) => format!(
+            "{id} is a structural object ({}): {what} structural objects is not supported yet; get_element and get_structural_element take its id",
+            crate::structural::kind_name(item.kind())
+        ),
+        None => format!("no element {id}"),
+    }
+}
+
 fn element_layers(model: &Model) -> BTreeMap<u64, Vec<usize>> {
     let mut out: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
     for (l, layer) in model.layers.iter().enumerate() {
@@ -1341,7 +1952,7 @@ fn downscale(rgba: &[u8], w: u32, h: u32, nw: u32, nh: u32) -> Vec<u8> {
     out
 }
 
-fn encode_png(w: u32, h: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn encode_png(w: u32, h: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
     let mut png = Vec::new();
     let mut encoder = png::Encoder::new(&mut png, w, h);
     encoder.set_color(png::ColorType::Rgba);
@@ -1352,7 +1963,7 @@ fn encode_png(w: u32, h: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
     Ok(png)
 }
 
-fn base64(bytes: &[u8]) -> String {
+pub(crate) fn base64(bytes: &[u8]) -> String {
     const ABC: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
@@ -1366,6 +1977,11 @@ fn base64(bytes: &[u8]) -> String {
         }
     }
     out
+}
+
+/// A grid line: its name and the ends of its line (world, metres).
+fn grid_json(grid: &crate::model::GridLine) -> Value {
+    json!({ "grid": grid.name, "start": jv(Vec3::from_array(grid.a)), "end": jv(Vec3::from_array(grid.b)) })
 }
 
 #[cfg(test)]
@@ -1406,6 +2022,112 @@ mod tests {
         let (call, rx) = RemoteCall::new(cmd, args);
         let _ = app.remote(call);
         rx.try_recv().expect("answered at once")
+    }
+
+    #[test]
+    fn remote_hide_and_show_all() {
+        let mut app = app();
+        run(&mut app, "hide_elements", json!({ "ids": [7] })).expect("hide");
+        assert_eq!(run(&mut app, "get_state", json!({})).unwrap()["hidden_count"], 1);
+        run(&mut app, "select", json!({ "id": 8 })).expect("select");
+        run(&mut app, "isolate_elements", json!({})).expect("isolate the selection");
+        assert_eq!(run(&mut app, "get_state", json!({})).unwrap()["hidden_count"], 1, "only 7 is hidden");
+        run(&mut app, "show_all_elements", json!({})).expect("show all");
+        assert_eq!(run(&mut app, "get_state", json!({})).unwrap()["hidden_count"], 0);
+        assert!(run(&mut app, "hide_elements", json!({ "ids": [99] })).is_err());
+    }
+
+    #[test]
+    fn remote_select_add() {
+        let mut app = app();
+        run(&mut app, "select", json!({ "id": 7 })).expect("select");
+        run(&mut app, "select", json!({ "id": 8, "add": true })).expect("add");
+        assert_eq!(run(&mut app, "get_state", json!({})).unwrap()["selection_count"], 2);
+        run(&mut app, "select", json!({ "id": 8 })).expect("replace");
+        assert_eq!(run(&mut app, "get_state", json!({})).unwrap()["selection_count"], 1);
+    }
+
+    #[test]
+    fn remote_undo_restores_hidden() {
+        let mut app = app();
+        run(&mut app, "hide_elements", json!({ "ids": [7, 8] })).expect("hide");
+        run(&mut app, "undo", json!({})).expect("undo");
+        assert_eq!(run(&mut app, "get_state", json!({})).unwrap()["hidden_count"], 0);
+        run(&mut app, "redo", json!({})).expect("redo");
+        assert_eq!(run(&mut app, "get_state", json!({})).unwrap()["hidden_count"], 2);
+    }
+
+    #[test]
+    fn saves_only_what_the_viewer_writes() {
+        let app = app();
+        // next to the open file, as IFCX
+        assert_eq!(app.save_target(&json!({})), Ok(PathBuf::from("test.ifcx")));
+        let dir = std::env::temp_dir().join(format!("o3v-save-target-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let at = |name: &str| dir.join(name).to_string_lossy().into_owned();
+        assert_eq!(app.save_target(&json!({ "path": at("out") })), Ok(dir.join("out.ifcx")));
+        assert!(app.save_target(&json!({ "path": at("out.glb") })).unwrap_err().contains("glb"));
+        assert!(app.save_target(&json!({ "path": at("missing/out.ifc") })).is_err());
+        // an existing file only with overwrite
+        std::fs::write(dir.join("old.ifc"), b"x").unwrap();
+        assert!(app.save_target(&json!({ "path": at("old.ifc") })).unwrap_err().contains("overwrite"));
+        assert_eq!(app.save_target(&json!({ "path": at("old.ifc"), "overwrite": true })), Ok(dir.join("old.ifc")));
+        // an open IFC gets its IFCX beside it; an open IFCX is not the default target: the
+        // viewer's IFCX goes beside it
+        let mut ifc = App::default();
+        ifc.set_model(Arc::new(Model::new(dir.join("a.IFC"), "IFC", vec![])));
+        assert_eq!(ifc.save_target(&json!({})), Ok(dir.join("a.ifcx")));
+        assert_eq!(ifc.save_target(&json!({ "path": at("a.IFC"), "overwrite": true })), Ok(dir.join("a.IFC")));
+        let mut ifcx = App::default();
+        ifcx.set_model(Arc::new(Model::new(dir.join("b.IFCX"), "IFCX", vec![])));
+        assert_eq!(ifcx.save_target(&json!({})), Ok(dir.join("b-viewer.ifcx")));
+        let _ = std::fs::remove_dir_all(&dir);
+        // nothing open, nothing to save
+        assert!(App::default().save_target(&json!({})).is_err());
+    }
+
+    #[test]
+    fn screenshots_are_saved_as_new_pngs() {
+        let dir = std::env::temp_dir().join(format!("o3v-shot-target-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let at = |name: &str| json!(dir.join(name).to_string_lossy());
+        let none = json!({});
+        assert_eq!(shot_target(&at("view.png"), &none), Ok(dir.join("view.png")));
+        assert_eq!(shot_target(&at("view.PNG"), &none), Ok(dir.join("view.PNG")));
+        // never a model, nor a file that is there without overwrite
+        assert!(shot_target(&at("model.ifc"), &none).unwrap_err().contains(".png"));
+        assert!(shot_target(&at("model"), &none).is_err());
+        std::fs::write(dir.join("old.png"), b"x").unwrap();
+        assert!(shot_target(&at("old.png"), &none).unwrap_err().contains("overwrite"));
+        assert!(shot_target(&at("old.png"), &json!({ "overwrite": true })).is_ok());
+        assert!(shot_target(&json!(1), &none).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The open_file tool names every format the viewer opens, so an agent does not turn one down.
+    #[test]
+    fn open_file_lists_every_format() {
+        let tools = crate::mcp::tools();
+        let open = tools.iter().find(|t| t["name"] == "open_file").unwrap();
+        let text = open["description"].as_str().unwrap();
+        for ext in crate::loaders::supported_extensions() {
+            assert!(text.contains(&format!(".{ext} ")) || text.contains(&format!(".{ext})")) || text.contains(&format!(".{ext},")), ".{ext} is not in open_file");
+        }
+    }
+
+    #[test]
+    fn listings_are_paged_and_capped() {
+        let mut app = app();
+        let layers = run(&mut app, "list_layers", json!({ "limit": 100000 })).unwrap();
+        assert_eq!((layers["total"].clone(), layers["truncated"].clone()), (json!(1), json!(false)));
+        let none = run(&mut app, "list_layers", json!({ "offset": 1 })).unwrap();
+        assert_eq!(none["returned"], json!(0));
+        assert_eq!(page(&json!({ "limit": 100000 }), 50, 100), (0, 100));
+        assert_eq!(page(&json!({}), 50, 100), (0, 50));
+        let found = run(&mut app, "find_elements", json!({ "limit": 1 })).unwrap();
+        assert_eq!((found["returned"].clone(), found["truncated"].clone()), (json!(1), json!(true)));
+        let info = run(&mut app, "get_project_info", json!({})).unwrap();
+        assert_eq!(info["room_count"], json!(0));
     }
 
     #[test]
@@ -1483,6 +2205,29 @@ mod tests {
         assert_eq!(hit["element"], json!(7));
         assert_eq!(hit["normal"], json!([1.0, 0.0, 0.0]));
         assert!((hit["point"][0].as_f64().unwrap() - 2.0).abs() < 1e-3, "{hit}");
+    }
+
+    /// `pick` names a grid line under the pixel, as a click takes it before what lies behind it,
+    /// and with select picks it; the state shows it then.
+    #[test]
+    fn pick_names_a_grid_line_and_selects_it() {
+        let mut model = Model::new(PathBuf::from("grids.rvt"), "Revit", Vec::new());
+        model.project.grids = vec![crate::model::GridLine { name: "A".into(), a: [-5.0, 0.0, 0.0], b: [5.0, 0.0, 0.0] }];
+        let mut app = App::default();
+        app.set_model(Arc::new(model));
+        app.viewport_size = (800.0, 600.0);
+        app.camera.set_preset(ViewPreset::Top);
+        app.camera.target = Vec3::ZERO;
+        app.camera.distance = 20.0;
+        let hit = run(&mut app, "pick", json!({ "x": 400, "y": 302 })).unwrap();
+        assert_eq!(hit["grid"], json!("A"), "{hit}");
+        assert_eq!((hit["start"].clone(), hit["end"].clone()), (json!([-5.0, 0.0, 0.0]), json!([5.0, 0.0, 0.0])));
+        assert_eq!(app.picked_grid, None);
+        run(&mut app, "pick", json!({ "x": 400, "y": 302, "select": true })).unwrap();
+        assert_eq!(app.picked_grid, Some(0));
+        let state = run(&mut app, "get_state", json!({})).unwrap();
+        assert_eq!(state["selection"]["grid"], json!("A"), "{state}");
+        assert!(run(&mut app, "pick", json!({ "x": 400, "y": 380 })).unwrap()["grid"].is_null());
     }
 
     #[test]

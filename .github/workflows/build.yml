@@ -2,7 +2,7 @@ name: Build
 
 # Tests, the web build check and the desktop app for Windows, Linux and macOS, on every push to
 # main and every pull request. Releases come from release.yml (a tag vYYYY.W.N). The desktop app
-# includes Revit through the private rvt-dll library.
+# includes Revit through the private revit-dll library.
 on:
   push:
     branches: [main]
@@ -30,11 +30,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Read-only access to standalone libraries
-        uses: webfactory/ssh-agent@e83874834305fe9a4a2997156cb26c5de65a8555
+      # The deploy keys of the private readers, each by its name: the action gets these and no
+      # other secret. A new reader's secret is named here and in the same step of
+      # format-crates.yml, live.yml and release.yml.
+      - &reader-keys
+        name: Read-only access to standalone libraries
+        uses: ./.github/actions/reader-keys
         with:
-          ssh-private-key: ${{ secrets.FORMAT_CRATES_SSH_KEYS }}
-          log-public-key: false
+          keys: |
+            ${{ secrets.SSH_KEY_3DM_DLL }}
+            ${{ secrets.SSH_KEY_PLY_DLL }}
+            ${{ secrets.SSH_KEY_PLY_READER }}
+            ${{ secrets.SSH_KEY_REVIT_DLL }}
+            ${{ secrets.SSH_KEY_RHINO_DLL }}
+            ${{ secrets.SSH_KEY_RVT_DLL }}
+            ${{ secrets.SSH_KEY_SKETCHUP_DLL }}
+            ${{ secrets.SSH_KEY_SKP_READER }}
+            ${{ secrets.SSH_KEY_SOLIDWORKS_DLL }}
+            ${{ secrets.SSH_KEY_SOLIDEDGE_DLL }}
+            ${{ secrets.SSH_KEY_TEKLA_DLL }}
+            ${{ secrets.SSH_KEY_TEKLA_READER }}
+            ${{ secrets.SSH_KEY_VWX_DLL }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -47,8 +63,29 @@ jobs:
         run: |
           cargo test --release --locked
           cargo test --release --locked -p openaec-ui --lib
+      # Headless structural analysis model: unit tests, sam-json conformance, sam-check
+      - name: Tests (bim-structural)
+        run: cargo test --release --locked -p bim-structural
+      # Headless libraries: materials, layered build-ups, their IFCX form
+      - name: Tests (bim-library)
+        run: cargo test --release --locked -p bim-library
+      # Headless Docs: a project folder, its sync tool, the register as IFCX
+      - name: Tests (bim-docs)
+        run: cargo test --release --locked -p bim-docs
       - name: Web build (wasm32)
-        run: cargo check --locked --target wasm32-unknown-unknown --lib --bin open-3d-viewer
+        run: |
+          cargo check --locked --target wasm32-unknown-unknown --lib --bin open-3d-viewer --bin open-bim-modeller --bin open-bim-validator --bin open-bim-pointcloud
+          cargo check --locked --target wasm32-unknown-unknown -p bim-structural
+          cargo check --locked --target wasm32-unknown-unknown -p bim-library
+
+      # One product per build (docs/architecture/products.md): each feature on its own still
+      # compiles; only the app crate is checked again
+      - name: Product builds (wasm32)
+        run: |
+          cargo check --locked --target wasm32-unknown-unknown --no-default-features --features viewer --lib --bin open-3d-viewer
+          cargo check --locked --target wasm32-unknown-unknown --no-default-features --features modeller --lib --bin open-bim-modeller
+          cargo check --locked --target wasm32-unknown-unknown --no-default-features --features validator --lib --bin open-bim-validator
+          cargo check --locked --target wasm32-unknown-unknown --no-default-features --features pointcloud --lib --bin open-bim-pointcloud
 
   desktop:
     needs: test
@@ -64,6 +101,11 @@ jobs:
             exe: open-3d-viewer
             mcp: open-3d-viewer-mcp
             archive: open-3d-viewer-linux-x64.tar.gz
+          # the SuperCloud's servers are ARM (OpenAEC-Blueprint docs/supercloud-koppeling.md)
+          - platform: ubuntu-22.04-arm
+            exe: open-3d-viewer
+            mcp: open-3d-viewer-mcp
+            archive: open-3d-viewer-linux-arm64.tar.gz
           - platform: macos-latest
             exe: open-3d-viewer
             mcp: open-3d-viewer-mcp
@@ -71,18 +113,15 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v5
-      - name: Read-only access to standalone libraries
-        uses: webfactory/ssh-agent@e83874834305fe9a4a2997156cb26c5de65a8555
-        with:
-          ssh-private-key: ${{ secrets.FORMAT_CRATES_SSH_KEYS }}
-          log-public-key: false
+      - *reader-keys
       - uses: dtolnay/rust-toolchain@stable
       - uses: swatinem/rust-cache@v2
       - name: Linux dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y pkg-config libxkbcommon-dev libwayland-dev libx11-dev libvulkan-dev libgtk-3-dev
+      # the released programs; the binaries of one product alone are not packaged yet
       - name: Build
-        run: cargo build --release --locked
+        run: cargo build --release --locked --bin open-3d-viewer --bin open-3d-viewer-mcp
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -96,27 +135,35 @@ jobs:
           path: ${{ matrix.archive }}
           if-no-files-found: error
 
-  # The Linux build without a GPU or a desktop, as OpenAEC Linux runs it (OpenAEC-Blueprint#61);
-  # release.yml does the same with the AppImage.
+  # The Linux build without a GPU or a desktop, as OpenAEC Linux runs it (OpenAEC-Blueprint#61),
+  # with the MCP endpoint the SuperCloud uses; release.yml does the same with the AppImage.
   linux-headless:
     needs: desktop
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
         with:
-          name: open-3d-viewer-linux-x64.tar.gz
+          name: open-3d-viewer-linux-${{ matrix.arch }}.tar.gz
       - name: labwc, grim and Mesa's software renderers
         run: sudo apt-get update && sudo apt-get install -y labwc grim mesa-vulkan-drivers libegl-mesa0 libgl1-mesa-dri vulkan-tools
       - name: Start without a GPU and take screenshots
         run: |
           mkdir -p "$RUNNER_TEMP/app"
-          tar -xzf open-3d-viewer-linux-x64.tar.gz -C "$RUNNER_TEMP/app"
+          tar -xzf open-3d-viewer-linux-${{ matrix.arch }}.tar.gz -C "$RUNNER_TEMP/app"
           packaging/linux/headless-test.sh "$RUNNER_TEMP/app/open-3d-viewer" test-models/test-cube.obj headless
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: linux-headless
+          name: linux-headless-${{ matrix.arch }}
           path: headless/
           if-no-files-found: ignore
 

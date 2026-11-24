@@ -4,8 +4,21 @@
 //! viewport, resolved, and then blitted into iced's frame at the widget bounds. Model geometry
 //! is uploaded once per model (keyed by `Model::id`); each frame only writes the uniforms, and
 //! the offsets of the exploded view when they change.
+//!
+//! Point clouds are drawn as squares of the size the settings give (2.5 pixels unless set), whatever their distance: each
+//! point is an instance of a four-vertex triangle strip that the vertex shader spreads round the
+//! point on screen. Instanced quads rather than `PointList`, whose points are one pixel on every
+//! backend that matters (WebGL2 and WebGPU have no point size).
+//!
+//! Splat scenes (layers with `SplatData`) are drawn by `super::splats` after the opaque surfaces:
+//! sorted, blended Gaussians, not dots.
 
 use super::camera::Camera;
+use super::chunks;
+use super::splats::{GpuSplats, SplatPipeline};
+use super::structural::{GpuStructural, StructUniforms, StructuralPipelines};
+use crate::structural::display::Marks;
+use crate::structural::pick::Lod;
 use crate::explode::ExplodeIndex;
 use crate::model::{Bounds, Model};
 use bytemuck::{Pod, Zeroable};
@@ -17,9 +30,21 @@ use iced::Rectangle;
 use crate::section::SectionBox;
 use std::sync::Arc;
 
-const SAMPLES: u32 = 4;
+pub(crate) const SAMPLES: u32 = 4;
 /// With stencil, for the cut fill of the section box.
-const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24PlusStencil8;
+pub(crate) const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24PlusStencil8;
+/// The depth the ambient shadows read: a texture of its own, as a multisampled one cannot be
+/// read everywhere (WebGL2).
+const SHADOW_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+/// How far an ambient shadow reaches (metres), how dark it gets per unit of depth, and the
+/// darkest it gets.
+const SHADOW_REACH: f32 = 0.45;
+const SHADOW_STRENGTH: f32 = 1.6;
+const SHADOW_DARKEST: f32 = 0.5;
+/// The depth shading of point clouds: how strong, and how far the neighbours it compares a
+/// point with lie (logical pixels).
+const DOME_STRENGTH: f32 = 60.0;
+const DOME_RADIUS: f32 = 1.5;
 /// Cut fill: a dark neutral grey (as Open Pointcloud Studio), hatched every 9 pixels.
 const CAP_COLOR: [f32; 3] = [0.345, 0.345, 0.345];
 const CAP_HATCH: f32 = 9.0;
@@ -31,6 +56,16 @@ pub enum RenderMode {
     Wireframe,
     /// Solid with feature edges (creases and open borders) on top.
     SolidEdges,
+    /// Hidden lines: the faces white, unlit, hiding what lies behind them, and their feature
+    /// edges in black on top.
+    HiddenLine,
+}
+
+impl RenderMode {
+    /// Whether the mode draws the feature edges (else all triangle edges, or none).
+    pub fn features(self) -> bool {
+        matches!(self, RenderMode::SolidEdges | RenderMode::HiddenLine)
+    }
 }
 
 /// Colours and switches that come from the UI.
@@ -52,6 +87,15 @@ pub struct RenderSettings {
     pub caps: bool,
     /// Draw the model's grid lines (Revit grids).
     pub grids: bool,
+    /// Ambient shadows: surfaces darker in corners, under overhangs and behind what stands in
+    /// front of them (shaded styles only).
+    pub ambient: bool,
+    /// The size a point of a cloud is drawn at (logical pixels).
+    pub point_size: f32,
+    /// Depth shading of point clouds: a point is darker where it lies behind its neighbours.
+    pub cloud_depth: bool,
+    /// How the points of a cloud are coloured.
+    pub cloud_color: crate::cloud_color::CloudColor,
     /// World bounds of the model as drawn (pulled apart by the exploded view), for the ground
     /// grid; `None`: the model's own.
     pub bounds: Option<Bounds>,
@@ -65,6 +109,14 @@ struct Vertex {
     color: [u8; 4],
     /// Unit of the exploded view: index into the offsets (0 never moves).
     unit: u32,
+}
+
+/// A point of a point cloud: an instance of `vs_point`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+struct PointVertex {
+    position: [f32; 3],
+    color: [u8; 4],
 }
 
 #[repr(C)]
@@ -84,15 +136,40 @@ struct Uniforms {
 pub struct ScenePrimitive {
     pub model: Option<Arc<Model>>,
     pub visible: Vec<bool>,
-    /// Highlighted index ranges: (layer, first index, index count).
-    pub selection: Vec<(usize, u32, u32)>,
     pub camera: Camera,
     pub settings: RenderSettings,
     /// The units of the exploded view (`crate::explode`), uploaded with the model.
     pub explode: Option<Arc<ExplodeIndex>>,
-    /// The offset (world) of every unit; written when it is another vector.
+    /// The state of every unit (`crate::units`): its offset (world) in the exploded view and
+    /// its flags (hidden, selected); written when it is another vector.
     pub offsets: Arc<Vec<[f32; 4]>>,
+    /// How every unit looks otherwise than its material (`crate::units::unit_looks`): the
+    /// colour of its surfaces and of its lines, its transparency and halftone; written when it
+    /// is another vector.
+    pub looks: Arc<Vec<[f32; 4]>>,
+    /// Structural instances drawn again on top: the selection and the hover.
+    pub structural_selected: Arc<Marks>,
+    pub structural_hovered: Arc<Marks>,
+    /// The structural instances of the source models shown (`None`: all are).
+    pub structural_shown: Option<Arc<Marks>>,
+    /// The datum lines (grid lines, levels) where the view shown draws them, as world segments;
+    /// `None`: the model's grids where they are.
+    pub datum: Option<Arc<Vec<DatumSegment>>>,
+    /// The lines drawn over the model with their colours (world), solid: the underlays', the
+    /// views' in 3D.
+    pub overlay: Arc<Vec<crate::views3d::Colored>>,
+    /// Filled triangles in their colours, drawn unlit with the model: what a structural analysis
+    /// model shows as solids (arrows, supports, the deformed profiles).
+    pub faces: Arc<Vec<crate::structural::diagrams::Face>>,
+    /// The cut faces of the section box and plane in their hatches (`crate::caps`), drawn over
+    /// the model's own cut fill.
+    pub caps: Arc<crate::caps::CutFaces>,
+    /// The view moved since the frame before: elements too small to show are left out.
+    pub moving: bool,
 }
+
+/// A datum line (a grid line or a level) as drawn: its two ends (world).
+pub type DatumSegment = [[f32; 3]; 2];
 
 impl shader::Primitive for ScenePrimitive {
     type Pipeline = ScenePipeline;
@@ -120,16 +197,21 @@ impl shader::Primitive for ScenePrimitive {
 }
 
 struct GpuLayer {
+    /// [`Vertex`]es of a mesh, [`PointVertex`]es of a point cloud.
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
     index_count: u32,
-    /// Line lists, built on first use: all triangle edges (wireframe) and feature edges.
-    wire: Option<(wgpu::Buffer, u32)>,
+    /// The points of a point cloud layer (no indices); 0 for a mesh.
+    points: u32,
+    /// The feature edges as a line list, uploaded on first use: what wireframe, edges and
+    /// hidden lines draw.
     features: Option<(wgpu::Buffer, u32)>,
     /// Triangles that enclose volume (cut fill), built on first use.
     solid: Option<(wgpu::Buffer, u32)>,
-    /// Some vertices are transparent (glass pass).
-    transparent: bool,
+    /// The layer's own line segments (curves, text, hatches) as a line list.
+    lines: Option<(wgpu::Buffer, u32)>,
+    /// The triangles as they lie in `indices`: by where they are and how large (`chunks`).
+    chunks: Vec<chunks::Chunk>,
 }
 
 struct Targets {
@@ -137,6 +219,10 @@ struct Targets {
     msaa: wgpu::TextureView,
     resolve: wgpu::TextureView,
     depth: wgpu::TextureView,
+    /// The depth of the opaque surfaces, not multisampled: what the ambient shadows read.
+    shadow_depth: wgpu::TextureView,
+    /// The same with the points of the clouds over it: what their depth shading reads.
+    cloud_depth: wgpu::TextureView,
     blit_group: wgpu::BindGroup,
 }
 
@@ -144,13 +230,22 @@ pub struct ScenePipeline {
     format: wgpu::TextureFormat,
     srgb: bool,
     lit: wgpu::RenderPipeline,
-    highlight: wgpu::RenderPipeline,
     glass: wgpu::RenderPipeline,
     stencil_clear: wgpu::RenderPipeline,
-    face_count: wgpu::RenderPipeline,
+    /// Counts the surfaces behind a cut, one layer to a bit of the stencil: eight layers a pass.
+    face_count: [wgpu::RenderPipeline; 8],
     cap: wgpu::RenderPipeline,
     lines: wgpu::RenderPipeline,
+    /// Flat coloured triangles, not cut by the section: the cut faces in their hatches.
+    flat: wgpu::RenderPipeline,
+    flat_lines: wgpu::RenderPipeline,
+    curves: wgpu::RenderPipeline,
+    points: wgpu::RenderPipeline,
     blit: wgpu::RenderPipeline,
+    /// The opaque surfaces into the depth the ambient shadows read.
+    shadow_depth: wgpu::RenderPipeline,
+    /// The points of the clouds into the depth their shading reads.
+    points_depth: wgpu::RenderPipeline,
     blit_layout: wgpu::BindGroupLayout,
     blit_uniforms: wgpu::Buffer,
     uniform_layout: wgpu::BindGroupLayout,
@@ -165,15 +260,52 @@ pub struct ScenePipeline {
     offsets: wgpu::Texture,
     offsets_len: usize,
     offsets_written: Option<Arc<Vec<[f32; 4]>>>,
+    /// How every unit looks (a float texture beside the offsets), and the vector last written.
+    looks: wgpu::Texture,
+    looks_written: Option<Arc<Vec<[f32; 4]>>>,
+    /// A unit is see-through: the opaque surfaces are drawn in the glass pass too.
+    see_through: bool,
     targets: Option<Targets>,
     model_id: u64,
+    /// How the points of the uploaded model are coloured.
+    cloud_color: crate::cloud_color::CloudColor,
     model: Option<Arc<Model>>,
     layers: Vec<GpuLayer>,
+    /// What this frame draws of the layers (layer, first index, end), opaque and transparent:
+    /// the chunks in view, without the elements too small to show.
+    lit_draws: Vec<(u32, u32, u32)>,
+    glass_draws: Vec<(u32, u32, u32)>,
+    /// This frame draws the ambient shadows.
+    shadows: bool,
+    /// This frame shades the clouds by depth.
+    dome: bool,
+    /// The exploded view moves elements: everything is drawn then.
+    moved: bool,
     grid: Option<(wgpu::Buffer, u32, [i64; 6])>,
-    /// The model's grid lines (datum grids), dash-dot, built with the model.
+    /// The datum lines (grid lines, levels) of the view shown, dash-dot, and what they were
+    /// built from.
     datum: Option<(wgpu::Buffer, u32)>,
+    datum_source: Vec<DatumSegment>,
+    /// The lines drawn over the model and what they were built from.
+    overlay: Option<(wgpu::Buffer, u32)>,
+    overlay_source: Arc<Vec<crate::views3d::Colored>>,
+    overlay_faces: Option<(wgpu::Buffer, u32)>,
+    overlay_faces_source: Arc<Vec<crate::structural::diagrams::Face>>,
+    /// The cut faces in their hatches: their triangles, their lines, and what they were built from.
+    cut_faces: Option<(wgpu::Buffer, u32)>,
+    cut_lines: Option<(wgpu::Buffer, u32)>,
+    cut_source: Arc<crate::caps::CutFaces>,
     /// Viewport rectangle in target pixels, from the last `prepare`.
     rect: (u32, u32, u32, u32),
+    /// Member axes and node glyphs (`super::structural`), made with the first model that has
+    /// any, and the model's instances.
+    structural: Option<StructuralPipelines>,
+    gpu_structural: Option<GpuStructural>,
+    /// The structural selection and hover as last gathered (the marks they were gathered from).
+    structural_marked: [(Arc<Marks>, Option<GpuStructural>); 2],
+    /// The splat scenes: their pipeline and the model's splat layers.
+    splat_pipeline: SplatPipeline,
+    splats: GpuSplats,
 }
 
 impl shader::Pipeline for ScenePipeline {
@@ -217,6 +349,17 @@ impl ScenePipeline {
                     },
                     count: None,
                 },
+                // how every unit looks
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let make_uniforms = |label| {
@@ -231,14 +374,16 @@ impl ScenePipeline {
         let world_uniforms = make_uniforms("o3v.uniforms.world");
         let edge_uniforms = make_uniforms("o3v.uniforms.edges");
         let offsets = offsets_texture(device, 1);
-        let model_group = uniform_group(device, &uniform_layout, &model_uniforms, &offsets);
-        let world_group = uniform_group(device, &uniform_layout, &world_uniforms, &offsets);
-        let edge_group = uniform_group(device, &uniform_layout, &edge_uniforms, &offsets);
+        let looks = offsets_texture(device, 1);
+        let model_group = uniform_group(device, &uniform_layout, &model_uniforms, &offsets, &looks);
+        let world_group = uniform_group(device, &uniform_layout, &world_uniforms, &offsets, &looks);
+        let edge_group = uniform_group(device, &uniform_layout, &edge_uniforms, &offsets, &looks);
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("o3v.scene.shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("scene.wgsl").into()),
         });
+        let splat_pipeline = SplatPipeline::new(device, format, &uniform_layout, SAMPLES, DEPTH_FORMAT);
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("o3v.scene.layout"),
             bind_group_layouts: &[&uniform_layout],
@@ -279,6 +424,66 @@ impl ScenePipeline {
                 cache: None,
             })
         };
+        // The depth of the opaque surfaces once more, without multisampling, for the shadows.
+        let shadow_depth = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("o3v.shadow_depth"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[vertex_layout.clone()],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: SHADOW_DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_depth"),
+                targets: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            multiview: None,
+            cache: None,
+        });
+        // The points of the clouds into a depth of their own kind, for their depth shading.
+        let points_depth = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("o3v.points_depth"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_point"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<PointVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Unorm8x4],
+                }],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleStrip, cull_mode: None, ..Default::default() },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: SHADOW_DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_point_depth"),
+                targets: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            multiview: None,
+            cache: None,
+        });
         // Triangles are pushed back a little so edges drawn on top win the depth test.
         let lit = make_pipeline(
             "o3v.lit",
@@ -295,15 +500,6 @@ impl ScenePipeline {
             Some(wgpu::BlendState::ALPHA_BLENDING),
             wgpu::DepthBiasState { constant: 2, slope_scale: 1.0, clamp: 0.0 },
             false,
-        );
-        // The selection: the same triangles again (equal depth passes), tinted.
-        let highlight = make_pipeline(
-            "o3v.highlight",
-            wgpu::PrimitiveTopology::TriangleList,
-            "fs_highlight",
-            None,
-            wgpu::DepthBiasState { constant: 2, slope_scale: 1.0, clamp: 0.0 },
-            true,
         );
         // Cut fill: stencil clear, surface count per box face, the face where the count is odd.
         let stencil = |compare, pass_op| {
@@ -353,15 +549,19 @@ impl ScenePipeline {
             stencil(wgpu::CompareFunction::Always, wgpu::StencilOperation::Zero),
             wgpu::ColorWrites::empty(),
         );
-        let face_count = special(
-            "o3v.face_count",
-            "vs_face",
-            "fs_face_count",
-            true,
-            (wgpu::CompareFunction::Always, false),
-            stencil(wgpu::CompareFunction::Always, wgpu::StencilOperation::Invert),
-            wgpu::ColorWrites::empty(),
-        );
+        // each layer turns a bit of its own: two models that lie in each other (a supplier's
+        // slabs in the engineer's floor) then do not cancel each other out
+        let face_count = std::array::from_fn(|bit| {
+            special(
+                "o3v.face_count",
+                "vs_face",
+                "fs_face_count",
+                true,
+                (wgpu::CompareFunction::Always, false),
+                wgpu::StencilState { write_mask: 1 << bit, ..stencil(wgpu::CompareFunction::Always, wgpu::StencilOperation::Invert) },
+                wgpu::ColorWrites::empty(),
+            )
+        });
         let cap = special(
             "o3v.cap",
             "vs_cap",
@@ -379,6 +579,44 @@ impl ScenePipeline {
             wgpu::DepthBiasState::default(),
             true,
         );
+        // The cut faces in their hatches: unlit, and not cut away by the section they stand on.
+        let flat = make_pipeline("o3v.flat", wgpu::PrimitiveTopology::TriangleList, "fs_point", None, wgpu::DepthBiasState::default(), true);
+        let flat_lines = make_pipeline("o3v.flat_lines", wgpu::PrimitiveTopology::LineList, "fs_point", None, wgpu::DepthBiasState::default(), true);
+        // the model's own lines: unlit, cut by the section box and plane
+        let curves = make_pipeline("o3v.curves", wgpu::PrimitiveTopology::LineList, "fs_curve", Some(wgpu::BlendState::ALPHA_BLENDING), wgpu::DepthBiasState::default(), true);
+        // Point clouds: a square per point (instance), unlit.
+        let point_attributes = wgpu::vertex_attr_array![0 => Float32x3, 1 => Unorm8x4];
+        let points = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("o3v.points"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_point"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<PointVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &point_attributes,
+                }],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleStrip, cull_mode: None, ..Default::default() },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState { count: SAMPLES, mask: !0, alpha_to_coverage_enabled: false },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_point"),
+                targets: &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            multiview: None,
+            cache: None,
+        });
 
         // Blit
         let blit_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -404,9 +642,24 @@ impl ScenePipeline {
                     },
                     count: None,
                 },
+                // the depth the ambient shadows read
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Depth, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+                    count: None,
+                },
+                // the depth the shading of the clouds reads
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Depth, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+                    count: None,
+                },
             ],
         });
-        let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let blit_shader = device.create_shader_module
+(wgpu::ShaderModuleDescriptor {
             label: Some("o3v.blit.shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("blit.wgsl").into()),
         });
@@ -438,7 +691,7 @@ impl ScenePipeline {
         });
         let blit_uniforms = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("o3v.blit.uniforms"),
-            size: 16,
+            size: 64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -447,13 +700,18 @@ impl ScenePipeline {
             format,
             srgb: format.is_srgb(),
             lit,
-            highlight,
             glass,
             stencil_clear,
             face_count,
             cap,
             lines,
+            flat,
+            flat_lines,
+            curves,
+            points,
             blit,
+            shadow_depth,
+            points_depth,
             blit_layout,
             blit_uniforms,
             uniform_layout,
@@ -466,13 +724,35 @@ impl ScenePipeline {
             offsets,
             offsets_len: 1,
             offsets_written: None,
+            looks,
+            looks_written: None,
+            see_through: false,
             targets: None,
             model_id: 0,
+            cloud_color: Default::default(),
             model: None,
             layers: Vec::new(),
+            lit_draws: Vec::new(),
+            glass_draws: Vec::new(),
+            shadows: false,
+            dome: false,
+            moved: false,
             grid: None,
             datum: None,
+            overlay: None,
+            overlay_source: Default::default(),
+            overlay_faces: None,
+            overlay_faces_source: Default::default(),
+            cut_faces: None,
+            cut_lines: None,
+            cut_source: Default::default(),
+            datum_source: Vec::new(),
             rect: (0, 0, 1, 1),
+            structural: None,
+            gpu_structural: None,
+            structural_marked: Default::default(),
+            splat_pipeline,
+            splats: GpuSplats::default(),
         }
     }
 
@@ -502,25 +782,32 @@ impl ScenePipeline {
             wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
         );
         let depth = texture("o3v.depth", DEPTH_FORMAT, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT);
+        let shadow_depth = texture("o3v.shadow_depth", SHADOW_DEPTH_FORMAT, 1, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING);
+        let cloud_depth = texture("o3v.cloud_depth", SHADOW_DEPTH_FORMAT, 1, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING);
         let blit_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("o3v.blit.group"),
             layout: &self.blit_layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&resolve) },
                 wgpu::BindGroupEntry { binding: 1, resource: self.blit_uniforms.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&shadow_depth) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&cloud_depth) },
             ],
         });
-        self.targets = Some(Targets { size, msaa, resolve, depth, blit_group });
+        self.targets = Some(Targets { size, msaa, resolve, depth, shadow_depth, cloud_depth, blit_group });
     }
 
     /// Makes room for the offsets of `units` units of the exploded view (all zero) and binds it.
     fn resize_offsets(&mut self, device: &wgpu::Device, units: usize) {
         self.offsets = offsets_texture(device, units);
+        self.looks = offsets_texture(device, units);
         self.offsets_len = units.max(1);
         self.offsets_written = None;
-        self.model_group = uniform_group(device, &self.uniform_layout, &self.model_uniforms, &self.offsets);
-        self.world_group = uniform_group(device, &self.uniform_layout, &self.world_uniforms, &self.offsets);
-        self.edge_group = uniform_group(device, &self.uniform_layout, &self.edge_uniforms, &self.offsets);
+        self.looks_written = None;
+        self.see_through = false;
+        self.model_group = uniform_group(device, &self.uniform_layout, &self.model_uniforms, &self.offsets, &self.looks);
+        self.world_group = uniform_group(device, &self.uniform_layout, &self.world_uniforms, &self.offsets, &self.looks);
+        self.edge_group = uniform_group(device, &self.uniform_layout, &self.edge_uniforms, &self.offsets, &self.looks);
     }
 
     fn upload_model(&mut self, device: &wgpu::Device, model: Option<&Arc<Model>>, explode: Option<&ExplodeIndex>) {
@@ -531,21 +818,37 @@ impl ScenePipeline {
         self.model_id = id;
         self.model = model.cloned();
         self.layers.clear();
-        self.datum = None;
+        self.gpu_structural = None;
+        self.structural_marked = Default::default();
         self.resize_offsets(device, explode.map_or(1, ExplodeIndex::len));
         let Some(model) = model else { return };
-        let datum = datum_lines(&model.project.grids);
-        if !datum.is_empty() {
-            let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("o3v.datum"),
-                contents: bytemuck::cast_slice(&datum),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-            self.datum = Some((buffer, datum.len() as u32));
+        // beside the datum grid: the structural instances, built on the load worker, with the units
+        // of the exploded view written in
+        if let Some(display) = &model.structural_display {
+            self.gpu_structural = GpuStructural::new(device, display, explode.map_or(&[][..], ExplodeIndex::display_units));
+            if self.gpu_structural.is_some() && self.structural.is_none() {
+                self.structural = Some(StructuralPipelines::new(device, self.format, &self.uniform_layout));
+            }
         }
+        // the grid of cells the layers' triangles are put in
+        let (low, high) = (Vec3::from(model.bounds.min), Vec3::from(model.bounds.max));
+        let cell = ((high - low).max_element() / chunks::CELLS).max(1e-3);
+        // the heights of the model's clouds, for colouring them by height
+        let heights = model.layers.iter().filter(|l| l.points && l.splats.is_none()).flat_map(|l| l.positions.chunks_exact(3).map(|p| p[2]));
+        let (floor, top) = heights.fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), z| (lo.min(z), hi.max(z)));
         for (l, layer) in model.layers.iter().enumerate() {
             let base = layer.color.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
             let base = [base[0], base[1], base[2], 255];
+            if layer.splats.is_some() {
+                // drawn by `GpuSplats`: nothing here
+                let empty = || device.create_buffer(&wgpu::BufferDescriptor { label: Some("o3v.layer.splats"), size: 4, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::INDEX, mapped_at_creation: false });
+                self.layers.push(GpuLayer { vertices: empty(), indices: empty(), index_count: 0, points: 0, features: None, solid: None, lines: None, chunks: Vec::new() });
+                continue;
+            }
+            if layer.points {
+                self.layers.push(upload_points(device, layer, base, self.cloud_color, (floor, top)));
+                continue;
+            }
             let units = explode.and_then(|e| e.vertex_units.get(l));
             let vertices: Vec<Vertex> = (0..layer.vertex_count())
                 .map(|i| Vertex {
@@ -564,19 +867,29 @@ impl ScenePipeline {
                 contents: bytemuck::cast_slice(&vertices),
                 usage: wgpu::BufferUsages::VERTEX,
             });
+            let chunked = chunks::chunked(layer, low, cell);
             let indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("o3v.layer.indices"),
-                contents: bytemuck::cast_slice(&layer.indices),
+                contents: bytemuck::cast_slice(&chunked.indices),
                 usage: wgpu::BufferUsages::INDEX,
+            });
+            let lines = (!layer.lines.is_empty()).then(|| {
+                let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("o3v.layer.lines"),
+                    contents: bytemuck::cast_slice(&layer.lines),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+                (buffer, layer.lines.len() as u32)
             });
             self.layers.push(GpuLayer {
                 vertices,
                 indices,
                 index_count: layer.indices.len() as u32,
-                wire: None,
+                points: 0,
                 features: None,
                 solid: None,
-                transparent: layer.colors.as_ref().is_some_and(|c| c.iter().any(|c| c[3] < 253)),
+                lines,
+                chunks: chunked.chunks,
             });
         }
     }
@@ -607,32 +920,90 @@ impl ScenePipeline {
     }
 
     /// Builds the line index buffers for visible layers on first use.
-    fn ensure_edges(&mut self, device: &wgpu::Device, visible: &[bool], all_triangle_edges: bool) {
+    fn ensure_edges(&mut self, device: &wgpu::Device, visible: &[bool]) {
         let Some(model) = self.model.clone() else { return };
         for (i, (gpu, layer)) in self.layers.iter_mut().zip(&model.layers).enumerate() {
-            if !visible.get(i).copied().unwrap_or(true) {
+            if !visible.get(i).copied().unwrap_or(true) || layer.points || gpu.features.is_some() {
                 continue;
             }
-            let slot = if all_triangle_edges { &mut gpu.wire } else { &mut gpu.features };
-            if slot.is_some() {
-                continue;
-            }
-            let lines = if all_triangle_edges {
-                let mut lines = Vec::with_capacity(layer.indices.len() * 2);
-                for t in layer.indices.chunks_exact(3) {
-                    lines.extend_from_slice(&[t[0], t[1], t[1], t[2], t[2], t[0]]);
-                }
-                lines
-            } else {
-                feature_edges(&layer.positions, &layer.indices, 25.0)
-            };
+            // found ahead when the model came in, else here
+            let lines = layer_edges(&model, i);
             let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("o3v.layer.edges"),
                 contents: bytemuck::cast_slice(&lines),
                 usage: wgpu::BufferUsages::INDEX,
             });
-            *slot = Some((buffer, lines.len() as u32));
+            gpu.features = Some((buffer, lines.len() as u32));
         }
+    }
+
+    /// The datum lines of the view shown (else the model's grids), built again when they move.
+    fn upload_datum(&mut self, device: &wgpu::Device, primitive: &ScenePrimitive) {
+        let segments: Vec<DatumSegment> = match (&primitive.datum, &primitive.model) {
+            (Some(datum), _) => datum.to_vec(),
+            (None, Some(model)) => model.project.grids.iter().map(|g| [g.a, g.b]).collect(),
+            (None, None) => Vec::new(),
+        };
+        if segments == self.datum_source && (self.datum.is_some() || segments.is_empty()) {
+            return;
+        }
+        let vertices = datum_lines(&segments);
+        self.datum = (!vertices.is_empty()).then(|| {
+            let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("o3v.datum"),
+                contents: bytemuck::cast_slice(&vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            (buffer, vertices.len() as u32)
+        });
+        self.datum_source = segments;
+    }
+
+    /// The lines drawn over the model, built again when they change.
+    fn upload_overlay(&mut self, device: &wgpu::Device, primitive: &ScenePrimitive) {
+        if Arc::ptr_eq(&primitive.overlay, &self.overlay_source) {
+            return;
+        }
+        let vertices = overlay_lines(&primitive.overlay);
+        self.overlay = (!vertices.is_empty()).then(|| {
+            let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("o3v.overlay"),
+                contents: bytemuck::cast_slice(&vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            (buffer, vertices.len() as u32)
+        });
+        self.overlay_source = primitive.overlay.clone();
+    }
+
+    /// The filled triangles of the overlay, built again when they change.
+    fn upload_overlay_faces(&mut self, device: &wgpu::Device, primitive: &ScenePrimitive) {
+        if Arc::ptr_eq(&primitive.faces, &self.overlay_faces_source) {
+            return;
+        }
+        let vertices: Vec<Vertex> = primitive.faces.iter().flat_map(|(t, colors)| [0, 1, 2].map(|k| Vertex { position: t[k], normal: [0.0, 0.0, 1.0], color: colors[k], unit: 0 })).collect();
+        self.overlay_faces = (!vertices.is_empty()).then(|| {
+            let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("o3v.overlay_faces"), contents: bytemuck::cast_slice(&vertices), usage: wgpu::BufferUsages::VERTEX });
+            (buffer, vertices.len() as u32)
+        });
+        self.overlay_faces_source = primitive.faces.clone();
+    }
+
+    /// The cut faces in their hatches, built again when they change.
+    fn upload_cut_faces(&mut self, device: &wgpu::Device, primitive: &ScenePrimitive) {
+        if Arc::ptr_eq(&primitive.caps, &self.cut_source) {
+            return;
+        }
+        let vertex = |p: [f32; 3], color: [u8; 4]| Vertex { position: p, normal: [0.0, 0.0, 1.0], color, unit: 0 };
+        let buffer = |label, vertices: Vec<Vertex>| {
+            (!vertices.is_empty()).then(|| {
+                let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents: bytemuck::cast_slice(&vertices), usage: wgpu::BufferUsages::VERTEX });
+                (buffer, vertices.len() as u32)
+            })
+        };
+        self.cut_faces = buffer("o3v.cut_faces", primitive.caps.triangles.iter().flat_map(|(t, color)| t.map(|p| vertex(p, *color))).collect());
+        self.cut_lines = buffer("o3v.cut_lines", overlay_lines(&primitive.caps.lines));
+        self.cut_source = primitive.caps.clone();
     }
 
     fn ensure_grid(&mut self, device: &wgpu::Device, bounds: &Bounds, settings: &RenderSettings) {
@@ -698,19 +1069,67 @@ impl ScenePipeline {
         let h = ((bounds.height * scale).round() as u32).clamp(1, target.height - y);
         self.rect = (x, y, w, h);
         self.ensure_targets(device, (w, h));
-        queue.write_buffer(&self.blit_uniforms, 0, bytemuck::cast_slice(&[x as f32, y as f32, 0.0, 0.0]));
+        // the ambient shadows: in the shaded styles, read from the depth of the model
+        let shaded = matches!(primitive.settings.mode, RenderMode::Solid | RenderMode::SolidEdges);
+        self.shadows = primitive.settings.ambient && shaded && primitive.model.is_some();
+        // the depth shading of the clouds, where the model has one
+        self.dome = primitive.settings.cloud_depth && primitive.model.as_ref().is_some_and(|m| m.layers.iter().any(|l| l.points && l.splats.is_none()));
+        {
+            let camera = &primitive.camera;
+            let projection = camera.projection(w as f32 / h as f32);
+            // pixels a metre is at depth 1 (perspective) or anywhere (parallel)
+            let per_metre = projection.y_axis.y * h as f32 / 2.0;
+            // the depth range, as `Camera::projection` sets it
+            let (near, far) = if camera.ortho {
+                (0.0, 2.0 * (camera.distance + camera.scene_radius * 4.0 + 1.0))
+            } else {
+                ((camera.distance * 0.002).max(1e-4), camera.distance + camera.scene_radius * 4.0 + 1.0)
+            };
+            let on = if self.shadows { 1.0 } else { 0.0 };
+            let parallel = if camera.ortho { 1.0 } else { 0.0 };
+            let dome = if self.dome { 1.0 } else { 0.0 };
+            let params: [f32; 16] = [x as f32, y as f32, 0.0, 0.0, on, parallel, near, far, per_metre, SHADOW_REACH, SHADOW_STRENGTH, SHADOW_DARKEST, dome, DOME_STRENGTH, (DOME_RADIUS * scale).max(1.0), 0.0];
+            queue.write_buffer(&self.blit_uniforms, 0, bytemuck::cast_slice(&params));
+        }
 
+        // another way to colour a cloud: its points are sent again
+        if primitive.settings.cloud_color != self.cloud_color {
+            self.cloud_color = primitive.settings.cloud_color;
+            if self.model.as_ref().is_some_and(|m| m.layers.iter().any(|l| l.points)) {
+                self.model_id = 0;
+            }
+        }
         self.upload_model(device, primitive.model.as_ref(), primitive.explode.as_deref());
+        self.splats.upload(device, queue, &self.splat_pipeline, primitive.model.as_ref());
+        {
+            let camera = &primitive.camera;
+            let forward = (camera.target - camera.eye()).normalize_or_zero();
+            self.splats.prepare(queue, primitive.model.as_ref(), primitive.settings.model_matrix, camera.eye(), forward, (w, h));
+        }
+        self.upload_datum(device, primitive);
+        self.upload_overlay(device, primitive);
+        self.upload_overlay_faces(device, primitive);
+        self.upload_cut_faces(device, primitive);
+        self.gather_structural_marks(device, primitive);
         if !self.offsets_written.as_ref().is_some_and(|o| Arc::ptr_eq(o, &primitive.offsets)) {
             let n = primitive.offsets.len().min(self.offsets_len);
             if n > 0 {
                 write_offsets(queue, &self.offsets, &primitive.offsets[..n]);
             }
             self.offsets_written = Some(primitive.offsets.clone());
+            self.moved = primitive.offsets.iter().any(|o| o[0] != 0.0 || o[1] != 0.0 || o[2] != 0.0);
+        }
+        if !self.looks_written.as_ref().is_some_and(|o| Arc::ptr_eq(o, &primitive.looks)) {
+            // all zero where it was written longer before: as its material
+            let mut looks = primitive.looks.as_ref().clone();
+            looks.resize(self.offsets_len, [0.0; 4]);
+            write_offsets(queue, &self.looks, &looks);
+            self.see_through = primitive.looks.iter().any(|l| l[2] > 0.0);
+            self.looks_written = Some(primitive.looks.clone());
         }
         let settings = &primitive.settings;
         if settings.mode != RenderMode::Solid {
-            self.ensure_edges(device, &primitive.visible, settings.mode == RenderMode::Wireframe);
+            self.ensure_edges(device, &primitive.visible);
         }
         if (settings.section.is_some() || settings.plane.is_some()) && settings.caps && settings.mode != RenderMode::Wireframe {
             self.ensure_solids(device);
@@ -729,21 +1148,85 @@ impl ScenePipeline {
         let srgb = if self.srgb { 1.0 } else { 0.0 };
         let clip = settings.section.map(|s| s.uniform()).unwrap_or([[0.0, 0.0, 0.0, 1.0], [0.0; 4], [0.0; 4]]);
         let plane = settings.plane.unwrap_or([[0.0; 4]; 2]);
+        // half the point size in clip units (x, y), for `vs_point`
+        let point = settings.point_size.clamp(0.5, 32.0) * scale;
+        // eye.w: 2 draws the faces white and unlit (hidden lines)
+        let faces = if settings.mode == RenderMode::HiddenLine { 2.0 } else { 1.0 };
         let uniforms = |model: Mat4, line_scale: f32, clip: [[f32; 4]; 3], plane: [[f32; 4]; 2]| Uniforms {
             view_proj: view_proj.to_cols_array_2d(),
             model: model.to_cols_array_2d(),
-            eye: [eye.x, eye.y, eye.z, 1.0],
-            params: [srgb, line_scale, 0.0, 0.0],
+            eye: [eye.x, eye.y, eye.z, faces],
+            params: [srgb, line_scale, point / w as f32, point / h as f32],
             clip,
             cap: [CAP_COLOR[0], CAP_COLOR[1], CAP_COLOR[2], CAP_HATCH * viewport.scale_factor() as f32],
             plane,
         };
-        let wire_scale = if settings.mode == RenderMode::SolidEdges { 0.35 } else { 0.8 };
+        // what of the layers this frame draws
+        let sight = chunks::Sight {
+            clip: view_proj * settings.model_matrix,
+            eye: settings.model_matrix.inverse().transform_point3(eye),
+            scale: camera.projection(w as f32 / h as f32).y_axis.y * h as f32 / 2.0,
+            parallel: camera.ortho,
+            all: self.moved,
+            still: !primitive.moving,
+        };
+        self.lit_draws.clear();
+        self.glass_draws.clear();
+        for (l, layer) in self.layers.iter().enumerate() {
+            if primitive.visible.get(l).copied().unwrap_or(true) && layer.index_count > 0 {
+                chunks::draws(&layer.chunks, &sight, false, l as u32, &mut self.lit_draws);
+                chunks::draws(&layer.chunks, &sight, true, l as u32, &mut self.glass_draws);
+                // a unit made see-through by the view: its opaque surfaces blend in the glass pass
+                if self.see_through {
+                    chunks::draws(&layer.chunks, &sight, false, l as u32, &mut self.glass_draws);
+                }
+            }
+        }
+        // the edges darker than their colour; black in hidden lines
+        let wire_scale = match settings.mode {
+            RenderMode::SolidEdges => 0.35,
+            RenderMode::HiddenLine => 0.0,
+            _ => 0.8,
+        };
         queue.write_buffer(&self.model_uniforms, 0, bytemuck::bytes_of(&uniforms(settings.model_matrix, 1.0, clip, plane)));
         queue.write_buffer(&self.edge_uniforms, 0, bytemuck::bytes_of(&uniforms(settings.model_matrix, wire_scale, clip, plane)));
         // the grid is never cut
         let no_clip = [[0.0, 0.0, 0.0, 1.0], [0.0; 4], [0.0; 4]];
         queue.write_buffer(&self.world_uniforms, 0, bytemuck::bytes_of(&uniforms(Mat4::IDENTITY, 1.0, no_clip, [[0.0; 4]; 2])));
+        if let (Some(structural), Some(_)) = (&self.structural, &self.gpu_structural) {
+            let proj11 = camera.projection(w as f32 / h as f32).y_axis.y;
+            let logical = (w as f32 / scale, h as f32 / scale);
+            structural.write(queue, &StructUniforms::new(logical, proj11, settings.background, &Lod::default()));
+        }
+    }
+
+    /// Draws index ranges of the layers (layer, first index, end), as `prepare` chose them.
+    fn draw_layers(&self, pass: &mut wgpu::RenderPass<'_>, draws: &[(u32, u32, u32)]) {
+        let mut bound = u32::MAX;
+        for &(l, from, to) in draws {
+            let Some(layer) = self.layers.get(l as usize) else { continue };
+            if l != bound {
+                pass.set_vertex_buffer(0, layer.vertices.slice(..));
+                pass.set_index_buffer(layer.indices.slice(..), wgpu::IndexFormat::Uint32);
+                bound = l;
+            }
+            pass.draw_indexed(from..to, 0, 0..1);
+        }
+    }
+
+    /// Gathers the instances of the structural selection and hover into buffers of their own when
+    /// they changed (another `Arc`), so drawing them costs a draw per pipeline whatever their size.
+    fn gather_structural_marks(&mut self, device: &wgpu::Device, primitive: &ScenePrimitive) {
+        let display = primitive.model.as_ref().and_then(|m| m.structural_display.as_ref()).filter(|_| self.gpu_structural.is_some());
+        let units = primitive.explode.as_deref().map_or(&[][..], ExplodeIndex::display_units);
+        for (k, marks) in [&primitive.structural_selected, &primitive.structural_hovered].into_iter().enumerate() {
+            let (last, gathered) = &mut self.structural_marked[k];
+            if Arc::ptr_eq(last, marks) {
+                continue;
+            }
+            *last = marks.clone();
+            *gathered = display.and_then(|d| GpuStructural::gather(device, d, units, marks));
+        }
     }
 
     fn render(
@@ -760,6 +1243,48 @@ impl ScenePipeline {
         } else {
             wgpu::Color { r: bg[0] as f64, g: bg[1] as f64, b: bg[2] as f64, a: 1.0 }
         };
+        // the depth of the opaque surfaces for the ambient shadows, before the frame itself
+        if self.shadows || self.dome {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("o3v.shadow_depth.pass"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &targets.shadow_depth,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.shadow_depth);
+            pass.set_bind_group(0, &self.model_group, &[]);
+            self.draw_layers(&mut pass, &self.lit_draws);
+        }
+        // the same with the points of the clouds over it, for their depth shading
+        if self.dome {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("o3v.cloud_depth.pass"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &targets.cloud_depth,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.shadow_depth);
+            pass.set_bind_group(0, &self.model_group, &[]);
+            self.draw_layers(&mut pass, &self.lit_draws);
+            pass.set_pipeline(&self.points_depth);
+            pass.set_bind_group(0, &self.model_group, &[]);
+            for (i, layer) in self.layers.iter().enumerate() {
+                if primitive.visible.get(i).copied().unwrap_or(true) && layer.points > 0 {
+                    pass.set_vertex_buffer(0, layer.vertices.slice(..));
+                    pass.draw(0..4, 0..layer.points);
+                }
+            }
+        }
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("o3v.scene.pass"),
@@ -784,25 +1309,47 @@ impl ScenePipeline {
             if mode != RenderMode::Wireframe {
                 pass.set_pipeline(&self.lit);
                 pass.set_bind_group(0, &self.model_group, &[]);
+                self.draw_layers(&mut pass, &self.lit_draws);
+            }
+            // point clouds in every mode: they have no faces or edges
+            if self.layers.iter().any(|l| l.points > 0) {
+                pass.set_pipeline(&self.points);
+                pass.set_bind_group(0, &self.model_group, &[]);
                 for (i, layer) in self.layers.iter().enumerate() {
-                    if visible(i) {
+                    if visible(i) && layer.points > 0 {
                         pass.set_vertex_buffer(0, layer.vertices.slice(..));
-                        pass.set_index_buffer(layer.indices.slice(..), wgpu::IndexFormat::Uint32);
-                        pass.draw_indexed(0..layer.index_count, 0, 0..1);
+                        pass.draw(0..4, 0..layer.points);
                     }
                 }
             }
-            if !primitive.selection.is_empty() {
-                pass.set_pipeline(&self.highlight);
+            // splat scenes in every mode, over the opaque surfaces and clouds
+            if !self.splats.is_empty() {
+                self.splats.draw(&mut pass, &self.splat_pipeline, &self.model_group, visible);
+            }
+            // the layers' own lines (curves, text, hatches) in every mode, unlit in their colours
+            if self.layers.iter().any(|l| l.lines.is_some()) {
+                pass.set_pipeline(&self.curves);
                 pass.set_bind_group(0, &self.model_group, &[]);
-                for &(i, first, count) in &primitive.selection {
-                    let Some(layer) = self.layers.get(i) else { continue };
-                    if visible(i) && first + count <= layer.index_count {
+                for (i, layer) in self.layers.iter().enumerate() {
+                    if let (true, Some((lines, count))) = (visible(i), &layer.lines) {
                         pass.set_vertex_buffer(0, layer.vertices.slice(..));
-                        pass.set_index_buffer(layer.indices.slice(..), wgpu::IndexFormat::Uint32);
-                        pass.draw_indexed(first..first + count, 0, 0..1);
+                        pass.set_index_buffer(lines.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.draw_indexed(0..*count, 0, 0..1);
                     }
                 }
+            }
+            // member axes and nodes, after the lit layers and point clouds, before the cut fill
+            if let (Some(structural), Some(gpu)) = (&self.structural, &self.gpu_structural) {
+                pass.set_bind_group(0, &self.model_group, &[]);
+                let [(_, selected), (_, hovered)] = &self.structural_marked;
+                structural.draw(&mut pass, gpu, primitive.structural_shown.as_deref(), selected.as_ref(), hovered.as_ref());
+            }
+            // the solids of the overlay: unlit, in the depth of the model
+            if let Some((faces, count)) = &self.overlay_faces {
+                pass.set_pipeline(&self.flat);
+                pass.set_bind_group(0, &self.world_group, &[]);
+                pass.set_vertex_buffer(0, faces.slice(..));
+                pass.draw(0..*count, 0..1);
             }
             if primitive.settings.caps && mode != RenderMode::Wireframe {
                 pass.set_bind_group(0, &self.model_group, &[]);
@@ -811,40 +1358,44 @@ impl ScenePipeline {
                 if primitive.settings.plane.is_some_and(|p| plane_cap_visible(p[0], &primitive.camera)) {
                     faces.push(6);
                 }
+                // the layers with solids, eight at a time: each counts in a bit of its own, and
+                // the face is filled where any of them is cut
+                let solids: Vec<&GpuLayer> = self.layers.iter().enumerate().filter(|(i, layer)| visible(*i) && layer.solid.as_ref().is_some_and(|(_, count)| *count > 0)).map(|(_, layer)| layer).collect();
                 for face in faces {
-                    pass.set_pipeline(&self.stencil_clear);
-                    pass.draw(0..3, 0..1);
-                    pass.set_pipeline(&self.face_count);
-                    for (i, layer) in self.layers.iter().enumerate() {
-                        if let (true, Some((solid, count))) = (visible(i), &layer.solid) {
-                            if *count > 0 {
-                                pass.set_vertex_buffer(0, layer.vertices.slice(..));
-                                pass.set_index_buffer(solid.slice(..), wgpu::IndexFormat::Uint32);
-                                pass.draw_indexed(0..*count, 0, face..face + 1);
-                            }
+                    for group in solids.chunks(self.face_count.len()) {
+                        pass.set_pipeline(&self.stencil_clear);
+                        pass.draw(0..3, 0..1);
+                        for (layer, count_bit) in group.iter().zip(&self.face_count) {
+                            let Some((solid, count)) = &layer.solid else { continue };
+                            pass.set_pipeline(count_bit);
+                            pass.set_vertex_buffer(0, layer.vertices.slice(..));
+                            pass.set_index_buffer(solid.slice(..), wgpu::IndexFormat::Uint32);
+                            pass.draw_indexed(0..*count, 0, face..face + 1);
                         }
+                        pass.set_pipeline(&self.cap);
+                        pass.draw(0..6, face..face + 1);
                     }
-                    pass.set_pipeline(&self.cap);
-                    pass.draw(0..6, face..face + 1);
+                }
+                // the cut faces in their hatches, over that fill
+                for (pipeline, drawn) in [(&self.flat, &self.cut_faces), (&self.flat_lines, &self.cut_lines)] {
+                    if let Some((vertices, count)) = drawn {
+                        pass.set_pipeline(pipeline);
+                        pass.set_bind_group(0, &self.world_group, &[]);
+                        pass.set_vertex_buffer(0, vertices.slice(..));
+                        pass.draw(0..*count, 0..1);
+                    }
                 }
             }
             if mode != RenderMode::Wireframe {
                 pass.set_pipeline(&self.glass);
                 pass.set_bind_group(0, &self.model_group, &[]);
-                for (i, layer) in self.layers.iter().enumerate() {
-                    if visible(i) && layer.transparent {
-                        pass.set_vertex_buffer(0, layer.vertices.slice(..));
-                        pass.set_index_buffer(layer.indices.slice(..), wgpu::IndexFormat::Uint32);
-                        pass.draw_indexed(0..layer.index_count, 0, 0..1);
-                    }
-                }
+                self.draw_layers(&mut pass, &self.glass_draws);
             }
             pass.set_pipeline(&self.lines);
             if mode != RenderMode::Solid {
                 pass.set_bind_group(0, &self.edge_group, &[]);
                 for (i, layer) in self.layers.iter().enumerate() {
-                    let edges = if mode == RenderMode::Wireframe { &layer.wire } else { &layer.features };
-                    if let (true, Some((edges, count))) = (visible(i), edges) {
+                    if let (true, Some((edges, count))) = (visible(i), &layer.features) {
                         pass.set_vertex_buffer(0, layer.vertices.slice(..));
                         pass.set_index_buffer(edges.slice(..), wgpu::IndexFormat::Uint32);
                         pass.draw_indexed(0..*count, 0, 0..1);
@@ -854,6 +1405,11 @@ impl ScenePipeline {
             if let (true, Some((datum, count))) = (primitive.settings.grids, &self.datum) {
                 pass.set_bind_group(0, &self.world_group, &[]);
                 pass.set_vertex_buffer(0, datum.slice(..));
+                pass.draw(0..*count, 0..1);
+            }
+            if let Some((overlay, count)) = &self.overlay {
+                pass.set_bind_group(0, &self.world_group, &[]);
+                pass.set_vertex_buffer(0, overlay.slice(..));
                 pass.draw(0..*count, 0..1);
             }
             if primitive.settings.grid {
@@ -887,12 +1443,44 @@ impl ScenePipeline {
     }
 }
 
+/// The points of a point cloud layer as an instance buffer, written straight into the mapped
+/// buffer (no second copy of a large cloud in memory). Points without a colour take `base`;
+/// `color` says how they are coloured, `heights` the lowest and highest point of their cloud.
+fn upload_points(device: &wgpu::Device, layer: &crate::model::Layer, base: [u8; 4], color: crate::cloud_color::CloudColor, heights: (f32, f32)) -> GpuLayer {
+    let span = (heights.1 - heights.0).max(1e-6);
+    let n = layer.vertex_count();
+    let size = std::mem::size_of::<PointVertex>();
+    let vertices = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("o3v.layer.points"),
+        size: (n.max(1) * size) as u64,
+        usage: wgpu::BufferUsages::VERTEX,
+        mapped_at_creation: true,
+    });
+    {
+        let mut view = vertices.slice(..).get_mapped_range_mut();
+        let out: &mut [PointVertex] = bytemuck::cast_slice_mut(&mut view[..n * size]);
+        for (i, (p, v)) in layer.positions.chunks_exact(3).zip(out.iter_mut()).enumerate() {
+            let stored = layer.colors.as_ref().and_then(|c| c.get(i).copied()).unwrap_or(base);
+            *v = PointVertex { position: [p[0], p[1], p[2]], color: color.of(stored, (p[2] - heights.0) / span, base) };
+        }
+    }
+    vertices.unmap();
+    let indices = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("o3v.layer.indices"),
+        size: 4,
+        usage: wgpu::BufferUsages::INDEX,
+        mapped_at_creation: false,
+    });
+    GpuLayer { vertices, indices, index_count: 0, points: n as u32, features: None, solid: None, lines: None, chunks: Vec::new() }
+}
+
 /// Units per row of the offsets texture; `OFFSETS_WIDTH` in scene.wgsl. With WebGL2's 2048 rows
 /// that leaves room for two million units.
 const OFFSETS_WIDTH: usize = 1024;
 
-/// The offsets of the exploded view for `units` units (at least one), zero: a float texture
-/// rather than a storage buffer, so the scene also draws through WebGL2.
+/// The state of `units` units (at least one), zero: the offset of the exploded view and the
+/// flags of `crate::units`. A float texture rather than a storage buffer, so the scene also
+/// draws through WebGL2.
 fn offsets_texture(device: &wgpu::Device, units: usize) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some("o3v.explode.offsets"),
@@ -906,7 +1494,8 @@ fn offsets_texture(device: &wgpu::Device, units: usize) -> wgpu::Texture {
     })
 }
 
-/// Writes `offsets` into the texture from unit 0, the last row padded with zeros.
+/// Writes the unit state (`crate::units::unit_state`) into the texture from unit 0, the last
+/// row padded with zeros.
 fn write_offsets(queue: &wgpu::Queue, texture: &wgpu::Texture, offsets: &[[f32; 4]]) {
     let rows = offsets.len().div_ceil(OFFSETS_WIDTH);
     let mut data = offsets.to_vec();
@@ -924,27 +1513,35 @@ fn write_offsets(queue: &wgpu::Queue, texture: &wgpu::Texture, offsets: &[[f32; 
 }
 
 /// A bind group of the scene shader: its uniforms and the offsets of the exploded view.
-fn uniform_group(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, uniforms: &wgpu::Buffer, offsets: &wgpu::Texture) -> wgpu::BindGroup {
+fn uniform_group(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, uniforms: &wgpu::Buffer, offsets: &wgpu::Texture, looks: &wgpu::Texture) -> wgpu::BindGroup {
     let offsets = offsets.create_view(&wgpu::TextureViewDescriptor::default());
+    let looks = looks.create_view(&wgpu::TextureViewDescriptor::default());
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("o3v.uniforms"),
         layout,
         entries: &[
             wgpu::BindGroupEntry { binding: 0, resource: uniforms.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&offsets) },
+            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&looks) },
         ],
     })
 }
 
-/// Grid lines as a dash-dot line list (Revit's grid line pattern: long dash, gap, dot, gap) in
-/// a neutral grey that reads on light and dark backgrounds.
-fn datum_lines(grids: &[crate::model::GridLine]) -> Vec<Vertex> {
+/// The lines drawn over the model as a line list, solid, each in its own colour.
+fn overlay_lines(lines: &[crate::views3d::Colored]) -> Vec<Vertex> {
+    let vertex = |p: [f32; 3], color: [u8; 4]| Vertex { position: p, normal: [0.0, 0.0, 1.0], color, unit: 0 };
+    lines.iter().flat_map(|([a, b], color)| [vertex(*a, *color), vertex(*b, *color)]).collect()
+}
+
+/// Grid lines and levels as a dash-dot line list (Revit's grid line pattern: long dash, gap, dot,
+/// gap) in a neutral grey that reads on light and dark backgrounds.
+fn datum_lines(segments: &[DatumSegment]) -> Vec<Vertex> {
     const PATTERN: [(f32, bool); 4] = [(1.6, true), (0.3, false), (0.3, true), (0.3, false)];
     let color = [120, 122, 132, 230];
     let vertex = |p: Vec3| Vertex { position: p.to_array(), normal: [0.0, 0.0, 1.0], color, unit: 0 };
     let mut out = Vec::new();
-    for g in grids {
-        let (a, b) = (Vec3::from_array(g.a), Vec3::from_array(g.b));
+    for [a, b] in segments {
+        let (a, b) = (Vec3::from_array(*a), Vec3::from_array(*b));
         let len = (b - a).length();
         if len < 1e-3 {
             continue;
@@ -1026,17 +1623,64 @@ pub fn transform_bounds(b: &Bounds, m: &Mat4) -> Bounds {
     out
 }
 
+/// The feature edges of each layer of the model shown, found once: ahead on a thread of its own
+/// when the model comes in ([`precompute_edges`]), so wireframe and hidden lines show without
+/// the window waiting for them (a large model takes seconds). Of one model at a time.
+type LayerEdges = Arc<std::sync::OnceLock<Arc<Vec<u32>>>>;
+static EDGES: std::sync::Mutex<Option<(u64, Vec<LayerEdges>)>> = std::sync::Mutex::new(None);
+
+/// The place the edges of each layer of `model` are kept.
+fn edge_slots(model: &Model) -> Vec<LayerEdges> {
+    let mut kept = EDGES.lock().unwrap_or_else(|e| e.into_inner());
+    match &*kept {
+        Some((id, slots)) if *id == model.id && slots.len() == model.layers.len() => slots.clone(),
+        _ => {
+            let slots: Vec<LayerEdges> = model.layers.iter().map(|_| LayerEdges::default()).collect();
+            *kept = Some((model.id, slots.clone()));
+            slots
+        }
+    }
+}
+
+/// The feature edges of layer `i` of `model`: as found ahead, else found now (waiting for the
+/// thread that is at it).
+fn layer_edges(model: &Model, i: usize) -> Arc<Vec<u32>> {
+    let Some(slot) = edge_slots(model).get(i).cloned() else { return Arc::default() };
+    let layer = &model.layers[i];
+    slot.get_or_init(|| Arc::new(if layer.points { Vec::new() } else { feature_edges(&layer.positions, &layer.indices, 25.0) })).clone()
+}
+
+/// Finds the feature edges of a model's layers ahead, on a thread of its own (in the browser
+/// they are found when first drawn).
+pub fn precompute_edges(model: &Arc<Model>) {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let model = model.clone();
+        // the slots now, so a model that came in later is not overtaken by this one
+        let slots = edge_slots(&model);
+        std::thread::spawn(move || {
+            crate::units::work_in_background();
+            for (slot, layer) in slots.iter().zip(&model.layers) {
+                slot.get_or_init(|| Arc::new(if layer.points { Vec::new() } else { feature_edges(&layer.positions, &layer.indices, 25.0) }));
+            }
+        });
+    }
+    #[cfg(target_arch = "wasm32")]
+    let _ = model;
+}
+
 /// Edges where the faces meet at more than `angle_deg`, plus open borders, as a line index
 /// list. Vertices are welded by exact position, so flat-shaded meshes work.
 pub fn feature_edges(positions: &[f32], indices: &[u32], angle_deg: f32) -> Vec<u32> {
-    use std::collections::HashMap;
+    // the keys come by the million: the default hasher takes several times as long
+    use crate::units::FastHashMap as HashMap;
     let vertex_count = positions.len() / 3;
     let at = |i: u32| {
         let i = i as usize * 3;
         Vec3::new(positions[i], positions[i + 1], positions[i + 2])
     };
     // Weld: position bits -> canonical id
-    let mut weld: HashMap<[u32; 3], u32> = HashMap::with_capacity(vertex_count);
+    let mut weld: HashMap<[u32; 3], u32> = HashMap::with_capacity_and_hasher(vertex_count, Default::default());
     let canon: Vec<u32> = (0..vertex_count)
         .map(|i| {
             let key = [positions[3 * i].to_bits(), positions[3 * i + 1].to_bits(), positions[3 * i + 2].to_bits()];
@@ -1053,7 +1697,7 @@ pub fn feature_edges(positions: &[f32], indices: &[u32], angle_deg: f32) -> Vec<
         crease: bool,
     }
     let cos_limit = angle_deg.to_radians().cos();
-    let mut edges: HashMap<(u32, u32), Edge> = HashMap::with_capacity(indices.len());
+    let mut edges: HashMap<(u32, u32), Edge> = HashMap::with_capacity_and_hasher(indices.len(), Default::default());
     for t in indices.chunks_exact(3) {
         if t.iter().any(|&i| i as usize >= vertex_count) {
             continue;

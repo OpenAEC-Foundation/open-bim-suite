@@ -1,13 +1,15 @@
-//! Open 3D Viewer Studio: a 3D model viewer for AEC files, in Rust (iced + wgpu).
+//! Open BIM Suite: a 3D model viewer for AEC files, in Rust (iced + wgpu).
 //!
 //! One code base for two targets:
 //! - the desktop app (`src/main.rs`, [`desktop`]): command line, native window, file dialogs,
-//!   screenshots, benchmarks and remote control for AI agents (the MCP server);
+//!   screenshots, benchmarks and remote control for AI agents (the MCP server, `mcp.rs`, over
+//!   stdio from `open-3d-viewer-mcp` or over HTTP from the viewer itself in the SuperCloud);
 //! - the web app (`trunk build`, [`web`]): the same UI in the browser on WebGPU, with files
 //!   opened through the browser.
 //!
 //! Independent reader crates provide format support; the desktop build includes Revit.
 
+pub mod align;
 mod annotations;
 mod b2;
 pub mod app;
@@ -15,23 +17,61 @@ pub mod app;
 mod bench;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod desktop;
+#[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
+pub mod collab;
+pub mod build_film;
+pub mod document;
+#[cfg(windows)]
+mod dpi_drag;
+pub mod drawing;
+pub mod drawing2d;
+pub mod raster;
+pub mod element_drawing;
+pub mod caps;
+pub mod cloud_color;
+pub mod fields;
+pub mod hatching;
+pub mod phasing;
+pub mod element_class;
 mod explode;
 pub mod export;
+mod history;
+pub mod i18n;
 #[cfg(not(target_arch = "wasm32"))]
 mod gpu;
 mod icons;
+pub mod ifcx_structure;
 pub mod loaders;
 #[cfg(not(target_arch = "wasm32"))]
 mod managed;
+#[cfg(not(target_arch = "wasm32"))]
+mod mcp;
 mod measure;
 pub mod model;
+#[cfg(all(feature = "planner", windows))]
+mod planner_frame;
+pub mod product;
 mod remote;
 pub mod remote_link;
+mod resize_frame;
 pub mod section;
+mod selection;
 pub mod shell;
+pub mod sheet_layout;
+mod title_block;
+pub mod structural;
+mod swipe;
 mod theme;
+pub mod typeface;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod ui_control;
+pub mod underlay;
+pub mod views3d;
+mod units;
 mod view_cube;
 mod viewport;
+#[cfg(target_arch = "wasm32")]
+mod host;
 #[cfg(target_arch = "wasm32")]
 pub mod web;
 

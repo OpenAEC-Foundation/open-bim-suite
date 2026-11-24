@@ -34,23 +34,37 @@ macro_rules! icons {
 
 icons! {
     "window.minimize", "window.maximize", "window.restore", "window.close",
-    "file.open", "file.import", "file.save-as", "file.examples",
-    "ui.settings", "ui.about", "ui.close", "ui.help",
+    "file.new", "file.open", "file.import", "file.save-as", "file.examples",
+    "ui.settings", "ui.about", "ui.close", "ui.help", "ui.feedback", "theme.light",
     "panel.left", "panel.right", "panel.schedules", "panel.model-tree", "panel.measurements",
     "view.fit", "view.fit-selection", "view.isometric", "view.top", "view.front", "view.right",
     "view.orbit", "view.zoom-in", "view.zoom-out", "view.grid", "view.saved", "view.reset-camera",
     "mesh.surface", "mesh.faces", "mesh.closed",
     "section.box", "section.plane-z", "section.fit-selection", "section.reset-box", "section.clear",
-    "transform.mirror", "transform.flip-vertical", "transform.explode",
+    "transform.mirror", "transform.flip-vertical", "transform.explode", "transform.offset", "transform.trim", "transform.extend", "transform.fillet", "transform.chamfer",
     "measure.distance", "measure.angle", "measure.area", "measure.perimeter", "measure.takeoff",
-    "edit.clear-all",
+    "edit.clear-all", "edit.undo", "edit.redo",
     "status.success", "status.error", "status.warning", "status.info",
     "object.show", "object.hide", "project.folder", "data.table",
+    // the modeller
+    "object.add", "draw.coordinate", "pile.columns", "draw.line", "construction.types", "draw.filled-area",
+    "curtain.new", "grid.end-couple", "draw.l-shape", "edit.delete", "edit.cut", "object.edit", "frame.combination",
+    "frame.new-door", "frame.new-turn-tilt", "resource.level", "drawing.plan", "drawing.sheet-new",
+    "construction.library", "draw.dimension", "draw.text", "drawing.section",
+    "draw.polyline", "draw.rectangle", "draw.circle", "draw.arc", "draw.ellipse",
+    // the BIM Validator
+    "git.issue", "bcf.import", "bcf.export", "validation.select-specification", "validation.workspace", "note.reply", "team.add",
+    "ifc.compare-files", "export.ifc-report", "page.next", "page.previous", "validation.highlight-failures", "validation.clear-highlights",
 }
 
 /// The SVG text of an icon, unpacked once. Panics for an id that is not in the list, like
 /// `openaec_icons::Icon::from_id(..).unwrap()` does in the Blueprint.
 pub fn svg(id: &str, size: Size) -> &'static str {
+    match id {
+        "modeller.axis" => return include_str!("../assets/icons/modeller-axis.svg"),
+        "modeller.level" => return include_str!("../assets/icons/modeller-level.svg"),
+        _ => {}
+    }
     static CACHE: OnceLock<Mutex<HashMap<(String, Size), &'static str>>> = OnceLock::new();
     let mut cache = CACHE.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
     if let Some(svg) = cache.get(&(id.to_string(), size)) {

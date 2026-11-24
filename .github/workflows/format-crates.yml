@@ -11,11 +11,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Read-only access to standalone libraries
-        uses: webfactory/ssh-agent@e83874834305fe9a4a2997156cb26c5de65a8555
+      # The deploy keys of the private readers, each by its name: the action gets these and no
+      # other secret. A new reader's secret is named here and in the same step of build.yml,
+      # live.yml and release.yml.
+      - &reader-keys
+        name: Read-only access to standalone libraries
+        uses: ./.github/actions/reader-keys
         with:
-          ssh-private-key: ${{ secrets.FORMAT_CRATES_SSH_KEYS }}
-          log-public-key: false
+          keys: |
+            ${{ secrets.SSH_KEY_3DM_DLL }}
+            ${{ secrets.SSH_KEY_PLY_DLL }}
+            ${{ secrets.SSH_KEY_PLY_READER }}
+            ${{ secrets.SSH_KEY_REVIT_DLL }}
+            ${{ secrets.SSH_KEY_RHINO_DLL }}
+            ${{ secrets.SSH_KEY_RVT_DLL }}
+            ${{ secrets.SSH_KEY_SKETCHUP_DLL }}
+            ${{ secrets.SSH_KEY_SKP_READER }}
+            ${{ secrets.SSH_KEY_SOLIDWORKS_DLL }}
+            ${{ secrets.SSH_KEY_SOLIDEDGE_DLL }}
+            ${{ secrets.SSH_KEY_TEKLA_DLL }}
+            ${{ secrets.SSH_KEY_TEKLA_READER }}
+            ${{ secrets.SSH_KEY_VWX_DLL }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -26,7 +42,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo metadata --format-version 1 --locked > "$RUNNER_TEMP/model-dependencies.json"
-          for crate in skp-reader tekla-reader ply-reader dgn-read dgn-export; do
+          for crate in skp-reader tekla-read ply-reader vwx-read dgn-read dgn-export; do
             manifest=$(python3 -c 'import json,sys; print(next(p["manifest_path"] for p in json.load(open(sys.argv[1]))["packages"] if p["name"] == sys.argv[2]))' "$RUNNER_TEMP/model-dependencies.json" "$crate")
             # Standalone manifests must not share the viewer's compiled copies of
             # crates with the same package name/version and a different source ID.
@@ -37,3 +53,10 @@ jobs:
               cargo test --manifest-path "$manifest" --features corpus-tests
             fi
           done
+      - name: Rhino reader tests and web compatibility
+        run: |
+          set -euo pipefail
+          manifest=$(python3 -c 'import json,sys; print(next(p["manifest_path"] for p in json.load(open(sys.argv[1]))["packages"] if p["name"] == "threedm-read"))' "$RUNNER_TEMP/model-dependencies.json")
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/format-crates/threedm-read"
+          cargo test --manifest-path "$manifest"
+          cargo check --manifest-path "$manifest" --target wasm32-unknown-unknown
