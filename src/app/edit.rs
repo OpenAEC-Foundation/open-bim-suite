@@ -440,7 +440,7 @@ impl App {
 
     /// The edit overlay: the edited element's points and the lines between them.
     pub(super) fn edit_overlay(&self, ink: Color, fill: Color) -> Option<EditOverlay> {
-        if let Some(overlay) = self.rebar_overlay(ink,fill) { return Some(overlay); }
+        if let Some(overlay) = self.rebar_area_overlay(ink,fill) { return Some(overlay); }
         if let Some(overlay) = self.sketch_overlay(ink, fill) {
             return Some(overlay);
         }

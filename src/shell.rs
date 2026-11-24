@@ -1486,6 +1486,24 @@ impl Studio {
             Command::new("model.base-plate", l.text("Voetplaat", "Base plate"), go(Message::Connect(bim_core::ConnectionKind::BasePlate(bim_core::join::BasePlate::default()), l.text("Voetplaat", "Base plate"))))
                 .icon(small("frame.combination"), large("frame.combination"))
                 .enabled(app.selected_linear() == 2),
+            // the Reinforcement tool: a click gives a member its bars, a slab or a wall its nets
+            Command::new("model.rebar", l.text("Wapening", "Reinforcement"), go(Message::RebarTool(crate::app::rebar::RebarTool::Usual)))
+                .icon(small("mesh.surface"), large("mesh.surface"))
+                .mode(app.modeller.rebar_tool == Some(crate::app::rebar::RebarTool::Usual))
+                .enabled(app.modeller.shown.is_some()),
+            // over a stretch or along a line, with two clicks
+            Command::new("model.rebar-stirrups", l.text("Beugels", "Stirrups"), go(Message::RebarTool(crate::app::rebar::RebarTool::Stirrups)))
+                .icon(small("mesh.closed"), large("mesh.closed"))
+                .mode(app.modeller.rebar_tool == Some(crate::app::rebar::RebarTool::Stirrups))
+                .enabled(app.modeller.shown.is_some()),
+            Command::new("model.rebar-extra", l.text("Bijleg", "Extra bars"), go(Message::RebarTool(crate::app::rebar::RebarTool::Bars)))
+                .icon(small("draw.line"), large("draw.line"))
+                .mode(app.modeller.rebar_tool == Some(crate::app::rebar::RebarTool::Bars))
+                .enabled(app.modeller.shown.is_some()),
+            Command::new("model.rebar-hairpins", l.text("Haarspelden", "Hairpins"), go(Message::RebarTool(crate::app::rebar::RebarTool::Hairpins)))
+                .icon(small("grid.end-couple"), large("grid.end-couple"))
+                .mode(app.modeller.rebar_tool == Some(crate::app::rebar::RebarTool::Hairpins))
+                .enabled(app.modeller.shown.is_some()),
             Command::new("model.cut", l.text("Uitsparen", "Cut"), go(Message::Connect(bim_core::ConnectionKind::Cut, l.text("Uitsparing", "Cut-out"))))
                 .icon(small("edit.cut"), large("edit.cut"))
                 .enabled(app.selected_bodies() == 2),
@@ -1905,17 +1923,25 @@ impl Studio {
                     self.l().text("Lengte (mm)", "Length (mm)"),
                 ];
                 self.app.modeller.bar_words = [
-                    self.l().text("Wapeningsstaat", "Bar schedule"),
+                    self.l().text("Buigstaat", "Bar schedule"),
                     self.l().text("Element", "Element"),
                     self.l().text("Merk", "Mark"),
                     self.l().text("Staaf", "Bar"),
                     "Ø (mm)",
                     self.l().text("Aantal", "Number"),
+                    self.l().text("Vorm", "Shape"),
+                    "a (mm)",
+                    "b (mm)",
                     self.l().text("Lengte (mm)", "Length (mm)"),
                     self.l().text("Gewicht (kg)", "Weight (kg)"),
                     self.l().text("boven", "top"),
                     self.l().text("onder", "bottom"),
                     self.l().text("beugel", "stirrup"),
+                    self.l().text("ondernet", "bottom net"),
+                    self.l().text("bovennet", "top net"),
+                    self.l().text("recht", "straight"),
+                    self.l().text("bijleg", "extra"),
+                    self.l().text("haarspeld", "hairpin"),
                 ];
                 self.app.modeller.plank_words = [
                     self.l().text("Elementenstaat prefab", "Precast schedule"),
@@ -2717,6 +2743,7 @@ impl Studio {
                 (l.text("Puntvormig", "Point"), vec![large("model.point")]),
                 (l.text("Openingen", "Openings"), vec![large("model.door"), large("model.window")]),
                 (l.text("Verbinding", "Connection"), vec![smalls(&["model.butt", "model.mitre", "model.cut"]), smalls(&["model.end-plate", "model.apart"]), smalls(&["model.fin-plate", "model.splice", "model.base-plate"])]),
+                (l.text("Wapening", "Reinforcement"), vec![large("model.rebar"), smalls(&["model.rebar-stirrups", "model.rebar-extra", "model.rebar-hairpins"])]),
                 (l.text("Wijzigen", "Modify"), vec![large("model.edit"), smalls(&["model.move", "model.copy"]), smalls(&["model.rotate", "model.mirror"]), smalls(&["model.align"]), large("model.delete")]),
             ],
             // building services, by discipline as other BIM modellers have them: air, water and

@@ -72,6 +72,18 @@ pub enum ElementField {
     BottomBar,
     Stirrup,
     StirrupSpacing,
+    /// The nets of a slab or a wall: how far apart the bars of the bottom one and of the top one
+    /// lie (their diameters are `BottomBar` and `TopBar`; no top net where that is 0).
+    BottomSpacing,
+    TopSpacing,
+    /// An extra of the element's reinforcement (stirrups or bars over a stretch of a member,
+    /// bars along a line in a slab), by its place among them: where its stretch starts and
+    /// ends, its diameter, how many bars or how far apart, and how long a bar along a line is.
+    ExtraFrom(usize),
+    ExtraTo(usize),
+    ExtraDiameter(usize),
+    ExtraAmount(usize),
+    ExtraLength(usize),
     /// A base plate's bed of grout, and how deep its anchors reach.
     Grout,
     AnchorLength,
@@ -122,10 +134,112 @@ fn rebar_with(mut r: bim_core::reinforcement::Reinforcement, field: ElementField
     Some(r)
 }
 
-/// The bars a member's reinforcement makes in it: `None` when it has none.
-pub(super) fn bars_of(e: &Element) -> Option<Result<Vec<bim_core::reinforcement::BarRow>, bim_core::Refusal>> {
-    let (Some(r), Shape::Linear(l)) = (&e.reinforcement, &e.shape) else { return None };
-    Some(l.profile.profile().and_then(|profile| r.bars(&profile, (l.end - l.start).length())))
+/// The value of a field of a slab's or a wall's nets.
+fn nets_value(n: &bim_core::reinforcement::Nets, field: ElementField) -> Option<f64> {
+    use ElementField as F;
+    Some(match field {
+        F::Cover => n.cover,
+        F::BottomBar => n.bottom.diameter,
+        F::BottomSpacing => n.bottom.spacing,
+        F::TopBar => n.top.map_or(0.0, |t| t.diameter),
+        F::TopSpacing => n.top.map_or(0.0, |t| t.spacing),
+        _ => return None,
+    })
+}
+
+/// The nets with `field` set to `v`, when `field` is one of their own and `v` can be it. A top
+/// diameter of 0 takes the top net away; one typed where there is none gives it the bottom
+/// net's spacing.
+fn nets_with(mut n: bim_core::reinforcement::Nets, field: ElementField, v: f64) -> Option<bim_core::reinforcement::Nets> {
+    use ElementField as F;
+    match field {
+        F::Cover if v > 0.0 => n.cover = v,
+        F::BottomBar if v > 0.0 => n.bottom.diameter = v,
+        F::BottomSpacing if v > 0.0 => n.bottom.spacing = v,
+        F::TopBar if v == 0.0 => n.top = None,
+        F::TopBar if v > 0.0 => n.top = Some(bim_core::reinforcement::Net { diameter: v, spacing: n.top.map_or(n.bottom.spacing, |t| t.spacing) }),
+        F::TopSpacing if v > 0.0 => n.top.as_mut()?.spacing = v,
+        _ => return None,
+    }
+    Some(n)
+}
+
+/// The value of a field of extra `k` of `extras`, when the field is one of its own.
+fn extra_value(extras: &[bim_core::reinforcement::Extra], field: ElementField) -> Option<f64> {
+    use bim_core::reinforcement::Extra;
+    use ElementField as F;
+    Some(match (field, extras) {
+        (F::ExtraFrom(k), _) => match extras.get(k)? {
+            Extra::Stirrups { from, .. } | Extra::Bars { from, .. } => *from,
+            Extra::Line { .. } => return None,
+        },
+        (F::ExtraTo(k), _) => match extras.get(k)? {
+            Extra::Stirrups { to, .. } | Extra::Bars { to, .. } => *to,
+            Extra::Line { .. } => return None,
+        },
+        (F::ExtraDiameter(k), _) => match extras.get(k)? {
+            Extra::Stirrups { diameter, .. } | Extra::Bars { diameter, .. } | Extra::Line { diameter, .. } => *diameter,
+        },
+        (F::ExtraAmount(k), _) => match extras.get(k)? {
+            Extra::Stirrups { spacing, .. } | Extra::Line { spacing, .. } => *spacing,
+            Extra::Bars { count, .. } => f64::from(*count),
+        },
+        (F::ExtraLength(k), _) => match extras.get(k)? {
+            Extra::Line { length, .. } => *length,
+            _ => return None,
+        },
+        _ => return None,
+    })
+}
+
+/// `extras` with `field` of one of them set to `v`, when `v` can be it.
+fn extras_with(mut extras: Vec<bim_core::reinforcement::Extra>, field: ElementField, v: f64) -> Option<Vec<bim_core::reinforcement::Extra>> {
+    use bim_core::reinforcement::Extra;
+    use ElementField as F;
+    extra_value(&extras, field)?;
+    match field {
+        F::ExtraFrom(k) if v >= 0.0 => match &mut extras[k] {
+            Extra::Stirrups { from, .. } | Extra::Bars { from, .. } => *from = v,
+            Extra::Line { .. } => return None,
+        },
+        F::ExtraTo(k) if v > 0.0 => match &mut extras[k] {
+            Extra::Stirrups { to, .. } | Extra::Bars { to, .. } => *to = v,
+            Extra::Line { .. } => return None,
+        },
+        F::ExtraDiameter(k) if v > 0.0 => match &mut extras[k] {
+            Extra::Stirrups { diameter, .. } | Extra::Bars { diameter, .. } | Extra::Line { diameter, .. } => *diameter = v,
+        },
+        F::ExtraAmount(k) if v > 0.0 => match &mut extras[k] {
+            Extra::Stirrups { spacing, .. } | Extra::Line { spacing, .. } => *spacing = v,
+            Extra::Bars { count, .. } if v.fract() == 0.0 && v <= 64.0 => *count = v as u32,
+            Extra::Bars { .. } => return None,
+        },
+        F::ExtraLength(k) if v > 0.0 => match &mut extras[k] {
+            Extra::Line { length, .. } => *length = v,
+            _ => return None,
+        },
+        _ => return None,
+    }
+    Some(extras)
+}
+
+/// The bars the reinforcement of `e` makes in it: a member's top and bottom bars and its
+/// stirrups, or the bars of the nets of a slab or a wall (with the openings `model` has in it).
+/// `None` when it has none.
+pub(super) fn bars_of(model: &bim_core::Model, e: &Element) -> Option<Result<Vec<bim_core::reinforcement::BarRow>, bim_core::Refusal>> {
+    match (&e.reinforcement, &e.nets, &e.shape) {
+        (Some(r), _, Shape::Linear(l)) => Some(l.profile.profile().and_then(|profile| r.rows(&profile, (l.end - l.start).length(), &e.extras))),
+        (_, Some(n), Shape::Planar(p)) => Some(n.laid(p, &model.openings_of(e.id), &e.extras).map(|bars| bim_core::reinforcement::net_rows(&bars))),
+        _ => None,
+    }
+}
+
+/// The nets of a slab or a wall in a line: "onder Ø10-150 #, boven Ø8-150 #", with the words
+/// for below and on top.
+pub(super) fn nets_text(n: &bim_core::reinforcement::Nets, below: &str, above: &str) -> String {
+    let mm = |v: f64| (v * 1000.0).round() as i64;
+    let net = |word: &str, net: bim_core::reinforcement::Net| format!("{word} Ø{}-{} #", mm(net.diameter), mm(net.spacing));
+    std::iter::once(net(below, n.bottom)).chain(n.top.map(|t| net(above, t))).collect::<Vec<_>>().join(", ")
 }
 
 /// A member's reinforcement in a line: "2Ø12 + 3Ø16, Ø8-150".
@@ -349,7 +463,11 @@ impl App {
             ElementField::BoltRows | ElementField::Eave | ElementField::TopBars | ElementField::BottomBars => 0,
             _ => 3,
         };
-        if let Some(v) = e.reinforcement.as_ref().and_then(|r| rebar_value(r, field)) {
+        if let Some(v) = extra_value(&e.extras, field) {
+            let whole = matches!(field, ElementField::ExtraAmount(k) if matches!(e.extras[k], bim_core::reinforcement::Extra::Bars { .. }));
+            return if whole { format!("{v:.0}") } else { format!("{v:.3}") };
+        }
+        if let Some(v) = e.reinforcement.as_ref().and_then(|r| rebar_value(r, field)).or_else(|| e.nets.as_ref().and_then(|n| nets_value(n, field))) {
             return format!("{v:.digits$}");
         }
         value(&e.shape_in_project(&self.modeller.model.grid), field).map_or(String::new(), |v| format!("{v:.digits$}"))
@@ -382,12 +500,27 @@ impl App {
                 graded.grade = grade;
                 self.change_element(graded);
             }
+        } else if extra_value(&e.extras, field).is_some() {
+            // used when the element can be made with it
+            if let Some(changed) = number(&typed).and_then(|v| extras_with(e.extras.clone(), field, v)).filter(|c| *c != e.extras) {
+                self.change_extras(&e, changed);
+            }
         } else if let Some(r) = e.reinforcement.filter(|r| rebar_value(r, field).is_some()) {
             // used when the bars still fit in the section
             if let Some(changed) = number(&typed).and_then(|v| rebar_with(r, field, v)).filter(|c| *c != r) {
                 let mut reinforced = e.clone();
                 reinforced.reinforcement = Some(changed);
-                match bars_of(&reinforced) {
+                match bars_of(&self.modeller.model, &reinforced) {
+                    Some(Err(refusal)) => self.modeller.refusal = Some(refusal),
+                    _ => self.change_element(reinforced),
+                }
+            }
+        } else if let Some(n) = e.nets.filter(|n| nets_value(n, field).is_some()) {
+            // used when the nets still fit in the thickness
+            if let Some(changed) = number(&typed).and_then(|v| nets_with(n, field, v)).filter(|c| *c != n) {
+                let mut reinforced = e.clone();
+                reinforced.nets = Some(changed);
+                match bars_of(&self.modeller.model, &reinforced) {
                     Some(Err(refusal)) => self.modeller.refusal = Some(refusal),
                     _ => self.change_element(reinforced),
                 }
@@ -405,17 +538,128 @@ impl App {
         self.modeller.typing = Some((e.id, field, typed));
     }
 
-    /// Gives the selected member the usual reinforcement, or takes its reinforcement away. Refused
-    /// when its section is no rectangle or the bars do not fit in it.
+    /// Gives the selected member the usual reinforcement (a beam or a column its bars and
+    /// stirrups, a slab or a wall its nets), or takes its reinforcement away. Refused when a
+    /// member's section is no rectangle or the bars do not fit.
     pub(super) fn reinforce(&mut self, on: bool) {
         let Some(e) = self.defined().cloned() else { return };
         self.modeller.refusal = None;
         let mut changed = e.clone();
-        changed.reinforcement = on.then(Default::default);
-        match bars_of(&changed) {
+        match &e.shape {
+            Shape::Linear(_) => changed.reinforcement = on.then(Default::default),
+            Shape::Planar(_) => changed.nets = on.then(Default::default),
+            _ => return,
+        }
+        // what was drawn besides it goes with it
+        if !on {
+            changed.extras.clear();
+        }
+        match bars_of(&self.modeller.model, &changed) {
             Some(Err(refusal)) => self.modeller.refusal = Some(refusal),
             _ if changed != e => self.change_element(changed),
             _ => {}
+        }
+    }
+
+    /// Gives `e` the extras `extras`, when its reinforcement can be made with them; else the
+    /// refusal is told and it stays as it was.
+    pub(super) fn change_extras(&mut self, e: &Element, extras: Vec<bim_core::reinforcement::Extra>) {
+        let mut changed = e.clone();
+        changed.extras = extras;
+        match bars_of(&self.modeller.model, &changed) {
+            Some(Err(refusal)) => self.modeller.refusal = Some(refusal),
+            _ => {
+                self.modeller.refusal = None;
+                self.change_element(changed);
+            }
+        }
+    }
+
+    /// Takes extra `k` of the selected element away.
+    pub(super) fn remove_extra(&mut self, k: usize) {
+        let Some(e) = self.defined().cloned() else { return };
+        if k < e.extras.len() {
+            let mut extras = e.extras.clone();
+            extras.remove(k);
+            self.modeller.typing = None;
+            self.change_extras(&e, extras);
+        }
+    }
+
+    /// Makes extra `k` of the selected element the next of its forms: a member's bars below or
+    /// on top; a line's bars hairpins, straight on top or straight below.
+    pub(super) fn next_extra_form(&mut self, k: usize) {
+        use bim_core::reinforcement::{Extra, LineForm};
+        let Some(e) = self.defined().cloned() else { return };
+        let mut extras = e.extras.clone();
+        match extras.get_mut(k) {
+            Some(Extra::Bars { top, .. }) => *top = !*top,
+            Some(Extra::Line { form, .. }) => {
+                *form = match form {
+                    LineForm::Hairpin => LineForm::Top,
+                    LineForm::Top => LineForm::Bottom,
+                    LineForm::Bottom => LineForm::Hairpin,
+                }
+            }
+            _ => return,
+        }
+        self.change_extras(&e, extras);
+    }
+
+    /// The rows of the extras of `e` in the properties: of each its sizes to type, its form to
+    /// change and a button that takes it away.
+    fn extra_rows<'a>(&'a self, e: &'a Element, p: crate::theme::Palette, l: Language) -> iced::widget::Column<'a, Message> {
+        use bim_core::reinforcement::{Extra, LineForm};
+        use ElementField as F;
+        let field = |label: &str, f: ElementField| field_row(p, label, self.element_field_text(e, f), f);
+        let press = |label: &'static str, message: Message| a11y::named(button(text(label).size(12)).padding([3, 10]).style(move |_, s| p.row_button(s)).on_press(message), a11y::Role::Button, label);
+        let mut rows = column![].spacing(5);
+        for (k, extra) in e.extras.iter().enumerate() {
+            let n = k + 1;
+            match extra {
+                Extra::Stirrups { .. } => {
+                    rows = rows
+                        .push(prop_row(p, format!("{} {n}", l.text("Traject", "Stretch")), l.text("beugels", "stirrups").to_string()))
+                        .push(field(l.text("Van (m)", "From (m)"), F::ExtraFrom(k)))
+                        .push(field(l.text("Tot (m)", "To (m)"), F::ExtraTo(k)))
+                        .push(field(l.text("Beugel (m)", "Stirrup (m)"), F::ExtraDiameter(k)))
+                        .push(field(l.text("Beugelafstand (m)", "Stirrup spacing (m)"), F::ExtraAmount(k)));
+                }
+                Extra::Bars { top, .. } => {
+                    rows = rows
+                        .push(prop_row(p, format!("{} {n}", l.text("Traject", "Stretch")), if *top { l.text("bijleg boven", "extra bars on top") } else { l.text("bijleg onder", "extra bars below") }.to_string()))
+                        .push(field(l.text("Van (m)", "From (m)"), F::ExtraFrom(k)))
+                        .push(field(l.text("Tot (m)", "To (m)"), F::ExtraTo(k)))
+                        .push(field(l.text("Aantal staven", "Number of bars"), F::ExtraAmount(k)))
+                        .push(field(l.text("Diameter (m)", "Diameter (m)"), F::ExtraDiameter(k)))
+                        .push(press(l.text("Onder / boven", "Below / on top"), Message::ExtraForm(k)));
+                }
+                Extra::Line { form, .. } => {
+                    let what = match form {
+                        LineForm::Hairpin => l.text("haarspelden", "hairpins"),
+                        LineForm::Top => l.text("bijleg boven", "extra bars on top"),
+                        LineForm::Bottom => l.text("bijleg onder", "extra bars below"),
+                    };
+                    rows = rows
+                        .push(prop_row(p, format!("{} {n}", l.text("Lijn", "Line")), what.to_string()))
+                        .push(field(l.text("Diameter (m)", "Diameter (m)"), F::ExtraDiameter(k)))
+                        .push(field(l.text("H.o.h. (m)", "Spacing (m)"), F::ExtraAmount(k)))
+                        .push(field(l.text("Lengte (m)", "Length (m)"), F::ExtraLength(k)))
+                        .push(press(l.text("Haarspeld / boven / onder", "Hairpin / top / bottom"), Message::ExtraForm(k)));
+                }
+            }
+            rows = rows.push(press(l.text("Traject verwijderen", "Remove stretch"), Message::ExtraRemove(k)));
+        }
+        rows
+    }
+
+    /// A click of the Reinforcement tool selected an element: it gets the usual reinforcement,
+    /// unless it has one already. The tool stays on.
+    pub(super) fn reinforce_clicked(&mut self) {
+        if self.defined().is_some_and(|e| e.reinforcement.is_none() && e.nets.is_none()) {
+            self.reinforce(true);
+        } else {
+            self.modeller.refusal = None;
         }
     }
 
@@ -611,7 +855,8 @@ impl App {
         let mut rows = column![field(l.text("Naam", "Name"), F::Name)].spacing(5);
         // a drawing of this element alone, on a sheet of its own
         if super::element_drawing::frame(&shape).is_some() {
-            rows = rows.push(button(text(l.text("Elementtekening", "Element drawing")).size(12)).padding([3, 10]).style(move |_, s| p.row_button(s)).on_press(Message::ElementDrawing(l)));
+            let word = if e.reinforcement.is_some() || e.nets.is_some() { l.text("Wapeningstekening", "Reinforcement drawing") } else { l.text("Elementtekening", "Element drawing") };
+            rows = rows.push(button(text(word).size(12)).padding([3, 10]).style(move |_, s| p.row_button(s)).on_press(Message::ElementDrawing(l)));
         }
         if let Some(number) = e.pile_number {
             rows = rows.push(text(format!("{} {number:02}", l.text("Paalnummer", "Pile number"))).size(12))
@@ -696,7 +941,7 @@ impl App {
         if matches!(&shape, Shape::Linear(_)) {
             let label = if e.reinforcement.is_some() { l.text("Wapening verwijderen", "Remove reinforcement") } else { l.text("Wapening", "Reinforcement") };
             rows = rows.push(a11y::named(button(text(label).size(12)).padding([3, 10]).style(move |_, s| p.row_button(s)).on_press(Message::Reinforce(e.reinforcement.is_none())), a11y::Role::Button, label));
-            if let (Some(r), Some(Ok(bars))) = (&e.reinforcement, bars_of(e)) {
+            if let (Some(r), Some(Ok(bars))) = (&e.reinforcement, bars_of(&self.modeller.model, e)) {
                 let weight: f64 = bars.iter().map(|b| b.weight()).sum();
                 rows = rows
                     .push(prop_row(p, l.text("Wapening", "Reinforcement").to_string(), format!("{} · {weight:.0} kg", bars_text(r))))
@@ -706,7 +951,24 @@ impl App {
                     .push(field(l.text("Staven onder", "Bottom bars"), F::BottomBars))
                     .push(field(l.text("Diameter onder (m)", "Bottom diameter (m)"), F::BottomBar))
                     .push(field(l.text("Beugel (m)", "Stirrup (m)"), F::Stirrup))
-                    .push(field(l.text("Beugelafstand (m)", "Stirrup spacing (m)"), F::StirrupSpacing));
+                    .push(field(l.text("Beugelafstand (m)", "Stirrup spacing (m)"), F::StirrupSpacing))
+                    .push(self.extra_rows(e, p, l));
+            }
+        }
+        // a slab's or a wall's nets: given and taken away, their sizes, and what they weigh
+        if matches!(&shape, Shape::Planar(_)) {
+            let label = if e.nets.is_some() { l.text("Wapening verwijderen", "Remove reinforcement") } else { l.text("Wapening", "Reinforcement") };
+            rows = rows.push(a11y::named(button(text(label).size(12)).padding([3, 10]).style(move |_, s| p.row_button(s)).on_press(Message::Reinforce(e.nets.is_none())), a11y::Role::Button, label));
+            if let (Some(n), Some(Ok(bars))) = (&e.nets, bars_of(&self.modeller.model, e)) {
+                let weight: f64 = bars.iter().map(|b| b.weight()).sum();
+                rows = rows
+                    .push(prop_row(p, l.text("Wapening", "Reinforcement").to_string(), format!("{} · {weight:.0} kg", nets_text(n, l.text("onder", "bottom"), l.text("boven", "top")))))
+                    .push(field(l.text("Dekking (m)", "Cover (m)"), F::Cover))
+                    .push(field(l.text("Ondernet Ø (m)", "Bottom net Ø (m)"), F::BottomBar))
+                    .push(field(l.text("Ondernet h.o.h. (m)", "Bottom net spacing (m)"), F::BottomSpacing))
+                    .push(field(l.text("Bovennet Ø (m)", "Top net Ø (m)"), F::TopBar))
+                    .push(field(l.text("Bovennet h.o.h. (m)", "Top net spacing (m)"), F::TopSpacing))
+                    .push(self.extra_rows(e, p, l));
             }
         }
         for (label, value) in self.member_rows(e, l) {
@@ -754,6 +1016,8 @@ impl App {
                         ]
                         .spacing(6),
                     )
+                    // its type from the project's library: the recipe with its sizes
+                    .push(self.join_type_picker(p, l, &c.kind))
                 };
             }
             // what it is to the analysis model

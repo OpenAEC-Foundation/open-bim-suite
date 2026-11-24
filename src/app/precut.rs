@@ -31,17 +31,22 @@ pub(super) struct CutJob {
     pub scale: f64,
     /// How the view draws its elements otherwise than their materials say (its filters).
     pub looks: Option<Arc<std::collections::HashMap<u64, crate::hatching::Look>>>,
+    /// The signs of the reinforcement a section cuts (see `App::rebar_signs`), in the cut's
+    /// own coordinates: drawn with its cut lines.
+    pub signs: Vec<crate::drawing::Segment>,
 }
 
 impl CutJob {
     /// The cut, with its cut faces hatched.
     pub(super) fn run(self) -> Cut {
-        let CutJob { axes, model, layers, units, halftone, index, kind, scale, looks } = self;
+        let CutJob { axes, model, layers, units, halftone, index, kind, scale, looks, signs } = self;
         // the pens the view's filters give the lines of elements: the inks, and per unit which
         let (inks, unit_ink) = inks(looks.as_deref(), index.as_deref());
         let inked = |l: usize, v: u32| index.as_ref().and_then(|ix| unit_ink.get(ix.unit(l, v)).copied().flatten());
         let index = index.clone().filter(|_| units.iter().chain(&halftone).any(|u| *u));
-        let hidden = |l: usize, v: u32| index.as_ref().is_some_and(|ix| units.get(ix.unit(l, v)).copied().unwrap_or(false));
+        // reinforcing bars are left out as solids: a section draws signs for those it cuts, and a
+        // reinforcement drawing has its own
+        let hidden = |l: usize, v: u32| model.project.bar_at(l, v) || index.as_ref().is_some_and(|ix| units.get(ix.unit(l, v)).copied().unwrap_or(false));
         let faint = |l: usize, v: u32| index.as_ref().is_some_and(|ix| halftone.get(ix.unit(l, v)).copied().unwrap_or(false));
         // the pieces joined elements of one material make: the seams within one are not drawn
         let pieces = crate::hatching::pieces(&model, bim_library::DrawingStandard::Nen47);
@@ -55,6 +60,7 @@ impl CutJob {
         };
         // the cut faces in the hatch of what they are made of, or of what the view's filters say
         crate::hatching::hatch_with(&mut cut, &model, bim_library::DrawingStandard::Nen47, scale, looks.as_deref());
+        cut.segments.extend(signs);
         for axis in axes {
             if let Some(line) = kind.project_axis(axis) {
                 cut.below.push(line);

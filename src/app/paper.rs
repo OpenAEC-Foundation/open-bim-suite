@@ -328,7 +328,11 @@ impl App {
             }
         }
         let scale = self.document.view_scale(path).unwrap_or(crate::document::SHEET_SCALE);
-        Some(CutJob { axes, model, layers, units, halftone, index: self.explode_index.clone(), kind, scale, looks })
+        let signs = match kind {
+            CutKind::Section { from, to, depth } => self.rebar_signs(from, to, depth),
+            CutKind::Plan { .. } => Vec::new(),
+        };
+        Some(CutJob { axes, model, layers, units, halftone, index: self.explode_index.clone(), kind, scale, looks, signs })
     }
 
     /// The drawings of views as the sheet layout takes them (`crate::sheet_layout`): the crop, or

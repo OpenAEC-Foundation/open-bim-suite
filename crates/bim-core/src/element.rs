@@ -591,6 +591,13 @@ pub struct Element {
     /// The reinforcement of a concrete member with a rectangular section, when it is given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reinforcement: Option<crate::reinforcement::Reinforcement>,
+    /// The nets in a slab or a wall, when they are given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nets: Option<crate::reinforcement::Nets>,
+    /// Reinforcement drawn besides the usual one: stirrups or bars over a stretch of a
+    /// reinforced member, bars along a line in a slab with nets.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extras: Vec<crate::reinforcement::Extra>,
     /// The service it belongs to, when it is part of an installation (see [`Service`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service: Option<Service>,
@@ -606,12 +613,12 @@ impl Element {
     pub fn in_project(grid: &TileGrid, name: impl Into<String>, level: Option<String>, mut shape: Shape) -> Self {
         let tile = shape.placement().map_or(TileKey::default(), |p| grid.tile_of(p));
         shape.translate(-grid.origin(tile));
-        Self { id: ElementId(0), name: name.into(), tile, level, top: None, grade: None, service: None, service_type: None, reinforcement: None, pile_number: None, pile_mark: None, reinforcing_bar: false, reinforcement_areas: Vec::new(), hairpin_leg: None, shape }
+        Self { id: ElementId(0), name: name.into(), tile, level, top: None, grade: None, service: None, service_type: None, reinforcement: None, nets: None, extras: Vec::new(), pile_number: None, pile_mark: None, reinforcing_bar: false, reinforcement_areas: Vec::new(), hairpin_leg: None, shape }
     }
 
     /// The same element (its id, name, level, top, grade and service) with `shape`, given in project coordinates.
     pub fn reshaped(&self, grid: &TileGrid, shape: Shape) -> Self {
-        Self { id: self.id, pile_number: self.pile_number, pile_mark: self.pile_mark.clone(), hairpin_leg: self.hairpin_leg, reinforcement_areas: self.reinforcement_areas.clone(), reinforcing_bar: self.reinforcing_bar, top: self.top.clone(), grade: self.grade.clone(), service: self.service, service_type: self.service_type.clone(), reinforcement: self.reinforcement, ..Self::in_project(grid, self.name.clone(), self.level.clone(), shape) }
+        Self { id: self.id, pile_number: self.pile_number, pile_mark: self.pile_mark.clone(), hairpin_leg: self.hairpin_leg, reinforcement_areas: self.reinforcement_areas.clone(), reinforcing_bar: self.reinforcing_bar, top: self.top.clone(), grade: self.grade.clone(), service: self.service, service_type: self.service_type.clone(), reinforcement: self.reinforcement, nets: self.nets, extras: self.extras.clone(), ..Self::in_project(grid, self.name.clone(), self.level.clone(), shape) }
     }
 
     /// Its definition in project coordinates.

@@ -195,7 +195,7 @@ mod legend;
 pub(super) use legend::{is_pile_legend, schedule_table};
 /// What the bar schedule, its columns and its kinds of bar are called when the interface has not
 /// said.
-pub const BAR_WORDS: [&str; 11] = ["Bar schedule", "Element", "Mark", "Bar", "Ø (mm)", "Number", "Length (mm)", "Weight (kg)", "top", "bottom", "stirrup"];
+pub const BAR_WORDS: [&str; 19] = ["Bar schedule", "Element", "Mark", "Bar", "Ø (mm)", "Number", "Shape", "a (mm)", "b (mm)", "Length (mm)", "Weight (kg)", "top", "bottom", "stirrup", "bottom net", "top net", "straight", "extra", "hairpin"];
 
 /// What the precast schedule and its columns are called when the interface has not said.
 pub const PLANK_WORDS: [&str; 8] = ["Precast schedule", "Level", "Mark", "Type", "Length (mm)", "Width (mm)", "Thickness (mm)", "Number"];
@@ -336,10 +336,18 @@ impl crate::app::App {
         }
     }
 
-    /// The bar schedule, made again from the model: a row for the top bars, the bottom bars and
-    /// the stirrups of every reinforced member, marked 1, 2, 3 … through the project, with what
-    /// they weigh. A click on a row selects its member. It comes with the first reinforced
-    /// member and stays, empty, when the last one loses its reinforcement.
+    /// The mark of the first row `id` has in the bar schedule: its rows are marked on from it.
+    pub(in crate::app) fn first_mark(&self, id: bim_core::ElementId) -> usize {
+        let model = &self.modeller.model;
+        1 + model.iter().take_while(|e| e.id != id).filter_map(|e| crate::app::element_props::bars_of(model, e)?.ok()).map(|rows| rows.len()).sum::<usize>()
+    }
+
+    /// The bar schedule (the bending schedule), made again from the model: a row for the top
+    /// bars, the bottom bars and the stirrups of every reinforced member and for the equal bars
+    /// of every net of a slab or a wall, marked 1, 2, 3 … through the project, with their shape
+    /// (straight, or a stirrup with its two sizes) and what they weigh. A click on a row
+    /// selects its element. It comes with the first reinforced element and stays, empty, when
+    /// the last one loses its reinforcement.
     pub(in crate::app) fn list_bars(&mut self) {
         use bim_core::reinforcement::BarKind;
         let words = if self.modeller.bar_words[0].is_empty() { BAR_WORDS } else { self.modeller.bar_words };
@@ -347,28 +355,41 @@ impl crate::app::App {
         let mut rows = Vec::new();
         let mut mark = 0;
         for e in self.modeller.model.iter() {
-            let Some(Ok(bars)) = crate::app::element_props::bars_of(e) else { continue };
+            let Some(Ok(bars)) = crate::app::element_props::bars_of(&self.modeller.model, e) else { continue };
             for bar in bars {
                 mark += 1;
                 let kind = match bar.kind {
-                    BarKind::Top => words[8],
-                    BarKind::Bottom => words[9],
-                    BarKind::Stirrup => words[10],
+                    BarKind::Top => words[11],
+                    BarKind::Bottom => words[12],
+                    BarKind::Stirrup => words[13],
+                    BarKind::NetBottom => words[14],
+                    BarKind::NetTop => words[15],
+                    BarKind::Extra => words[17],
                 };
+                use bim_core::reinforcement::BarShape;
+                let (form, legs) = match bar.shape {
+                    BarShape::Straight => (words[16], None),
+                    BarShape::Stirrup(a, b) => (words[13], Some((a, b))),
+                    BarShape::Hairpin(a, b) => (words[18], Some((a, b))),
+                };
+                let mm = |v: f64| format!("{}", (v * 1000.0).round() as i64);
                 let cells = [
-                    e.name.clone(),
-                    mark.to_string(),
-                    kind.to_string(),
-                    format!("{}", (bar.diameter * 1000.0).round() as i64),
-                    bar.count.to_string(),
-                    format!("{}", (bar.length * 1000.0).round() as i64),
-                    format!("{:.1}", bar.weight()),
+                    Some(e.name.clone()),
+                    Some(mark.to_string()),
+                    Some(kind.to_string()),
+                    Some(mm(bar.diameter)),
+                    Some(bar.count.to_string()),
+                    Some(form.to_string()),
+                    legs.map(|(a, _)| mm(a)),
+                    legs.map(|(_, b)| mm(b)),
+                    Some(mm(bar.length)),
+                    Some(format!("{:.1}", bar.weight())),
                 ];
-                rows.push(crate::model::ScheduleRow { cells: cells.into_iter().map(Some).collect(), elements: if alone { vec![e.id.0] } else { Vec::new() }, ..Default::default() });
+                rows.push(crate::model::ScheduleRow { cells: cells.into_iter().collect(), elements: if alone { vec![e.id.0] } else { Vec::new() }, ..Default::default() });
             }
         }
         let named = std::mem::replace(&mut self.modeller.bar_schedule, words[0].to_string());
-        let schedule = crate::model::Schedule { name: words[0].to_string(), title: words[0].to_string(), columns: words[1..8].iter().map(|w| w.to_string()).collect(), rows, computed: true };
+        let schedule = crate::model::Schedule { name: words[0].to_string(), title: words[0].to_string(), columns: words[1..11].iter().map(|w| w.to_string()).collect(), rows, computed: true };
         match self.schedules.iter_mut().find(|s| !named.is_empty() && s.name == named) {
             Some(listed) => *listed = schedule,
             None if !schedule.rows.is_empty() => self.schedules.push(schedule),
@@ -763,9 +784,9 @@ mod tests {
         assert!(app.modeller.refusal.is_none(), "{:?}", app.modeller.refusal);
         let listed = app.schedules.iter().find(|s| s.name == "Bar schedule").expect("the bar schedule");
         let cells: Vec<Vec<String>> = listed.rows.iter().map(|r| r.cells.iter().map(|c| c.clone().unwrap_or_default()).collect()).collect();
-        assert_eq!(cells[0], ["Beam 1", "1", "top", "12", "2", "5940", "10.5"]);
-        assert_eq!(cells[1][..6], ["Beam 1", "2", "bottom", "16", "3", "5940"]);
-        assert_eq!(cells[2][..6], ["Beam 1", "3", "stirrup", "8", "40", "1488"]);
+        assert_eq!(cells[0], ["Beam 1", "1", "top", "12", "2", "straight", "", "", "5940", "10.5"]);
+        assert_eq!(cells[1][..9], ["Beam 1", "2", "bottom", "16", "3", "straight", "", "", "5940"]);
+        assert_eq!(cells[2][..9], ["Beam 1", "3", "stirrup", "8", "40", "stirrup", "232", "432", "1488"]);
         assert_eq!(listed.rows[0].elements, vec![id.0]);
         // an I section takes none
         select(&mut app, steel);
@@ -789,7 +810,7 @@ mod tests {
         let path = level.clone().unwrap();
         // 4.2 m wide (three planks of 1200 and a narrow one) spanning 6 m
         let t = app.library.system_type("system.hollow-core-200").unwrap().clone();
-        let generic = SystemDef { division: Default::default(), start: DVec2::ZERO, end: DVec2::new(4.2, 0.0), base: t.lying.unwrap(), height: 6.0, spacing: DVec2::splat(0.6), member: DVec2::new(0.045, 0.14), panel: 0.012, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new() };
+        let generic = SystemDef { start: DVec2::ZERO, end: DVec2::new(4.2, 0.0), base: t.lying.unwrap(), height: 6.0, spacing: DVec2::splat(0.6), member: DVec2::new(0.045, 0.14), panel: 0.012, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), division: None };
         let floor = app.add_element("Floor", level, Shape::System(generic.clone().laid(&t).unwrap())).unwrap();
         // a second floor beside it, spanning 4 m: other planks, another mark
         let short = SystemDef { start: DVec2::new(5.0, 0.0), end: DVec2::new(7.4, 0.0), height: 4.0, ..generic.clone() };
