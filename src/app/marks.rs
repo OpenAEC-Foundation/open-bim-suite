@@ -841,14 +841,14 @@ impl ViewMarks {
     pub(super) fn widget(self) -> iced::Element<'static, Message> {
         use iced::widget::canvas;
         use iced::Length::Fill;
-        let Some(image) = self.image.clone() else { return canvas(self).width(Fill).height(Fill).into() };
+        let Some(image) = self.image.clone() else { return crate::clip::clip(canvas(self).width(Fill).height(Fill)) };
         let (camera, plane, paper, dark) = (self.camera.clone(), self.frame, self.on_paper, self.palette.dark);
         let background = crate::raster::Backdrop(move |frame: &mut Frame, bounds: Rectangle| {
             if paper { frame.fill_rectangle(Point::ORIGIN, bounds.size(), if dark { Color::from_rgb(0.16, 0.16, 0.18) } else { Color::WHITE }); }
             let screen = Screen { view_proj: camera.view_proj(bounds.width / bounds.height.max(1.0)), size: (bounds.width, bounds.height) };
             image.draw(frame, |q| screen.project(plane.world(q)).map(|p| Point::new(p.x, p.y)));
         });
-        iced::widget::stack![canvas(background).width(Fill).height(Fill), canvas(self).width(Fill).height(Fill)].into()
+        crate::clip::clip(iced::widget::stack![canvas(background).width(Fill).height(Fill), canvas(self).width(Fill).height(Fill)])
     }
 
     fn screen(&self, bounds: Rectangle) -> Screen {

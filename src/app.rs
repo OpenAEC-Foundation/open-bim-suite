@@ -4491,12 +4491,13 @@ impl App {
 
         // the selection
         if let Some((li, element)) = self.selected {
-            content = content.push(section(l.text("Selectie", "Selection")));
+            let mut props = element.map(|id| model.element_props(id)).unwrap_or_default();
+            let sounding = props.iter().any(|(k, v)| k == "Objecttype" && v == "Sondering (CPT)");
+            content = content.push(section(if sounding { l.text("Sondering", "Cone penetration test") } else { l.text("Selectie", "Selection") }));
             if self.sel.len() > 1 {
                 let count = format!("{} {}", self.sel.len(), l.text("elementen geselecteerd", "elements selected"));
                 content = content.push(container(text(count).size(12).color(p.text_secondary)).padding([2, 8]));
             }
-            let mut props = element.map(|id| model.element_props(id)).unwrap_or_default();
             // a modelled element's definition is kept for the file, not shown
             props.retain(|(k, _)| k != crate::export::ifcx::DEFINITION && k != crate::export::ifcx::DERIVED);
             if props.is_empty() {
@@ -4507,9 +4508,14 @@ impl App {
             }
             // the order Revit's properties palette uses, unknown keys after
             props.sort_by_key(|(k, _)| PROP_ORDER.iter().position(|o| o.0 == k).unwrap_or(PROP_ORDER.len()));
+            if sounding {
+                const ORDER: &[&str] = &["Name", "RD X [m]", "RD Y [m]", "Maaiveld [m NAP]", "Einddiepte gecorrigeerd [m]", "Meetregels", "Bron"];
+                props.retain(|(k, _)| !matches!(k.as_str(), "GEF (bronbestand)" | "SHA-256 GEF" | "Diepte-intervallen (NAP, qc, RGB)" | "Class" | "Path" | "Id" | "Objecttype" | "Laag"));
+                props.sort_by_key(|(k, _)| ORDER.iter().position(|key| *key == k).unwrap_or(ORDER.len()));
+            }
             for (k, v) in props {
                 let label = PROP_ORDER.iter().find(|o| o.0 == k).map_or(k.as_str(), |o| l.text(o.1, o.2)).to_string();
-                if element.is_none() {
+                if element.is_none() || sounding {
                     content = content.push(prop_row(p, label, v));
                     continue;
                 }

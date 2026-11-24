@@ -43,6 +43,12 @@ pub enum Product {
     Planner,
 }
 
+impl std::fmt::Display for Product {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
 impl Product {
     pub const ALL: [Product; 10] = [Product::Viewer, Product::Ifcx, Product::Validator, Product::Pointcloud, Product::Analysis, Product::Modeller, Product::Docs, Product::Gis, Product::Library, Product::Planner];
 

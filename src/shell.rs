@@ -527,6 +527,10 @@ pub enum Side {
 
 #[derive(Debug, Clone)]
 pub enum Msg {
+    /// Opens the tools of a ribbon group folded into one button, or closes them (`None`).
+    RibbonFold(Option<&'static str>),
+    /// A tool chosen from a folded ribbon group: its tools close, then it runs.
+    RibbonRun(Box<Msg>),
     /// While a letter waits for its pair: the time to look at.
     KeyWindow,
     /// The window's size changed (layout units).
@@ -645,6 +649,9 @@ pub struct Studio {
     /// In the compact layout: the side panel shown instead of the 3D view, and the folded ribbon.
     compact_panel: Option<Side>,
     ribbon_folded: bool,
+    /// The ribbon group folded into one button (a window too narrow for it) whose tools are open,
+    /// by its first command.
+    ribbon_open: Option<&'static str>,
     /// What this build is (its name, its installer id), and the products it offers, in the order of
     /// the switch; the switch shows with two or more.
     edition: Edition,
@@ -741,6 +748,7 @@ impl Studio {
             planner_pointer: None,
             compact_panel: None,
             ribbon_folded: false,
+            ribbon_open: None,
             edition: Edition::Studio,
             products: Edition::Studio.products(),
             ribbon_tab: 0,
@@ -2121,6 +2129,11 @@ impl Studio {
                 self.prefs.right = !self.prefs.right;
                 self.save_prefs();
             }
+            Msg::RibbonFold(group) => self.ribbon_open = group,
+            Msg::RibbonRun(msg) => {
+                self.ribbon_open = None;
+                return self.update(*msg);
+            }
             Msg::Resized(width) => self.width = width,
             Msg::Sized(size) => {
                 self.width = size.width;
@@ -2632,7 +2645,7 @@ impl Studio {
     }
 
     /// The switch between the products of this build: a segment per product, the one shown marked.
-    /// A phone has room for one button: the product shown, which moves on to the next.
+    /// Narrow windows use one menu for all available products.
     fn product_switch(&self, look: Look) -> Element<'_, Msg> {
         use iced::widget::{button, text};
         use openaec_ui::design::a11y::{self, Node, Role};
@@ -2669,9 +2682,8 @@ impl Studio {
                 });
             a11y::node(focus::focusable(look, control, true, radius::MEDIUM - 2.0), Node::new(Role::Tab, product.label()).selected(on))
         };
-        if self.compact() {
-            let next = self.products[(self.products.iter().position(|&p| p == shown).unwrap_or(0) + 1) % self.products.len()];
-            return w::with_tooltip(look, segment(shown, true, Msg::Product(next)), next.purpose(l), next.stage());
+        if self.width < 1280.0 {
+            return a11y::node(container(w::select(look, &self.products, Some(shown), Msg::Product, D::Compact)).width(112), Node::new(Role::ComboBox, shown.label()));
         }
         let segments = self.products.iter().map(|&p| w::with_tooltip(look, segment(p, p == shown, Msg::Product(p)), p.purpose(l), p.stage()));
         // the products to come: named, not to be chosen yet (names as the products', the same in
@@ -2861,19 +2873,57 @@ impl Studio {
             let buttons: f32 = parts.iter().map(|p| part_width(p, icons)).sum::<f32>() + 2.0 * parts.len().saturating_sub(1) as f32;
             buttons.max(label.chars().count() as f32 * 6.6) + 13.0
         };
+        // a group folded into one button: as wide as a large button or its caption
+        let folded_width = |label: &str| (label.chars().count() as f32 * 6.6).max(56.0) + 13.0;
         let mut icons = vec![false; groups.len()];
-        let width = |icons: &[bool]| groups.iter().zip(icons).map(|(g, i)| group_width(g, *i)).sum::<f32>();
+        let mut folded = vec![false; groups.len()];
+        let width = |icons: &[bool], folded: &[bool]| {
+            groups.iter().zip(icons).zip(folded).map(|((g, i), f)| if *f { folded_width(g.0) } else { group_width(g, *i) }).sum::<f32>()
+        };
         for k in (0..groups.len()).rev() {
-            if width(&icons) <= self.width {
+            if width(&icons, &folded) <= self.width {
                 break;
             }
             icons[k] = groups[k].1.iter().any(|p| matches!(p, RibbonPart::Smalls(_)));
         }
-        let fits = width(&icons) <= self.width;
+        // narrower still: the groups fold into one button each, from the last group back; the
+        // button opens the group's tools as a menu
+        for k in (0..groups.len()).rev() {
+            if width(&icons, &folded) <= self.width {
+                break;
+            }
+            folded[k] = true;
+        }
+        let fits = width(&icons, &folded) <= self.width;
         let groups: Vec<Element<'_, Msg>> = groups
             .iter()
-            .zip(&icons)
-            .map(|((label, parts), icons)| {
+            .zip(icons.iter().zip(&folded))
+            .map(|(group, (icons, folded))| {
+                let (label, parts) = group;
+                if *folded {
+                    let key = group_key(group);
+                    let ids: Vec<&'static str> = parts.iter().flat_map(|p| match p { RibbonPart::Large(id) => vec![*id], RibbonPart::Smalls(ids) => ids.clone() }).collect();
+                    let first = command(ids.first().copied().unwrap_or(key));
+                    let open = self.ribbon_open == Some(key);
+                    let toggle = Msg::RibbonFold((!open).then_some(key));
+                    let anchor = w::ribbon_large(look, first.icon_large.or(first.icon).unwrap_or_default(), label, open, Some(toggle));
+                    let items = ids
+                        .iter()
+                        .map(|id| {
+                            let c = command(id);
+                            ch::MenuItem::Action {
+                                icon: c.icon,
+                                label: c.description(),
+                                shortcut: c.shortcut_label(),
+                                checked: c.kind.is_on(),
+                                danger: c.danger,
+                                on_press: c.on_press().map(|m| Msg::RibbonRun(Box::new(m))),
+                            }
+                        })
+                        .collect();
+                    let menu = container(ch::menu(look, items, small("object.show"))).width(ch::MENU_WIDTH);
+                    return w::ribbon_group(look, label, vec![openaec_ui::widgets::popover(anchor, menu.into(), open, Msg::RibbonFold(None))]);
+                }
                 let parts = parts
                     .iter()
                     .map(|part| match part {

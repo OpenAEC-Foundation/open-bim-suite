@@ -60,6 +60,7 @@ pub mod shell;
 pub mod sheet_layout;
 mod title_block;
 pub mod structural;
+mod clip;
 mod swipe;
 mod theme;
 pub mod typeface;
