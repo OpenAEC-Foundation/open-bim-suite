@@ -701,7 +701,7 @@ mod tests {
     fn the_bars_of_a_beam_are_solids_inside_its_concrete() {
         use crate::element::LinearDef;
         use crate::profile::ProfileDef;
-        let beam = LinearDef { start: glam::DVec3::new(1.0, 2.0, 3.0), end: glam::DVec3::new(7.0, 2.0, 3.0), profile: ProfileDef::Rectangle { width: 0.3, height: 0.5 }, roll: 0.0 };
+        let beam = LinearDef { role: Default::default(), start: glam::DVec3::new(1.0, 2.0, 3.0), end: glam::DVec3::new(7.0, 2.0, 3.0), profile: ProfileDef::Rectangle { width: 0.3, height: 0.5 }, roll: 0.0 };
         let r = Reinforcement::default();
         let solids = r.solids(&beam, &[]).unwrap();
         assert_eq!(solids.iter().filter(|(k, _)| *k == BarKind::Top).count(), 2);
@@ -820,7 +820,7 @@ mod tests {
         assert_eq!(bars.len(), 2);
         assert!((bars[0].1.y + 0.25 - 0.084).abs() < 1e-9 && (bars[0].3, bars[0].4) == (2.0, 4.0), "{bars:?}");
         // as solids: 5 usual bars, 45 stirrups and the 2 drawn
-        let beam = LinearDef { start: glam::DVec3::ZERO, end: glam::DVec3::new(6.0, 0.0, 0.0), profile: ProfileDef::Rectangle { width: 0.3, height: 0.5 }, roll: 0.0 };
+        let beam = LinearDef { role: Default::default(), start: glam::DVec3::ZERO, end: glam::DVec3::new(6.0, 0.0, 0.0), profile: ProfileDef::Rectangle { width: 0.3, height: 0.5 }, roll: 0.0 };
         let solids = r.solids(&beam, &extras).unwrap();
         assert_eq!((solids.iter().filter(|s| s.0 == BarKind::Stirrup).count(), solids.iter().filter(|s| s.0 == BarKind::Extra).count()), (45, 2));
         // with no extras the rows are those of `bars`

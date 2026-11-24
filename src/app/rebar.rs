@@ -333,7 +333,7 @@ mod tests {
         let mut app = App::default();
         app.new_model("Level 0");
         let level = app.work_plane().2;
-        let beam = Shape::Linear(LinearDef { start: DVec3::new(0.0, 0.0, 3.0), end: DVec3::new(6.0, 0.0, 3.0), profile: ProfileDef::Rectangle { width: 0.3, height: 0.5 }, roll: 0.0 });
+        let beam = Shape::Linear(LinearDef { role: Default::default(), start: DVec3::new(0.0, 0.0, 3.0), end: DVec3::new(6.0, 0.0, 3.0), profile: ProfileDef::Rectangle { width: 0.3, height: 0.5 }, roll: 0.0 });
         let beam = app.add_element("Beam", level.clone(), beam).unwrap();
         let p = DVec2::new;
         let slab = PlanarForm::Slab { outline: vec![p(0.0, 2.0), p(6.0, 2.0), p(6.0, 6.0), p(0.0, 6.0)], holes: Vec::new(), top: 0.0, bulges: Vec::new(), role: Default::default(), slope: None };

@@ -645,7 +645,7 @@ mod tests {
         let mut app = App::default();
         app.new_model("Level 0");
         let level = app.work_plane().2;
-        let beam = Shape::Linear(LinearDef { start: DVec3::new(0.0, 0.0, 3.0), end: DVec3::new(6.0, 0.0, 3.0), profile: ProfileDef::Rectangle { width: 0.3, height: 0.5 }, roll: 0.0 });
+        let beam = Shape::Linear(LinearDef { role: Default::default(), start: DVec3::new(0.0, 0.0, 3.0), end: DVec3::new(6.0, 0.0, 3.0), profile: ProfileDef::Rectangle { width: 0.3, height: 0.5 }, roll: 0.0 });
         let id = app.add_element("Beam", level, beam).unwrap();
         app.viewport_size = (1000.0, 800.0);
         app.camera.set_preset(crate::viewport::camera::ViewPreset::Top);

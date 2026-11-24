@@ -2618,7 +2618,7 @@ impl App {
                         self.select_box(rect, width, height, add);
                     }
                 }
-                Navigate::Hover { x, y, width, height } if self.rebar_hover(x, y, width, height) => {}
+                Navigate::Hover { x, y, width, height } if self.rebar_hover(x, y, width, height) || self.rebar_area_hover(x, y, width, height) => {}
                 Navigate::Hover { x, y, width, height } if self.grab_hover(x, y, width, height) => {}
                 Navigate::Hover { x, y, width, height } if self.sketch_hover(x, y, width, height) => {}
                 Navigate::Hover { x, y, width, height } if self.edit_hover(x, y, width, height) => {}
