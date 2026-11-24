@@ -93,19 +93,31 @@ pub struct Settings {
     pub grade: Option<String>,
     /// What the Slab tool makes: a floor, a roof or a ceiling.
     pub role: bim_core::SlabRole,
-    /// The service a duct, pipe or cable tray is drawn in; `None`: not given.
+    /// The service a duct, pipe or cable tray is drawn in, or an appliance is of; `None`: not given.
     pub service: Option<bim_core::Service>,
+    /// What the Appliance tool places.
+    pub appliance: bim_core::PointRole,
+    /// The Stair tool gives its stairs a railing.
+    pub railing: bool,
 }
 
 impl Settings {
+    /// These settings for appliance `role`: its usual size and height above the level.
+    pub fn of_appliance(self, role: bim_core::PointRole) -> Self {
+        let (size, above) = role.usual();
+        Settings { width: size.x, depth: size.y, height: Some(size.z), offset: above, appliance: role, ..self }
+    }
+
     /// What a tool places when nothing was typed.
     pub fn default_for(tool: ModelTool) -> Self {
-        let plain = |width: f64, depth: f64, height: Option<f64>| Settings { kind: None, width, depth, height, offset: 0.0, sill: 0.0, location: LocationLine::Centre, grade: None, role: bim_core::SlabRole::Floor, service: None };
+        let plain = |width: f64, depth: f64, height: Option<f64>| Settings { kind: None, width, depth, height, offset: 0.0, sill: 0.0, location: LocationLine::Centre, grade: None, role: bim_core::SlabRole::Floor, service: None, appliance: bim_core::PointRole::Radiator, railing: true };
         use super::element_props::{DOOR, WINDOW};
         use super::modeller::{BEAM, CABLE_TRAY, COLUMN, DUCT, OBJECT, PIPE, ROUND_DUCT, SERVICE_HEIGHT, SLAB_THICKNESS, WALL_THICKNESS};
         match tool {
             ModelTool::Wall => plain(WALL_THICKNESS, 0.0, None),
             ModelTool::Slab => plain(SLAB_THICKNESS, 0.0, None),
+            // a stair 1 m wide with treads of 250 mm, up to the next level, its steps counted
+            ModelTool::Stair => plain(1.0, 0.25, None),
             ModelTool::Column => plain(COLUMN, COLUMN, None),
             ModelTool::Beam => plain(BEAM.0, BEAM.1, None),
             ModelTool::System => plain(0.0, 0.0, None),
@@ -114,6 +126,7 @@ impl Settings {
             ModelTool::RoundDuct => plain(ROUND_DUCT, ROUND_DUCT, Some(SERVICE_HEIGHT)),
             ModelTool::Pipe => plain(PIPE, PIPE, Some(SERVICE_HEIGHT)),
             ModelTool::CableTray => plain(CABLE_TRAY.0, CABLE_TRAY.1, Some(SERVICE_HEIGHT)),
+            ModelTool::Appliance => Settings::default_for(ModelTool::Point).of_appliance(bim_core::PointRole::Radiator),
             ModelTool::Door => plain(DOOR.0, 0.0, Some(DOOR.1)),
             ModelTool::Window => Settings { sill: WINDOW.2, ..plain(WINDOW.0, 0.0, Some(WINDOW.1)) },
         }
@@ -149,6 +162,10 @@ pub enum PlaceMessage {
     Role(bim_core::SlabRole),
     /// The service a run is drawn in (`None`: not given).
     Service(Option<bim_core::Service>),
+    /// What the Appliance tool places; its fields take that one's usual size.
+    Appliance(bim_core::PointRole),
+    /// The Stair tool gives its stairs a railing, or none.
+    Railing(bool),
     Chain(bool),
     /// The Wall tool draws a rectangle, or single walls.
     Rectangle(bool),
@@ -176,6 +193,11 @@ impl Placement {
     /// What `tool`'s next element gets.
     pub fn of(&self, tool: ModelTool) -> Settings {
         self.settings.get(&tool).cloned().unwrap_or_else(|| Settings::default_for(tool))
+    }
+
+    /// Puts `settings` in the place of `tool`'s.
+    pub(super) fn set_tool(&mut self, tool: ModelTool, settings: Settings) {
+        self.set(tool, settings);
     }
 
     fn set(&mut self, tool: ModelTool, settings: Settings) {
@@ -211,6 +233,10 @@ impl App {
                     // a wall up to its level stays so; one with a height of its own keeps it
                     PlanarForm::Wall { height, .. } => (ModelTool::Wall, Settings { kind, width: p.total_thickness(), height: e.top.is_none().then_some(height), ..of(ModelTool::Wall) }),
                     PlanarForm::Slab { role, .. } => (ModelTool::Slab, Settings { kind, width: p.total_thickness(), role, ..of(ModelTool::Slab) }),
+                    PlanarForm::Stair { height, risers, ref shape, railing, .. } => {
+                        let width = if let bim_core::StairShape::Run { width, .. } = shape { *width } else { of(ModelTool::Stair).width };
+                        (ModelTool::Stair, Settings { width, height: Some(height), sill: risers as f64, railing, ..of(ModelTool::Stair) })
+                    }
                 }
             }
             Shape::Linear(d) => {
@@ -249,11 +275,15 @@ impl App {
                 let tool = match d.opening {
                     Some(bim_core::OpeningKind::Door) => ModelTool::Door,
                     Some(bim_core::OpeningKind::Window) => ModelTool::Window,
-                    None => ModelTool::Point,
+                    None if d.role.is_object() => ModelTool::Point,
+                    None => ModelTool::Appliance,
                 };
                 let mut s = Settings { width: d.size.x, height: Some(d.size.z), ..of(tool) };
-                if tool == ModelTool::Point {
+                if matches!(tool, ModelTool::Point | ModelTool::Appliance) {
                     s.depth = d.size.y;
+                }
+                if tool == ModelTool::Appliance {
+                    (s.appliance, s.service) = (d.role, e.service);
                 }
                 (tool, s)
             }
@@ -286,6 +316,35 @@ struct Served(Option<bim_core::Service>, &'static str);
 impl std::fmt::Display for Served {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.1)
+    }
+}
+
+/// A kind of appliance in the strip, named in the interface language.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Appliance(bim_core::PointRole, &'static str);
+
+impl std::fmt::Display for Appliance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.1)
+    }
+}
+
+/// The name of a kind of point element in the interface language.
+pub fn appliance_label(role: bim_core::PointRole, l: Language) -> &'static str {
+    use bim_core::PointRole as R;
+    match role {
+        R::Object => l.text("Object", "Object"),
+        R::Radiator => l.text("Radiator", "Radiator"),
+        R::Boiler => l.text("Ketel", "Boiler"),
+        R::Pump => l.text("Pomp", "Pump"),
+        R::Fan => l.text("Ventilator", "Fan"),
+        R::AirHandlingUnit => l.text("Luchtbehandelingskast", "Air handling unit"),
+        R::AirTerminal => l.text("Rooster", "Air terminal"),
+        R::Sanitary => l.text("Sanitair", "Sanitary fixture"),
+        R::Valve => l.text("Afsluiter", "Valve"),
+        R::Tank => l.text("Vat", "Tank"),
+        R::Outlet => l.text("Wandcontactdoos", "Socket outlet"),
+        R::Light => l.text("Armatuur", "Light fixture"),
     }
 }
 
@@ -328,10 +387,11 @@ fn fields(tool: ModelTool, l: Language) -> Vec<(PlaceField, &'static str)> {
     match tool {
         ModelTool::Wall => vec![thickness, height, base],
         ModelTool::Slab => vec![thickness, (F::Offset, l.text("Bovenkant", "Top height"))],
+        ModelTool::Stair => vec![width, height, (F::Sill, l.text("Aantal optreden", "Risers")), (F::Depth, l.text("Aantrede", "Going")), base],
         ModelTool::Column => vec![width, depth, height, base],
         ModelTool::Beam => vec![width, (F::Depth, l.text("Profielhoogte", "Profile height")), (F::Height, l.text("Bovenkant", "Top height"))],
         ModelTool::System => vec![height, base],
-        ModelTool::Point => vec![width, depth, height, base],
+        ModelTool::Point | ModelTool::Appliance => vec![width, depth, height, base],
         ModelTool::Duct | ModelTool::CableTray => vec![width, (F::Depth, l.text("Hoogte", "Height")), (F::Height, l.text("Hart boven niveau", "Centre above level")), (F::Offset, l.text("Stijging", "Rise"))],
         ModelTool::RoundDuct | ModelTool::Pipe => vec![(F::Width, l.text("Diameter", "Diameter")), (F::Height, l.text("Hart boven niveau", "Centre above level")), (F::Offset, l.text("Stijging", "Rise"))],
         ModelTool::Door => vec![width, height],
@@ -347,6 +407,8 @@ fn shown(s: &Settings, field: PlaceField) -> String {
         PlaceField::Depth => m(s.depth),
         PlaceField::Height => s.height.map(m).unwrap_or_default(),
         PlaceField::Offset => m(s.offset),
+        // a stair's steps are counted; none typed: as many as its height asks
+        PlaceField::Sill if s.sill >= 2.0 && s.sill.fract() == 0.0 => format!("{}", s.sill as u64),
         PlaceField::Sill => m(s.sill),
     }
 }
@@ -358,8 +420,12 @@ fn shown(s: &Settings, field: PlaceField) -> String {
 fn with_typed(tool: ModelTool, s: &Settings, field: PlaceField, typed: &str) -> Option<Settings> {
     let mut s = s.clone();
     let typed = typed.trim();
+    if field == PlaceField::Sill && typed.is_empty() && tool == ModelTool::Stair {
+        s.sill = 0.0;
+        return Some(s);
+    }
     if field == PlaceField::Height && typed.is_empty() {
-        let storey = matches!(tool, ModelTool::Wall | ModelTool::Column | ModelTool::Beam | ModelTool::System);
+        let storey = matches!(tool, ModelTool::Wall | ModelTool::Column | ModelTool::Beam | ModelTool::System | ModelTool::Stair);
         s.height = None;
         return storey.then_some(s);
     }
@@ -367,6 +433,8 @@ fn with_typed(tool: ModelTool, s: &Settings, field: PlaceField, typed: &str) -> 
     match field {
         PlaceField::Width if v > 0.0 => s.width = v,
         PlaceField::Depth if v > 0.0 => s.depth = v,
+        // a stair with no going runs from click to click
+        PlaceField::Depth if v == 0.0 && tool == ModelTool::Stair => s.depth = 0.0,
         PlaceField::Height if v > 0.0 || tool == ModelTool::Beam || tool.service().is_some() => s.height = Some(v),
         PlaceField::Offset => s.offset = v,
         PlaceField::Sill if v >= 0.0 => s.sill = v,
@@ -402,6 +470,8 @@ impl App {
             PlaceMessage::Location(location) => s.location = location,
             PlaceMessage::Grade(grade) => s.grade = grade,
             PlaceMessage::Service(service) => s.service = service,
+            PlaceMessage::Appliance(role) => s = s.of_appliance(role),
+            PlaceMessage::Railing(on) => s.railing = on,
             PlaceMessage::Role(role) => {
                 if s.role != role {
                     s.role = role;
@@ -447,6 +517,8 @@ impl App {
         let group = kind.as_deref().and_then(|id| self.library.system_type(id)).map(|t| t.group);
         let language = Language::ALL.into_iter().find(|&l| tool.label(l) == name);
         match (tool, group, language) {
+            // an appliance is named for what it is: Radiator 1, Boiler 1
+            (ModelTool::Appliance, _, Some(l)) => appliance_label(self.modeller.placement.of(tool).appliance, l),
             (ModelTool::System, Some(group), Some(l)) => group.name(super::library::lang(l)),
             _ => name,
         }
@@ -506,6 +578,41 @@ impl App {
         Some((choices.into_iter().map(|c| (c.id, c.name)).collect(), s.kind))
     }
 
+    /// The other lists of the active tool's strip, for the remote control, which cannot open a
+    /// list: each with its name (`service`, `kind`), what it offers (the names in English and in
+    /// language `l`) and the one picked (in English). Empty while the tool has none.
+    pub(crate) fn tool_options(&self, l: Language) -> Vec<(&'static str, Vec<(&'static str, &'static str)>, &'static str)> {
+        let Some((tool, s)) = self.tool_settings() else { return Vec::new() };
+        let mut lists = Vec::new();
+        if tool == ModelTool::Appliance {
+            let kinds = bim_core::PointRole::APPLIANCES.into_iter().map(|r| (appliance_label(r, Language::English), appliance_label(r, l))).collect();
+            lists.push(("kind", kinds, appliance_label(s.appliance, Language::English)));
+        }
+        if tool.service().is_some() || tool == ModelTool::Appliance {
+            let fits = |v: &bim_core::Service| tool.service().is_none_or(|role| v.role() == role);
+            let services = std::iter::once(("-", "-")).chain(bim_core::Service::ALL.into_iter().filter(fits).map(|v| (v.name(), service_label(v, l)))).collect();
+            lists.push(("service", services, s.service.map_or("-", |v| v.name())));
+        }
+        lists
+    }
+
+    /// Picks `wanted` (a name of [`App::tool_options`], in English or the interface language, any
+    /// case) in list `list` of the active tool's strip, as choosing it there does. False when the
+    /// tool has no such list or the list no such name.
+    pub(crate) fn pick_tool_option(&mut self, list: &str, wanted: &str, l: Language) -> bool {
+        let is = |en: &str, own: &str| en.eq_ignore_ascii_case(wanted) || own.to_lowercase() == wanted.to_lowercase();
+        if !self.tool_options(l).iter().any(|(name, options, _)| *name == list && options.iter().any(|(en, own)| is(en, own))) {
+            return false;
+        }
+        let message = match list {
+            "kind" => bim_core::PointRole::APPLIANCES.into_iter().find(|r| is(appliance_label(*r, Language::English), appliance_label(*r, l))).map(PlaceMessage::Appliance),
+            _ => Some(PlaceMessage::Service(bim_core::Service::ALL.into_iter().find(|v| is(v.name(), service_label(*v, l))))),
+        };
+        let Some(message) = message else { return false };
+        let _ = self.update(Message::Place(message));
+        true
+    }
+
     /// Picks type `id` for the active tool, as its Type list does.
     pub(crate) fn pick_tool_type(&mut self, id: Option<String>) {
         let _ = self.update(Message::Place(PlaceMessage::Kind(id)));
@@ -530,15 +637,23 @@ impl App {
             bar = bar.push(pair(label(l.text("Type", "Type")), pick));
         }
         let typing = self.modeller.placement.typing.clone();
-        for (field, name) in fields(tool, l) {
+        let mut listed = fields(tool, l);
+        // a roof: the angle its eaves rise at (0: flat)
+        if tool == ModelTool::Slab && s.role == bim_core::SlabRole::Roof {
+            listed.push((PlaceField::Sill, l.text("Helling (°)", "Slope (°)")));
+        }
+        for (field, name) in listed {
             // a typed element's thickness is its type's
             let fixed = field == PlaceField::Width && s.kind.is_some() && matches!(tool, ModelTool::Wall | ModelTool::Slab | ModelTool::Column | ModelTool::Beam);
             let fixed = fixed || (field == PlaceField::Depth && s.kind.is_some() && matches!(tool, ModelTool::Column | ModelTool::Beam));
+            // a stair's steps not typed are counted from its height: the field is empty and says so
+            let counted = tool == ModelTool::Stair && field == PlaceField::Sill && s.sill < 2.0;
             let value = match &typing {
                 Some((f, typed)) if *f == field => typed.clone(),
+                _ if counted => String::new(),
                 _ => shown(&s, field),
             };
-            let hint = if field == PlaceField::Height { l.text("tot niveau", "to level") } else { "" };
+            let hint = if field == PlaceField::Height { l.text("tot niveau", "to level") } else if counted { l.text("uit hoogte", "from height") } else { "" };
             let input = text_input(hint, &value).size(12).padding([2, 6]).width(68);
             let input = if fixed { input } else { input.on_input(move |t| Message::Place(PlaceMessage::Field(field, t))).on_submit(Message::Place(PlaceMessage::Done)) };
             let named = openaec_ui::design::a11y::node(input.width(Fill), openaec_ui::design::a11y::Node::new(openaec_ui::design::a11y::Role::TextField, name).value(value.clone()).disabled(fixed));
@@ -558,9 +673,16 @@ impl App {
             let pick = pick_list(choices, picked, |c: Choice| Message::Place(PlaceMessage::Grade(c.id))).text_size(12).padding([2, 6]).width(150);
             bar = bar.push(pair(label(l.text("Sterkteklasse", "Grade")), pick));
         }
-        if let Some(role) = tool.service() {
+        if tool == ModelTool::Appliance {
+            let options: Vec<Appliance> = bim_core::PointRole::APPLIANCES.into_iter().map(|r| Appliance(r, appliance_label(r, l))).collect();
+            let picked = options.iter().find(|o| o.0 == s.appliance).copied();
+            let pick = pick_list(options, picked, |o: Appliance| Message::Place(PlaceMessage::Appliance(o.0))).text_size(12).padding([2, 6]).width(170);
+            bar = bar.push(pair(label(l.text("Soort", "Kind")), pick));
+        }
+        if tool.service().is_some() || tool == ModelTool::Appliance {
             // the service the run is of: it is coloured by it and joins only runs of its own
-            let options: Vec<Served> = std::iter::once(Served(None, "-")).chain(bim_core::Service::ALL.into_iter().filter(|v| v.role() == role).map(|v| Served(Some(v), service_label(v, l)))).collect();
+            let role = tool.service();
+            let options: Vec<Served> = std::iter::once(Served(None, "-")).chain(bim_core::Service::ALL.into_iter().filter(|v| role.is_none_or(|role| v.role() == role)).map(|v| Served(Some(v), service_label(v, l)))).collect();
             let picked = options.iter().find(|o| o.0 == s.service).copied();
             let pick = pick_list(options, picked, |o: Served| Message::Place(PlaceMessage::Service(o.0))).text_size(12).padding([2, 6]).width(170);
             bar = bar.push(pair(label(l.text("Systeem", "System")), pick));
@@ -570,6 +692,14 @@ impl App {
             let picked = options.iter().find(|o| o.0 == s.location).copied();
             let name = if tool == ModelTool::Wall { l.text("Locatielijn", "Location line") } else { l.text("Uitlijning", "Alignment") };
             bar = bar.push(label(name)).push(pick_list(options, picked, |o: Located| Message::Place(PlaceMessage::Location(o.0))).text_size(12).padding([2, 6]).width(120));
+        }
+        if tool == ModelTool::Stair {
+            // its sketch: an outline and the line it climbs along, or that line alone with landings
+            let on = self.modeller.sketch.as_ref().is_some_and(|s| s.stair);
+            let sketch = button(text(l.text("Schets", "Sketch")).size(12)).padding([3, 10]).style(move |_, st| p.ribbon_button(on, st)).on_press(Message::StairSketch);
+            let railed = s.railing;
+            let railing = button(text(l.text("Leuning", "Railing")).size(12)).padding([3, 10]).style(move |_, st| p.ribbon_button(railed, st)).on_press(Message::Place(PlaceMessage::Railing(!railed)));
+            bar = bar.push(sketch).push(railing);
         }
         if tool == ModelTool::Wall {
             let on = self.modeller.placement.rectangle;
@@ -627,7 +757,7 @@ impl App {
                 choices.extend(self.library.service_types_of(carrier).filter(|series| series.section == section)
                     .map(|series| Choice { id: Some(series.id.clone()), name: series.name(lang).to_string() }));
             }
-            ModelTool::Point | ModelTool::Door | ModelTool::Window => return None,
+            ModelTool::Point | ModelTool::Appliance | ModelTool::Stair | ModelTool::Door | ModelTool::Window => return None,
         }
         Some(choices)
     }

@@ -92,7 +92,7 @@ impl App {
         match key {
             ModelKey::Select => self.select_tool(),
             ModelKey::Wall => self.set_model_tool(tool(ModelTool::Wall)),
-            ModelKey::Slab => self.set_model_tool(tool(ModelTool::Slab)),
+            ModelKey::Slab => self.start_model_tool(tool(ModelTool::Slab)),
             ModelKey::Column => self.set_model_tool(tool(ModelTool::Column)),
             ModelKey::Beam => self.set_model_tool(tool(ModelTool::Beam)),
             ModelKey::System => self.set_model_tool(tool(ModelTool::System)),

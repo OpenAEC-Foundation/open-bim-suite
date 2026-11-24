@@ -25,10 +25,13 @@ pub enum Snap {
     Polar,
     /// Whole centimetres.
     Round,
+    /// Square only: whatever is drawn runs along x or along y from the last point, whichever is
+    /// nearer, wherever the click is. Off: any angle.
+    Square,
 }
 
 impl Snap {
-    pub const ALL: [Snap; 7] = [Snap::End, Snap::Middle, Snap::Grid, Snap::Line, Snap::Ortho, Snap::Polar, Snap::Round];
+    pub const ALL: [Snap; 8] = [Snap::End, Snap::Middle, Snap::Grid, Snap::Line, Snap::Ortho, Snap::Polar, Snap::Round, Snap::Square];
 
     /// Its name on its switch.
     pub fn label(self, l: Language) -> &'static str {
@@ -40,6 +43,7 @@ impl Snap {
             Snap::Ortho => l.text("Ortho", "Ortho"),
             Snap::Polar => l.text("Polair", "Polar"),
             Snap::Round => l.text("Hele cm", "Whole cm"),
+            Snap::Square => l.text("Alleen haaks", "Square only"),
         }
     }
 
@@ -53,6 +57,7 @@ impl Snap {
             Snap::Ortho => l.text("Trek recht door vanaf het vorige punt", "Go straight on from the last point"),
             Snap::Polar => l.text("Volg een richting om de 45 graden", "Track directions at 45 degree intervals"),
             Snap::Round => l.text("Rond af op hele centimeters", "Round to whole centimetres"),
+            Snap::Square => l.text("Teken alleen horizontaal en verticaal vanaf het vorige punt; uit: elke hoek", "Draw only level and upright from the last point; off: any angle"),
         }
     }
 }
@@ -67,11 +72,13 @@ pub struct Snaps {
     pub ortho: bool,
     pub polar: bool,
     pub round: bool,
+    /// Square only (see [`Snap::Square`]); off until it is asked for.
+    pub square: bool,
 }
 
 impl Default for Snaps {
     fn default() -> Self {
-        Self { end: true, middle: true, grid: true, line: true, ortho: true, polar: false, round: true }
+        Self { end: true, middle: true, grid: true, line: true, ortho: true, round: true, square: false, polar: false }
     }
 }
 
@@ -85,6 +92,7 @@ impl Snaps {
             Snap::Ortho => &mut self.ortho,
             Snap::Polar => &mut self.polar,
             Snap::Round => &mut self.round,
+            Snap::Square => &mut self.square,
         }
     }
 
@@ -95,6 +103,17 @@ impl Snaps {
     pub fn toggle(&mut self, snap: Snap) {
         let slot = self.slot(snap);
         *slot = !*slot;
+    }
+}
+
+/// `p` brought square to `from`: onto the line along x or along y through `from`, whichever it
+/// lies nearer.
+pub fn squared(from: DVec2, p: DVec2) -> DVec2 {
+    let d = p - from;
+    if d.x.abs() >= d.y.abs() {
+        DVec2::new(p.x, from.y)
+    } else {
+        DVec2::new(from.x, p.y)
     }
 }
 
@@ -112,6 +131,13 @@ impl App {
                     let n = outline.len();
                     lines.extend((0..n).map(|k| (outline[k], outline[(k + 1) % n])));
                 }
+                Shape::Planar(PlanarDef { form: PlanarForm::Stair { shape, .. }, .. }) => match shape {
+                    bim_core::StairShape::Run { path, .. } => lines.extend(path.windows(2).map(|w| (w[0], w[1]))),
+                    bim_core::StairShape::Outline { outline, .. } => {
+                        let n = outline.len();
+                        lines.extend((0..n).map(|k| (outline[k], outline[(k + 1) % n])));
+                    }
+                },
                 Shape::System(s) => lines.push((s.start, s.end)),
                 Shape::Point(_) | Shape::Connection(_) => {}
             }

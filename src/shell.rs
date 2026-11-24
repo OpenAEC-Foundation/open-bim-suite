@@ -1516,7 +1516,7 @@ impl Studio {
                 .enabled(app.wants_tab()),
             Command::new("model.delete", l.text("Verwijderen", "Delete"), go(Message::DeletePicked))
                 .icon(small("edit.delete"), large("edit.delete"))
-                .enabled(!app.selected_modelled().is_empty()),
+                .enabled(!app.selected_modelled().is_empty() || !app.picked_modelled_grids().is_empty() || app.mark_pick.is_some()),
         ];
         // in an environment with Blender (the web app): a render of the file opened from Docs
         #[cfg(target_arch = "wasm32")]
@@ -1543,12 +1543,19 @@ impl Studio {
                 .shortcut(key('t'))
                 .enabled(app.collab.clash.is_some() || app.collab.open_group.is_some()),
         ]);
+        // a roof by its footprint: the Slab tool making a roof, in its sketch
+        let roofing = app.modeller.sketch.as_ref().is_some_and(|s| s.new.is_some() && !s.stair) && app.modeller.placement.of(crate::app::modeller::ModelTool::Slab).role == bim_core::SlabRole::Roof;
+        list.push(Command::new("model.roof", l.text("Dak", "Roof"), go(Message::RoofTool(l.text("Dak", "Roof")))).icon(small("curtain.new"), large("curtain.new")).mode(roofing).enabled(loaded));
+        // the grid of curtain walls: a line added or taken away, a bay's panel
+        list.extend(crate::app::modeller::curtain::CurtainTool::ALL.map(|tool| {
+            Command::new(tool.id(), tool.label(l), go(Message::CurtainTool(tool))).icon(small(tool.icon()), large(tool.icon())).mode(app.modeller.curtain == Some(tool)).enabled(loaded)
+        }));
         // move, copy, turn and mirror what is selected
         list.extend(crate::app::transform::TransformKind::ALL.map(|kind| {
             Command::new(kind.id(), kind.label(l), go(Message::Transform(kind)))
                 .icon(small(kind.icon()), large(kind.icon()))
                 .toggle(app.modeller.transform.as_ref().is_some_and(|t| t.kind == kind))
-                .enabled(!app.selected_modelled().is_empty() || app.modeller.transform.is_some() || app.drawn_picked().is_some())
+                .enabled(!app.selected_modelled().is_empty() || app.modeller.transform.is_some() || app.drawn_picked().is_some() || (kind != crate::app::transform::TransformKind::Align && !app.picked_modelled_grids().is_empty()))
         }));
         // the Edit tools of the Draw tab, on the line or shape picked on a floor plan
         list.push(
@@ -1633,7 +1640,7 @@ impl Studio {
                 .toggle(app.section_tool && sections)
                 .enabled(sections),
         );
-        for tool in crate::app::modeller::ModelTool::ALL.into_iter().chain(crate::app::modeller::ModelTool::OPENINGS).chain(crate::app::modeller::ModelTool::SERVICES) {
+        for tool in crate::app::modeller::ModelTool::ALL.into_iter().chain(crate::app::modeller::ModelTool::OPENINGS).chain(crate::app::modeller::ModelTool::SERVICES).chain(crate::app::modeller::ModelTool::APPLIANCES) {
             let on = app.modeller.tool.is_some_and(|t| t.0 == tool);
             list.push(Command::new(tool.id(), tool.label(l), go(Message::ModelTool(Some((tool, tool.label(l)))))).icon(small(tool.icon()), large(tool.icon())).mode(on).enabled(loaded));
         }
@@ -2215,7 +2222,7 @@ impl Studio {
                     }
                     self.keys.clear();
                     if let Key::Character(c) = &press.key {
-                        if let Some(c) = c.chars().next().filter(|c| "lratLRAT".contains(*c)) {
+                        if let Some(c) = c.chars().next().filter(|c| "lrcaotphLRCAOTPH".contains(*c)) {
                             return self.update(Msg::App(Message::EditKey(c)));
                         }
                     }
@@ -2739,7 +2746,8 @@ impl Studio {
                 (l.text("Referenties", "Datums"), vec![large("project.grid"), large("project.level")]),
                 (l.text("Vlak", "Planar"), vec![large("model.wall"), large("model.slab")]),
                 (l.text("Lijnvormig", "Linear"), vec![large("model.column"), large("model.beam")]),
-                (l.text("Systeem", "System"), vec![large("model.system")]),
+                (l.text("Systeem", "System"), vec![large("model.system"), smalls(&["model.curtain-line", "model.curtain-panel"])]),
+                (l.text("Trap en dak", "Stair and roof"), vec![large("model.stair"), large("model.roof")]),
                 (l.text("Puntvormig", "Point"), vec![large("model.point")]),
                 (l.text("Openingen", "Openings"), vec![large("model.door"), large("model.window")]),
                 (l.text("Verbinding", "Connection"), vec![smalls(&["model.butt", "model.mitre", "model.cut"]), smalls(&["model.end-plate", "model.apart"]), smalls(&["model.fin-plate", "model.splice", "model.base-plate"])]),
@@ -2754,8 +2762,9 @@ impl Studio {
                 (l.text("Ventilatie", "HVAC"), vec![large("mep.duct"), large("mep.round-duct")]),
                 (l.text("Leidingen", "Plumbing"), vec![large("mep.pipe")]),
                 (l.text("Elektra", "Electrical"), vec![large("mep.cable-tray")]),
+                (l.text("Toestellen", "Equipment"), vec![large("mep.appliance")]),
                 (l.text("Verbinding", "Connection"), vec![smalls(&["model.cut", "model.apart"])]),
-                (l.text("Wijzigen", "Modify"), vec![large("model.edit"), smalls(&["model.move", "model.copy"]), smalls(&["model.rotate", "model.mirror"]), smalls(&["model.align"]), large("model.delete")]),
+                (l.text("Wijzigen", "Modify"), vec![large("model.edit"), smalls(&["model.move", "model.copy"]), smalls(&["model.rotate", "model.mirror"]), smalls(&["model.align", "model.delete"])]),
             ],
             // the project as its IFCX file has it: the ways to look at it, and saving it
             RibbonPage::Ifcx => vec![

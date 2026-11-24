@@ -268,6 +268,12 @@ pub fn tools() -> Vec<Value> {
                 "type": { "type": "string", "description": "The type to pick: its id or its name" },
                 "language": { "type": "string", "description": "The language of the names: en, nl, de or fr" }
             }), &[], false),
+        tool("tool_option", "The Modeller: the other lists of the strip of the tool that is on: the service of a duct, pipe, cable tray or appliance (supply air, heating supply, cold water, ...; '-' for none) and the kind of an appliance (radiator, boiler, pump, ...). Without a value it gives the lists with what they offer and what is picked; with a list and a value (a name in English or as shown, any case) it picks that, as choosing it in the list does. ui_press cannot open a list, so this is how one is chosen.",
+            json!({
+                "list": { "type": "string", "enum": ["service", "kind"], "description": "The list to pick in" },
+                "value": { "type": "string", "description": "What to pick: its name" },
+                "language": { "type": "string", "description": "The language of the names shown: en, nl, de or fr" }
+            }), &[], false),
         tool("element_drawings", "The Modeller: write the element drawings of the framed systems (timber frames, steel frames, metal stud walls) into a folder, as the Element drawings button of the properties panel does: for every prefab unit the drawing of its frame with its dimensions and the list of its members, then one of every layer with boards or battens. Of every framed system, or of the selected ones with selection: true. Returns the files written.",
             json!({
                 "folder": { "type": "string", "description": "The folder to write into (absolute); made when it is not there" },
@@ -279,6 +285,12 @@ pub fn tools() -> Vec<Value> {
             json!({ "name": { "type": "string" } }), &[], false),
         tool("hover", "Rest the pointer on a pixel of the last viewport screenshot, as moving the mouse there does: a tool's preview runs to it, and elements grabbed with G follow it.",
             json!({ "x": { "type": "number" }, "y": { "type": "number" } }), &["x", "y"], false),
+        tool("drag", "The Modeller, with the Select tool on: drag with the left button from one pixel of the last viewport screenshot to another, as the mouse does. It draws a selection box (to the right: what lies in it whole; to the left: what it touches too) over elements and grid lines, or, when it starts on a picked grid line, moves the picked grid lines. Tells what is selected after it and whether grid lines moved.",
+            json!({
+                "from": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+                "to": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+                "add": { "type": "boolean", "description": "Shift held: add to what is selected" }
+            }), &["from", "to"], false),
         tool("drag_handle", "The Modeller: drag a handle of the viewport from one pixel of the last viewport screenshot to another, as the mouse does: a grip of the selected element (a wall's ends, middle and top; a floor's edges, top and underside), or a point in edit mode or in a floor's sketch. Without from it lists where the handles are.",
             json!({
                 "from": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },

@@ -9,7 +9,14 @@
 //!   in a floor plan over its cut, in a section where it crosses them.
 //! - **Snapping.** A click of any modelling tool snaps to the ends of the grid lines and to where
 //!   they cross.
-//! - **Removing.** Delete removes the picked grid line.
+//! - **Picking.** A click picks a grid line; Shift and a click adds one or lets it go, and a
+//!   selection box takes those in it (drawn to the left: those it touches). Picked grid lines
+//!   show in light blue.
+//! - **Moving.** A drag that starts on a picked grid line moves the picked ones with the cursor;
+//!   Move, Copy, Rotate and Mirror take them as they take elements. Rotate has a field for the
+//!   angle: Enter turns them by it about the centre clicked, else about their own middle.
+//! - **Removing.** Delete (or Delete in the menu of the right button) removes the picked grid
+//!   lines.
 //! - **A series.** A picked grid line has a plus past its end: it opens a field for the
 //!   spacings of the lines to add beside it, in millimetres ("5000 3000 3x5400": 5 m on, 3 m
 //!   further, then three times 5.4 m). The new lines are parallel copies with the next free
@@ -31,6 +38,20 @@ const PLUS: f32 = 24.0;
 const PLUS_PAST: f32 = 56.0;
 /// How wide the series field's card is.
 const CARD: f32 = 240.0;
+
+/// A drag of grid lines is rounded to this (metres).
+const DRAG_ROUND: f64 = 0.01;
+
+/// The picked grid lines being dragged: which (of the modelled project), the grid lines as they
+/// were when the drag began, and where on the work plane it began.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GridDrag {
+    /// The one the drag took hold of: it is the one that lands on a wall's line.
+    held: usize,
+    indices: Vec<usize>,
+    before: Vec<bim_core::GridDef>,
+    origin: DVec2,
+}
 
 /// A message of the series field of the picked grid line.
 #[derive(Debug, Clone, PartialEq)]
@@ -95,22 +116,182 @@ impl App {
         true
     }
 
-    /// Move or Copy of grid line `index` (of the modelled ones) by `by`: the line goes there, or
-    /// (`copy`) stays and a parallel one is made there under the next name of its kind. The line
-    /// moved or made is picked, so it can be copied on.
-    pub(in crate::app) fn shift_grid(&mut self, index: Option<usize>, by: DVec2, copy: bool) {
-        let Some(index) = index else { return };
-        let Some(line) = self.modeller.model.grids().get(index).cloned() else { return };
-        let (start, end) = (line.start + by, line.end + by);
-        let now = if copy {
-            self.modeller.model.add_grid(start, end).ok()
-        } else {
-            self.modeller.model.set_grid(index, bim_core::GridDef { start, end, ..line }).ok().map(|_| index)
-        };
-        let Some(now) = now else { return };
+    /// The modelled grid lines `indices` go through `map`: moved, turned or mirrored, or (`copy`)
+    /// left where they are with a line made there under the next name of its kind. The lines
+    /// moved or made are picked, so they can be moved or copied on.
+    pub(in crate::app) fn map_grids(&mut self, indices: &[usize], map: &crate::app::transform::Map, copy: bool) {
+        if indices.is_empty() {
+            return;
+        }
+        let mut now = Vec::new();
+        for &index in indices {
+            let Some(line) = self.modeller.model.grids().get(index).cloned() else { continue };
+            let (start, end) = (map.plan(line.start), map.plan(line.end));
+            let made = if copy {
+                self.modeller.model.add_grid(start, end).ok()
+            } else {
+                self.modeller.model.set_grid(index, bim_core::GridDef { start, end, ..line }).ok().map(|_| index)
+            };
+            now.extend(made);
+        }
         self.show_modelled();
-        let shown = self.shown_grid(now);
-        self.pick_grid(shown);
+        self.pick_modelled_grids(&now);
+    }
+
+    /// Picks the modelled grid lines `indices`, beside what is selected.
+    fn pick_modelled_grids(&mut self, indices: &[usize]) {
+        let shown: Vec<usize> = indices.iter().filter_map(|&i| self.shown_grid(i)).collect();
+        self.set_picked_grids(shown);
+    }
+
+    /// The grid lines a selection box takes (indices among the grid lines shown): drawn to the
+    /// right those that lie in it whole, drawn to the left those it touches too, as with elements.
+    pub(in crate::app) fn grids_in_box(&self, rect: (glam::Vec2, glam::Vec2), width: f32, height: f32) -> Vec<usize> {
+        if !self.show_grids {
+            return Vec::new();
+        }
+        let (width, height) = (width.max(1.0), height.max(1.0));
+        let view_proj = self.camera.view_proj(width / height);
+        let (lo, hi) = (rect.0.min(rect.1), rect.0.max(rect.1));
+        let touching = rect.1.x < rect.0.x;
+        let inside = |p: glam::Vec2| p.x >= lo.x && p.x <= hi.x && p.y >= lo.y && p.y <= hi.y;
+        let on_screen = |q: [f32; 3]| {
+            let c = view_proj.project_point3(glam::Vec3::from_array(q));
+            (0.0..=1.0).contains(&c.z).then(|| glam::Vec2::new((c.x + 1.0) / 2.0 * width, (1.0 - c.y) / 2.0 * height))
+        };
+        // whether segment a-b crosses segment c-d
+        let crosses = |a: glam::Vec2, b: glam::Vec2, c: glam::Vec2, d: glam::Vec2| {
+            let side = |p: glam::Vec2, q: glam::Vec2, r: glam::Vec2| (q - p).perp_dot(r - p);
+            side(a, b, c) * side(a, b, d) <= 0.0 && side(c, d, a) * side(c, d, b) <= 0.0
+        };
+        let corners = [lo, glam::Vec2::new(hi.x, lo.y), hi, glam::Vec2::new(lo.x, hi.y)];
+        let mut taken = Vec::new();
+        for datum in self.datums() {
+            let crate::annotations::DatumKind::Grid(g) = datum.kind else { continue };
+            let (Some(a), Some(b)) = (on_screen(datum.line.a), on_screen(datum.line.b)) else { continue };
+            let whole = inside(a) && inside(b);
+            let touched = whole || inside(a) || inside(b) || (0..4).any(|k| crosses(a, b, corners[k], corners[(k + 1) % 4]));
+            if (whole || (touching && touched)) && !taken.contains(&g) {
+                taken.push(g);
+            }
+        }
+        taken
+    }
+
+    /// A drag in the viewport from `from` to `to` (pixels), `done` when the button is let go: when
+    /// it began on a picked grid line of the modelled project, the picked grid lines follow the
+    /// cursor over the work plane, rounded to 10 mm, and it is one step to take back. False when
+    /// it is no such drag (the drag then draws a selection box).
+    pub(in crate::app) fn drag_grids(&mut self, from: (f32, f32), to: (f32, f32), width: f32, height: f32, done: bool) -> bool {
+        let (width, height) = (width.max(1.0), height.max(1.0));
+        let (z, _, _) = self.work_plane();
+        if self.modeller.grid_drag.is_none() {
+            if !self.drag_selects() {
+                return false;
+            }
+            let Some(under) = self.grid_under(from.0, from.1, width, height, None) else { return false };
+            let indices = self.picked_modelled_grids();
+            if !self.grids_picked().contains(&under) || indices.is_empty() {
+                return false;
+            }
+            let Some(origin) = self.plane_point(from.0, from.1, width, height, z) else { return false };
+            let held = self.model.as_ref().and_then(|m| m.project.grids.get(under)).and_then(|line| self.modelled_grid_lines().iter().position(|g| g == line)).unwrap_or(indices[0]);
+            self.modeller.grid_drag = Some(GridDrag { held, indices, before: self.modeller.model.grids().to_vec(), origin: origin.truncate() });
+        }
+        let Some(drag) = self.modeller.grid_drag.clone() else { return false };
+        if let Some(at) = self.plane_point(to.0, to.1, width, height, z) {
+            let by = ((at.truncate() - drag.origin) / DRAG_ROUND).round() * DRAG_ROUND;
+            // near the axis or a side of a wall that runs its way (or the edge of a floor), the
+            // line held lands on it
+            let by = by + drag.before.get(drag.held).map_or(DVec2::ZERO, |line| self.onto_parallel(line, by, width, height, z));
+            for &index in &drag.indices {
+                let Some(line) = drag.before.get(index).cloned() else { continue };
+                let _ = self.modeller.model.set_grid(index, bim_core::GridDef { start: line.start + by, end: line.end + by, ..line });
+            }
+            self.show_modelled();
+            self.pick_modelled_grids(&drag.indices);
+        }
+        if done {
+            self.modeller.grid_drag = None;
+            self.modeller.touched = true;
+        }
+        true
+    }
+
+    /// How much further grid line `line`, moved by `by`, goes to lie on the nearest line of an
+    /// element that runs its way: the axis or a side of a wall or a curtain wall, the edge of a
+    /// floor. Nothing when none is within the snap's reach on the screen.
+    fn onto_parallel(&self, line: &bim_core::GridDef, by: DVec2, width: f32, height: f32, z: f64) -> DVec2 {
+        let Some(along) = (line.end - line.start).try_normalize() else { return DVec2::ZERO };
+        let across = along.perp();
+        let at = (line.start + line.end) / 2.0 + by;
+        let mut best: Option<(f64, f32)> = None;
+        for (a, b, _) in self.outline_lines(bim_core::ElementId(0)) {
+            let Some(way) = (b - a).try_normalize() else { continue };
+            if way.perp_dot(along).abs() > 1e-6 {
+                continue;
+            }
+            // how far across the grid line's way that line lies from it, and that on the screen
+            let off = (a - at).dot(across);
+            let (Some(p), Some(q)) = (self.on_screen(at.extend(z), width, height), self.on_screen((at + across * off).extend(z), width, height)) else { continue };
+            let pixels = (p.0 - q.0).hypot(p.1 - q.1);
+            if pixels <= super::SNAP_PIXELS && best.is_none_or(|(_, least)| pixels < least) {
+                best = Some((off, pixels));
+            }
+        }
+        best.map_or(DVec2::ZERO, |(off, _)| across * off)
+    }
+
+    /// The middle of what the turn under way takes: of its grid lines, else of its elements'
+    /// places. The centre a typed angle turns about when none was clicked.
+    fn turn_centre(&self, t: &crate::app::transform::Transform) -> Option<DVec2> {
+        let mut points: Vec<DVec2> = t.grids.iter().filter_map(|&i| self.modeller.model.grids().get(i)).flat_map(|g| [g.start, g.end]).collect();
+        if points.is_empty() {
+            let grid = self.modeller.model.grid;
+            points = t.elements.iter().filter_map(|&id| self.modeller.model.get(id)?.shape_in_project(&grid).placement()).map(|p| p.truncate()).collect();
+        }
+        (!points.is_empty()).then(|| points.iter().copied().sum::<DVec2>() / points.len() as f64)
+    }
+
+    /// Enter in the angle field of Rotate: what the turn takes turns by the angle typed (degrees,
+    /// anticlockwise; a comma or a point) about the centre clicked, else about its own middle.
+    /// An angle that is no number leaves everything as it is.
+    pub(in crate::app) fn turn_by_typed(&mut self) {
+        use crate::app::transform::{Map, TransformKind};
+        let Some(t) = self.modeller.transform.clone().filter(|t| t.kind == TransformKind::Rotate) else { return };
+        let Ok(degrees) = self.modeller.turn_typed.trim().trim_end_matches('°').replace(',', ".").parse::<f64>() else { return };
+        let Some(about) = t.points.first().map(|p| p.truncate()).or_else(|| self.turn_centre(&t)) else { return };
+        if !degrees.is_finite() {
+            return;
+        }
+        self.modeller.transform = None;
+        self.modeller.turn_typed.clear();
+        self.transform_picked(&t, &Map::Turn { about, angle: degrees.to_radians() });
+    }
+
+    /// The angle field of Rotate, at the top of the view while a turn is under way.
+    pub(in crate::app) fn turn_overlay(&self, p: crate::theme::Palette, l: Language) -> Option<iced::Element<'_, crate::app::Message>> {
+        use crate::app::Message;
+        use iced::widget::{button, column, container, row, text, text_input};
+        use iced::Fill;
+        let t = self.modeller.transform.as_ref().filter(|t| t.kind == crate::app::transform::TransformKind::Rotate)?;
+        let typed = &self.modeller.turn_typed;
+        let valid = typed.trim().trim_end_matches('°').replace(',', ".").parse::<f64>().is_ok_and(f64::is_finite);
+        let field = text_input("90", typed).on_input(Message::TurnTyped).on_submit(Message::TurnApply).size(12).padding([3, 6]).width(90);
+        let turn = button(text(l.text("Draaien", "Turn")).size(12)).padding([3, 10]).style(move |_, s| p.ribbon_button(valid, s)).on_press_maybe(valid.then_some(Message::TurnApply));
+        let about = if t.points.is_empty() { l.text("om het midden van de selectie", "about the middle of the selection") } else { l.text("om het geklikte draaipunt", "about the centre clicked") };
+        let card = container(
+            column![
+                text(l.text("Hoek in graden (tegen de klok in)", "Angle in degrees (anticlockwise)")).size(12).color(p.text_secondary),
+                row![field, turn].spacing(6),
+                text(about).size(11).color(p.text_muted),
+            ]
+            .spacing(6),
+        )
+        .padding(8)
+        .width(CARD)
+        .style(move |_| p.panel());
+        Some(container(card).padding(iced::Padding { top: 56.0, ..iced::Padding::ZERO }).center_x(Fill).into())
     }
 
     /// The plus past the end of the picked grid line, and the series field it opens.
@@ -253,11 +434,27 @@ impl App {
         self.modelled_grid_lines().iter().position(|g| g == picked)
     }
 
-    /// Removes the picked grid line when it is one of the modelled project. False when none was.
+    /// Which modelled grid lines the grid lines picked in the viewport are; those of an opened
+    /// file are left out.
+    pub(crate) fn picked_modelled_grids(&self) -> Vec<usize> {
+        let Some(model) = self.model.as_ref() else { return Vec::new() };
+        let modelled = self.modelled_grid_lines();
+        self.grids_picked().into_iter().filter_map(|g| model.project.grids.get(g)).filter_map(|picked| modelled.iter().position(|g| g == picked)).collect()
+    }
+
+    /// Removes the picked grid lines of the modelled project. False when none was picked.
     pub(in crate::app) fn delete_picked_grid(&mut self) -> bool {
-        let Some(index) = self.picked_modelled_grid() else { return false };
-        self.modeller.model.remove_grid(index);
-        self.pick_grid(None);
+        let mut indices = self.picked_modelled_grids();
+        if indices.is_empty() {
+            return false;
+        }
+        // from the last on, so the others keep their place
+        indices.sort_unstable();
+        indices.dedup();
+        for index in indices.into_iter().rev() {
+            self.modeller.model.remove_grid(index);
+        }
+        self.set_picked_grids(Vec::new());
         self.show_modelled();
         true
     }
@@ -374,9 +571,63 @@ mod tests {
         click(&mut app, 9.0, -1.0);
         assert_eq!(names(&app), ["1", "2"]);
         assert_eq!(app.modeller.model.grids()[1].start, DVec2::new(9.0, -1.0));
-        // a turn has nothing to take: no transform starts
+        // a turn takes it too: by the angle typed, about its own middle
         let _ = app.update(Message::Transform(TransformKind::Rotate));
+        let _ = app.update(Message::TurnTyped("90".into()));
+        let _ = app.update(Message::TurnApply);
+        let turned = &app.modeller.model.grids()[1];
         assert!(app.modeller.transform.is_none());
+        assert!((turned.start - DVec2::new(13.5, 3.5)).length() < 1e-9 && (turned.end - DVec2::new(4.5, 3.5)).length() < 1e-9, "{turned:?}");
+        assert_eq!(app.picked_grid, Some(1), "it stays picked");
+    }
+
+    #[test]
+    fn a_box_picks_several_grid_lines_which_are_dragged_turned_and_deleted_together() {
+        use crate::viewport::Navigate;
+        let mut app = modelling();
+        app.modeller.in_modeller = true;
+        for x in [2.0, 5.0, 8.0] {
+            app.add_grid_line(DVec2::new(x, -1.0), DVec2::new(x, 8.0)).unwrap();
+        }
+        let (w, h) = app.viewport_size;
+        let at = |app: &crate::app::App, x: f64, y: f64| app.on_screen(glam::DVec3::new(x, y, 0.0), w, h).unwrap();
+        // a box drawn to the right over the first two, whole: they are picked, the third is not
+        let (a, b) = (at(&app, 1.0, 9.0), at(&app, 6.0, -2.0));
+        let (x0, x1) = (a.0.min(b.0), a.0.max(b.0));
+        let (y0, y1) = (a.1.min(b.1), a.1.max(b.1));
+        let _ = app.update(Message::Navigate(Navigate::Box { x0, y0, x1, y1, width: w, height: h, done: true, add: false }));
+        assert_eq!(app.picked_modelled_grids(), [0, 1]);
+        // a drag that starts on one of them moves both, as one step
+        let (from, to) = (at(&app, 2.0, 3.0), at(&app, 3.5, 3.0));
+        let _ = app.update(Message::Navigate(Navigate::Box { x0: from.0, y0: from.1, x1: to.0, y1: to.1, width: w, height: h, done: false, add: false }));
+        let _ = app.update(Message::Navigate(Navigate::Box { x0: from.0, y0: from.1, x1: to.0, y1: to.1, width: w, height: h, done: true, add: false }));
+        let xs: Vec<f64> = app.modeller.model.grids().iter().map(|g| g.start.x).collect();
+        assert!((xs[0] - 3.5).abs() < 0.011 && (xs[1] - 6.5).abs() < 0.011 && xs[2] == 8.0, "{xs:?}");
+        assert!(app.box_select.is_none() && app.modeller.grid_drag.is_none());
+        assert_eq!(app.picked_modelled_grids(), [0, 1], "they stay picked");
+        let _ = app.update(Message::Undo);
+        assert_eq!(app.modeller.model.grids()[0].start.x, 2.0, "one step back");
+        let _ = app.update(Message::Redo);
+        // dragged to near the side of a wall that runs its way, the line held lands on that side
+        use bim_core::element::PlanarForm;
+        let form = PlanarForm::Wall { start: DVec2::new(12.0, -1.0), end: DVec2::new(12.0, 8.0), base: 0.0, height: 3.0 };
+        app.add_element("Wall", None, Shape::Planar(bim_core::PlanarDef { form, thickness: 0.3, openings: Vec::new(), build_up: None })).unwrap();
+        app.set_picked_grids(vec![2]);
+        let (from, to) = (at(&app, 8.0, 3.0), at(&app, 11.6, 3.0));
+        for done in [false, true] {
+            let _ = app.update(Message::Navigate(Navigate::Box { x0: from.0, y0: from.1, x1: to.0, y1: to.1, width: w, height: h, done, add: false }));
+        }
+        assert!((app.modeller.model.grids()[2].start.x - 11.85).abs() < 1e-9, "{:?}", app.modeller.model.grids()[2]);
+        // and near its middle, on its axis
+        let (from, to) = (at(&app, 11.85, 3.0), at(&app, 12.04, 3.0));
+        for done in [false, true] {
+            let _ = app.update(Message::Navigate(Navigate::Box { x0: from.0, y0: from.1, x1: to.0, y1: to.1, width: w, height: h, done, add: false }));
+        }
+        assert!((app.modeller.model.grids()[2].start.x - 12.0).abs() < 1e-9, "{:?}", app.modeller.model.grids()[2]);
+        // Delete takes both
+        app.set_picked_grids(vec![0, 1]);
+        let _ = app.update(Message::DeletePicked);
+        assert_eq!(names(&app), ["3"]);
     }
 
     #[test]

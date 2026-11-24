@@ -60,6 +60,88 @@ pub struct PointDef {
     pub size: DVec3,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opening: Option<OpeningKind>,
+    /// What it is: an object, or a terminal or an appliance of the installations.
+    #[serde(default, skip_serializing_if = "PointRole::is_object")]
+    pub role: PointRole,
+}
+
+/// What a point element is. The element is the same in every role (a box standing on a point);
+/// the role says which IFC class it has: an object of the building, or a terminal or an
+/// appliance of its installations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PointRole {
+    /// Anything else: a proxy.
+    #[default]
+    Object,
+    Radiator,
+    Boiler,
+    Pump,
+    Fan,
+    AirHandlingUnit,
+    AirTerminal,
+    Sanitary,
+    Valve,
+    Tank,
+    Outlet,
+    Light,
+}
+
+impl PointRole {
+    /// The roles of the installations: terminals and appliances.
+    pub const APPLIANCES: [PointRole; 11] = [
+        PointRole::Radiator,
+        PointRole::Boiler,
+        PointRole::Pump,
+        PointRole::Fan,
+        PointRole::AirHandlingUnit,
+        PointRole::AirTerminal,
+        PointRole::Sanitary,
+        PointRole::Valve,
+        PointRole::Tank,
+        PointRole::Outlet,
+        PointRole::Light,
+    ];
+
+    pub fn is_object(&self) -> bool {
+        *self == PointRole::Object
+    }
+
+    /// Its IFC class (IFC4.3 names).
+    pub fn class(self) -> &'static str {
+        match self {
+            PointRole::Object => "IfcBuildingElementProxy",
+            PointRole::Radiator => "IfcSpaceHeater",
+            PointRole::Boiler => "IfcBoiler",
+            PointRole::Pump => "IfcPump",
+            PointRole::Fan => "IfcFan",
+            PointRole::AirHandlingUnit => "IfcUnitaryEquipment",
+            PointRole::AirTerminal => "IfcAirTerminal",
+            PointRole::Sanitary => "IfcSanitaryTerminal",
+            PointRole::Valve => "IfcValve",
+            PointRole::Tank => "IfcTank",
+            PointRole::Outlet => "IfcOutlet",
+            PointRole::Light => "IfcLightFixture",
+        }
+    }
+
+    /// The size it usually has (width, depth, height) and how far above its level it stands.
+    pub fn usual(self) -> (DVec3, f64) {
+        match self {
+            PointRole::Object => (DVec3::new(0.6, 0.6, 0.9), 0.0),
+            PointRole::Radiator => (DVec3::new(1.0, 0.1, 0.6), 0.15),
+            PointRole::Boiler => (DVec3::new(0.45, 0.35, 0.7), 1.2),
+            PointRole::Pump => (DVec3::new(0.18, 0.15, 0.18), 1.0),
+            PointRole::Fan => (DVec3::new(0.6, 0.6, 0.3), 0.0),
+            PointRole::AirHandlingUnit => (DVec3::new(2.0, 1.0, 1.2), 0.0),
+            PointRole::AirTerminal => (DVec3::new(0.3, 0.3, 0.1), 2.5),
+            PointRole::Sanitary => (DVec3::new(0.4, 0.7, 0.4), 0.0),
+            PointRole::Valve => (DVec3::new(0.1, 0.1, 0.15), 1.0),
+            PointRole::Tank => (DVec3::new(0.6, 0.6, 1.5), 0.0),
+            PointRole::Outlet => (DVec3::new(0.08, 0.04, 0.08), 0.3),
+            PointRole::Light => (DVec3::new(0.3, 0.3, 0.1), 2.5),
+        }
+    }
 }
 
 /// What a point element that cuts an opening is.
@@ -263,6 +345,198 @@ pub struct Slope {
     pub angle: f64,
 }
 
+/// The planes of a roof over `outline`, as a roof by footprint has them: every edge with an angle
+/// above zero in `angles` (radians, an entry per edge) is an eave a plane rises from at that
+/// angle, and each plane covers the part of the outline where it is the lowest. An edge without
+/// an angle is a gable: the planes beside it run on to it. Gives each plane's outline in plan
+/// (anticlockwise) with its slope, the eave being the edge the slope names. With no angle at all
+/// the roof is flat: the outline itself, without a slope.
+///
+/// An outline that turns inwards (an L, a T, a U) is roofed wing by wing: at every inner corner
+/// it is cut along each of the two edges that meet there, run on to the far side, and each wing
+/// so cut off gets the roof of its own outline, the cut taking the slope of the edge it runs on
+/// from. The wings overlap, and so do their roofs: where two meet, the higher one is the roof
+/// and the lower one ends under it, so the valleys lie where the planes cross.
+pub fn roof_planes(outline: &[DVec2], angles: &[f64]) -> Result<Vec<(Vec<DVec2>, Option<Slope>)>, Refusal> {
+    let n = outline.len();
+    if n < 3 || outline.iter().any(|p| !p.is_finite()) {
+        return Err(Refusal::NotPositive);
+    }
+    let area: f64 = (0..n).map(|k| outline[k].perp_dot(outline[(k + 1) % n])).sum();
+    let ring: Vec<DVec2> = if area >= 0.0 { outline.to_vec() } else { outline.iter().rev().copied().collect() };
+    let angle_of = |i: usize| angles.get(if area >= 0.0 { i } else { (2 * n - 2 - i) % n }).copied().unwrap_or(0.0);
+    let angles: Vec<f64> = (0..n).map(angle_of).collect();
+    if angles.iter().all(|a| *a <= 1e-9) {
+        return roof_of_wing(&ring, &angles);
+    }
+    let mut planes = Vec::new();
+    for (wing, slopes) in roof_wings(ring, angles, 0)? {
+        for plane in roof_of_wing(&wing, &slopes)? {
+            // a plane two wings share is the roof's once
+            let same = |other: &(Vec<DVec2>, Option<Slope>)| other.1 == plane.1 && other.0.len() == plane.0.len() && other.0.iter().zip(&plane.0).all(|(a, b)| a.distance(*b) <= LINEAR_TOLERANCE);
+            if !planes.iter().any(same) {
+                planes.push(plane);
+            }
+        }
+    }
+    Ok(planes)
+}
+
+/// The most wings an outline is roofed in.
+const MOST_WINGS: usize = 64;
+
+/// The wings of an outline (anticlockwise, an angle per edge): itself when it does not turn
+/// inwards; else, at its first inner corner, the two parts cut off along the edges that meet
+/// there, each cut again in the same way.
+fn roof_wings(ring: Vec<DVec2>, angles: Vec<f64>, depth: usize) -> Result<Vec<(Vec<DVec2>, Vec<f64>)>, Refusal> {
+    let tol = LINEAR_TOLERANCE;
+    let n = ring.len();
+    let turn = |i: usize| (ring[i] - ring[(i + n - 1) % n]).perp_dot(ring[(i + 1) % n] - ring[i]);
+    let Some(r) = (0..n).find(|i| turn(*i) < -tol) else { return Ok(vec![(ring, angles)]) };
+    if depth > 16 {
+        return Err(Refusal::NotConvex);
+    }
+    // where the ray from corner r along `way` first meets the outline: the point, and the edge
+    let hit = |way: DVec2| -> Option<(DVec2, usize)> {
+        let mut best: Option<(f64, DVec2, usize)> = None;
+        for m in (0..n).filter(|m| *m != r && (*m + 1) % n != r) {
+            let (a, b) = (ring[m], ring[(m + 1) % n]);
+            let det = way.perp_dot(b - a);
+            if det.abs() < 1e-12 {
+                continue;
+            }
+            let (t, u) = ((a - ring[r]).perp_dot(b - a) / det, (a - ring[r]).perp_dot(way) / det);
+            if t > tol && (-1e-9..=1.0 + 1e-9).contains(&u) && best.is_none_or(|(least, ..)| t < least) {
+                best = Some((t, ring[r] + way * t, m));
+            }
+        }
+        best.map(|(_, q, m)| (q, m))
+    };
+    // corners of a wing that fell together are one, their edge of no length gone
+    let tidy = |points: Vec<DVec2>, slopes: Vec<f64>| -> (Vec<DVec2>, Vec<f64>) {
+        let mut out: (Vec<DVec2>, Vec<f64>) = (Vec::new(), Vec::new());
+        for k in 0..points.len() {
+            if points[k].distance(points[(k + 1) % points.len()]) > tol {
+                out.0.push(points[k]);
+                out.1.push(slopes[k]);
+            }
+        }
+        out
+    };
+    let (before, after) = ((r + n - 1) % n, (r + 1) % n);
+    let mut wings = Vec::new();
+    // along the edge that comes in at the corner, run on: the wing that edge is of
+    let way = (ring[r] - ring[before]).try_normalize().ok_or(Refusal::ZeroLength)?;
+    let (q, m) = hit(way).ok_or(Refusal::NotConvex)?;
+    let (mut points, mut slopes) = (vec![q], vec![angles[m]]);
+    let mut k = (m + 1) % n;
+    while k != r {
+        points.push(ring[k]);
+        slopes.push(angles[k]);
+        k = (k + 1) % n;
+    }
+    points.push(ring[r]);
+    slopes.push(angles[before]);
+    wings.push(tidy(points, slopes));
+    // along the edge that goes out from the corner, run back: the wing that edge is of
+    let way = (ring[r] - ring[after]).try_normalize().ok_or(Refusal::ZeroLength)?;
+    let (q, m) = hit(way).ok_or(Refusal::NotConvex)?;
+    let (mut points, mut slopes) = (Vec::new(), Vec::new());
+    let mut k = r;
+    loop {
+        points.push(ring[k]);
+        slopes.push(angles[k]);
+        if k == m {
+            break;
+        }
+        k = (k + 1) % n;
+    }
+    points.push(q);
+    slopes.push(angles[r]);
+    wings.push(tidy(points, slopes));
+    let mut out = Vec::new();
+    for (points, slopes) in wings {
+        if points.len() < 3 {
+            continue;
+        }
+        out.extend(roof_wings(points, slopes, depth + 1)?);
+        if out.len() > MOST_WINGS {
+            return Err(Refusal::NotConvex);
+        }
+    }
+    Ok(out)
+}
+
+/// The planes of the roof over a wing: an outline that does not turn inwards (see
+/// [`roof_planes`]).
+fn roof_of_wing(outline: &[DVec2], angles: &[f64]) -> Result<Vec<(Vec<DVec2>, Option<Slope>)>, Refusal> {
+    let n = outline.len();
+    if n < 3 || outline.iter().any(|p| !p.is_finite()) {
+        return Err(Refusal::NotPositive);
+    }
+    let area: f64 = (0..n).map(|k| outline[k].perp_dot(outline[(k + 1) % n])).sum();
+    let ring: Vec<DVec2> = if area >= 0.0 { outline.to_vec() } else { outline.iter().rev().copied().collect() };
+    // edge i of the ring, as it was numbered in the outline
+    let angle_of = |i: usize| angles.get(if area >= 0.0 { i } else { (2 * n - 2 - i) % n }).copied().unwrap_or(0.0);
+    if (0..n).any(|i| !(0.0..=STEEPEST).contains(&angle_of(i))) {
+        return Err(Refusal::NotPositive);
+    }
+    let eaves: Vec<usize> = (0..n).filter(|i| angle_of(*i) > 1e-9).collect();
+    if eaves.is_empty() {
+        return Ok(vec![(ring, None)]);
+    }
+    let tol = LINEAR_TOLERANCE;
+    if (0..n).any(|i| (ring[(i + 1) % n] - ring[i]).perp_dot(ring[(i + 2) % n] - ring[(i + 1) % n]) < -tol) {
+        return Err(Refusal::NotConvex);
+    }
+    // how high the plane of eave i is over point p, the eave at 0
+    let rise = |i: usize, p: DVec2| {
+        let (a, b) = (ring[i], ring[(i + 1) % n]);
+        (p - a).dot((b - a).normalize_or_zero().perp()) * angle_of(i).tan()
+    };
+    let mut planes = Vec::new();
+    for &i in &eaves {
+        // the outline, cut to where this plane lies under every other
+        let mut part = ring.clone();
+        for &j in eaves.iter().filter(|j| **j != i) {
+            let over = |p: DVec2| rise(j, p) - rise(i, p);
+            let mut cut: Vec<DVec2> = Vec::with_capacity(part.len() + 2);
+            for k in 0..part.len() {
+                let (a, b) = (part[k], part[(k + 1) % part.len()]);
+                let (da, db) = (over(a), over(b));
+                if da >= -tol {
+                    cut.push(a);
+                }
+                if (da > tol && db < -tol) || (da < -tol && db > tol) {
+                    cut.push(a + (b - a) * (da / (da - db)));
+                }
+            }
+            cut.dedup_by(|a, b| a.distance(*b) <= tol);
+            if cut.len() > 1 && cut[0].distance(cut[cut.len() - 1]) <= tol {
+                cut.pop();
+            }
+            part = cut;
+            if part.len() < 3 {
+                break;
+            }
+        }
+        let size: f64 = (0..part.len()).map(|k| part[k].perp_dot(part[(k + 1) % part.len()])).sum::<f64>() / 2.0;
+        if part.len() < 3 || size <= tol {
+            continue;
+        }
+        // its eave: the edge of the part that lies on the outline's edge i
+        let (a, b) = (ring[i], ring[(i + 1) % n]);
+        let across = (b - a).normalize_or_zero().perp();
+        let on = |p: DVec2| (p - a).dot(across).abs() <= 10.0 * tol;
+        let Some(edge) = (0..part.len()).find(|k| on(part[*k]) && on(part[(*k + 1) % part.len()]) && part[*k].distance(part[(*k + 1) % part.len()]) > tol) else { continue };
+        planes.push((part, Some(Slope { edge, angle: angle_of(i) })));
+    }
+    if planes.is_empty() {
+        return Err(Refusal::Degenerate);
+    }
+    Ok(planes)
+}
+
 /// The steepest a slab rises (radians): 85°.
 pub const STEEPEST: f64 = 1.4835298641951802;
 
@@ -291,6 +565,253 @@ pub enum PlanarForm {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         slope: Option<Slope>,
     },
+    /// A stair from `base` up `height` in `risers` equal steps: a tread on every step but the
+    /// last, which is the floor it reaches. The element's thickness is how thick it is under its
+    /// treads. See [`StairShape`] for where its treads lie.
+    Stair {
+        base: f64,
+        height: f64,
+        risers: usize,
+        shape: StairShape,
+        /// A railing on both sides of its flights: a baluster on every tread and a handrail over
+        /// them (a stair along a line; one in an outline has none).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        railing: bool,
+    },
+}
+
+/// Where the treads of a stair lie in plan.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StairShape {
+    /// Along a line from its foot, `width` wide: a flight on every stretch of `path`, and a
+    /// landing (a tread as wide as the stair is) on every corner of it.
+    Run { path: Vec<DVec2>, width: f64 },
+    /// Within an outline: the outline is cut into treads across the way it climbs, from `foot`
+    /// to `head`. What of the outline lies before the foot or past the head is left out.
+    Outline { outline: Vec<DVec2>, foot: DVec2, head: DVec2 },
+}
+
+impl StairShape {
+    /// Its points in plan, to move or turn it by.
+    pub fn points_mut(&mut self) -> Box<dyn Iterator<Item = &mut DVec2> + '_> {
+        match self {
+            StairShape::Run { path, .. } => Box::new(path.iter_mut()),
+            StairShape::Outline { outline, foot, head } => Box::new(outline.iter_mut().chain([foot, head])),
+        }
+    }
+}
+
+/// How high a stair's handrail is above the treads, and how thick its balusters and its handrail
+/// are (metres).
+pub const RAILING_HEIGHT: f64 = 0.9;
+pub const RAILING_SIZE: f64 = 0.04;
+
+/// The railing of a stair along a line: on both sides of every flight a baluster on the middle of
+/// every tread, and a handrail from each to the next. A landing and a stair in an outline have
+/// none.
+pub fn stair_railing(base: f64, height: f64, risers: usize, shape: &StairShape) -> Result<Vec<Solid>, Refusal> {
+    let StairShape::Run { .. } = shape else { return Ok(Vec::new()) };
+    let rise = height / risers.max(1) as f64;
+    let inset = RAILING_SIZE;
+    let bar = Profile::rectangle(RAILING_SIZE, RAILING_SIZE)?;
+    let mut solids = Vec::new();
+    // the tops of the balusters of the tread before, on its right and its left side
+    let mut before: Option<([DVec3; 2], DVec2)> = None;
+    for (ring, step, landing) in stair_steps(risers, shape)? {
+        // a flight's tread is a rectangle from its near edge to its far one: its right side from
+        // corner 0 to 1, its left from 3 to 2 (see `stair_steps`); a landing has none
+        if landing || ring.len() != 4 {
+            before = None;
+            continue;
+        }
+        let way = (ring[1] - ring[0]).normalize_or_zero();
+        let across = (ring[3] - ring[0]).normalize_or_zero();
+        let top = base + step as f64 * rise;
+        let feet = [(ring[0] + ring[1]) / 2.0 + across * inset, (ring[3] + ring[2]) / 2.0 - across * inset];
+        let tops = feet.map(|f| f.extend(top + RAILING_HEIGHT));
+        for foot in feet {
+            solids.push(Solid::extrude(&bar, &Axes::new(foot.extend(top), DVec3::X, DVec3::Z)?, RAILING_HEIGHT)?);
+        }
+        // the handrail from the tread before, when it is of the same flight
+        if let Some((from, _)) = before.filter(|(_, w)| w.distance(way) <= 1e-9) {
+            for (a, b) in from.into_iter().zip(tops) {
+                solids.push(Solid::extrude(&bar, &Axes::new(a, DVec3::Z, b - a)?, a.distance(b))?);
+            }
+        }
+        before = Some((tops, way));
+    }
+    Ok(solids)
+}
+
+/// The fewest steps a stair has.
+pub const FEWEST_RISERS: usize = 2;
+
+/// The treads of a stair in plan, from its foot up, each a polygon (anticlockwise) with how many
+/// steps above the base its top is. A landing is a tread among them.
+pub fn stair_treads(risers: usize, shape: &StairShape) -> Result<Vec<(Vec<DVec2>, usize)>, Refusal> {
+    Ok(stair_steps(risers, shape)?.into_iter().map(|(ring, step, _)| (ring, step)).collect())
+}
+
+/// The treads of [`stair_treads`], each with whether it is a landing.
+fn stair_steps(risers: usize, shape: &StairShape) -> Result<Vec<(Vec<DVec2>, usize, bool)>, Refusal> {
+    if risers < FEWEST_RISERS || risers > 10_000 {
+        return Err(Refusal::NotPositive);
+    }
+    let treads = risers - 1;
+    let ccw = |mut ring: Vec<DVec2>| {
+        let area: f64 = (0..ring.len()).map(|i| ring[i].perp_dot(ring[(i + 1) % ring.len()])).sum();
+        if area < 0.0 {
+            ring.reverse();
+        }
+        ring
+    };
+    match shape {
+        StairShape::Run { path, width } => {
+            if path.len() < 2 || !positive(*width) || path.iter().any(|p| !p.is_finite()) {
+                return Err(Refusal::NotPositive);
+            }
+            let half = width / 2.0;
+            let flights = path.len() - 1;
+            // each flight between its landings: where it starts, the way it runs and how long it is
+            let mut runs = Vec::with_capacity(flights);
+            for i in 0..flights {
+                let dir = (path[i + 1] - path[i]).try_normalize().ok_or(Refusal::ZeroLength)?;
+                let from = path[i] + if i > 0 { dir * half } else { DVec2::ZERO };
+                let to = path[i + 1] - if i + 1 < flights { dir * half } else { DVec2::ZERO };
+                let length = (to - from).dot(dir);
+                if length <= LINEAR_TOLERANCE {
+                    return Err(Refusal::NotPositive);
+                }
+                runs.push((from, dir, length));
+            }
+            // the treads that are no landing, shared out by the flights' lengths, one each at least
+            let landings = flights - 1;
+            if treads < landings + flights {
+                return Err(Refusal::NotPositive);
+            }
+            let free = treads - landings;
+            let total: f64 = runs.iter().map(|r| r.2).sum();
+            let mut counts: Vec<usize> = runs.iter().map(|r| ((free as f64 * r.2 / total).floor() as usize).max(1)).collect();
+            // what rounding left over goes to the flights with the deepest treads; too many come
+            // off those with the shallowest
+            while counts.iter().sum::<usize>() < free {
+                let k = (0..flights).max_by(|a, b| (runs[*a].2 / counts[*a] as f64).total_cmp(&(runs[*b].2 / counts[*b] as f64))).unwrap_or(0);
+                counts[k] += 1;
+            }
+            while counts.iter().sum::<usize>() > free {
+                let Some(k) = (0..flights).filter(|k| counts[*k] > 1).min_by(|a, b| (runs[*a].2 / counts[*a] as f64).total_cmp(&(runs[*b].2 / counts[*b] as f64))) else { return Err(Refusal::NotPositive) };
+                counts[k] -= 1;
+            }
+            let mut out = Vec::with_capacity(treads);
+            let mut step = 0;
+            for (i, ((from, dir, length), count)) in runs.iter().zip(&counts).enumerate() {
+                let (going, left) = (length / *count as f64, dir.perp() * half);
+                for j in 0..*count {
+                    let (a, b) = (*from + *dir * (j as f64 * going), *from + *dir * ((j + 1) as f64 * going));
+                    step += 1;
+                    out.push((vec![a - left, b - left, b + left, a + left], step, false));
+                }
+                if i + 1 < flights {
+                    // the landing: between the end of this flight and the start of the next, out
+                    // to its outer corner
+                    let (next, way, _) = runs[i + 1];
+                    let (end, corner) = (*from + *dir * *length, path[i + 1]);
+                    let across = way.perp() * half;
+                    let points = [end - left, end + left, next - across, next + across, corner + (*dir - way) * half, corner - (*dir - way) * half];
+                    step += 1;
+                    out.push((hull(&points), step, true));
+                }
+            }
+            Ok(out)
+        }
+        StairShape::Outline { outline, foot, head } => {
+            if outline.len() < 3 || outline.iter().chain([foot, head]).any(|p| !p.is_finite()) {
+                return Err(Refusal::NotPositive);
+            }
+            let dir = (*head - *foot).try_normalize().ok_or(Refusal::ZeroLength)?;
+            let going = (*head - *foot).length() / treads as f64;
+            if going <= LINEAR_TOLERANCE {
+                return Err(Refusal::NotPositive);
+            }
+            let ring = ccw(outline.clone());
+            let mut out = Vec::with_capacity(treads);
+            for j in 0..treads {
+                // what of the outline lies between this tread's two riser lines
+                let (lo, hi) = (j as f64 * going, (j + 1) as f64 * going);
+                let strip = clip(&clip(&ring, *foot, dir, lo, true), *foot, dir, hi, false);
+                let area: f64 = (0..strip.len()).map(|i| strip[i].perp_dot(strip[(i + 1) % strip.len()])).sum::<f64>() / 2.0;
+                if strip.len() >= 3 && area > LINEAR_TOLERANCE * going {
+                    out.push((strip, j + 1, false));
+                }
+            }
+            if out.is_empty() {
+                return Err(Refusal::NotPositive);
+            }
+            Ok(out)
+        }
+    }
+}
+
+/// `ring` cut by the line across `dir` at `at` along it from `origin`: what lies past it
+/// (`keep_past`) or before it.
+fn clip(ring: &[DVec2], origin: DVec2, dir: DVec2, at: f64, keep_past: bool) -> Vec<DVec2> {
+    let side = |p: DVec2| if keep_past { (p - origin).dot(dir) - at } else { at - (p - origin).dot(dir) };
+    let mut out: Vec<DVec2> = Vec::with_capacity(ring.len() + 2);
+    for i in 0..ring.len() {
+        let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
+        let (da, db) = (side(a), side(b));
+        if da >= 0.0 {
+            out.push(a);
+        }
+        if (da > 0.0 && db < 0.0) || (da < 0.0 && db > 0.0) {
+            out.push(a + (b - a) * (da / (da - db)));
+        }
+    }
+    // points that fell together are one
+    out.dedup_by(|a, b| a.distance(*b) <= LINEAR_TOLERANCE);
+    if out.len() > 1 && out[0].distance(out[out.len() - 1]) <= LINEAR_TOLERANCE {
+        out.pop();
+    }
+    out
+}
+
+/// The convex outline round `points`, anticlockwise.
+fn hull(points: &[DVec2]) -> Vec<DVec2> {
+    let mut sorted = points.to_vec();
+    sorted.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+    sorted.dedup_by(|a, b| a.distance(*b) <= LINEAR_TOLERANCE);
+    let mut chain = |points: &mut dyn Iterator<Item = DVec2>| {
+        let mut out: Vec<DVec2> = Vec::new();
+        for p in points {
+            while out.len() >= 2 && (out[out.len() - 1] - out[out.len() - 2]).perp_dot(p - out[out.len() - 1]) <= LINEAR_TOLERANCE * LINEAR_TOLERANCE {
+                out.pop();
+            }
+            out.push(p);
+        }
+        out.pop();
+        out
+    };
+    let mut ring = chain(&mut sorted.iter().copied());
+    ring.extend(chain(&mut sorted.iter().rev().copied()));
+    ring
+}
+
+/// The solids of a stair: a block under every tread, `thickness` thicker than a step is high (so
+/// each stands on the one below it), none reaching under the stair's base.
+pub fn stair_solids(thickness: f64, base: f64, height: f64, risers: usize, shape: &StairShape) -> Result<Vec<Solid>, Refusal> {
+    if !positive(thickness) || !positive(height) || !base.is_finite() {
+        return Err(Refusal::NotPositive);
+    }
+    let rise = height / risers.max(1) as f64;
+    let mut solids = Vec::new();
+    for (ring, step) in stair_treads(risers, shape)? {
+        let top = step as f64 * rise;
+        let foot = (top - rise - thickness).max(0.0);
+        let axes = Axes::new(DVec3::new(0.0, 0.0, base + foot), DVec3::X, DVec3::Z)?;
+        solids.push(Solid::extrude(&Profile::new(ring, Vec::new())?, &axes, top - foot)?);
+    }
+    Ok(solids)
 }
 
 /// What a slab is in the building: it is made the same, and classed and listed by this.
@@ -460,6 +981,62 @@ pub struct SystemDef {
     /// equal ones, or whole ones with what is left at the end, at the start or at both.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub division: Option<Division>,
+    /// A curtain wall's own grid, once its lines were moved, added or taken away, or a bay got a
+    /// panel of its own (see [`OwnGrid`]); none: equal bays about `spacing`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid: Option<OwnGrid>,
+}
+
+/// The grid of a curtain wall that is its own, in place of equal bays: where its lines stand
+/// between its edges, and the bays whose panel is not the glass of the rest. It counts for a
+/// system with members on a stacked grid (a curtain wall); a framed or a bonded system keeps the
+/// grid of its type.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct OwnGrid {
+    /// The vertical lines between its ends: how far along from its start, ascending.
+    #[serde(default)]
+    pub along: Vec<f64>,
+    /// The horizontal lines between its foot and its head: how far up from its base, ascending.
+    #[serde(default)]
+    pub up: Vec<f64>,
+    /// The bays with a panel of their own: the column (from its start) and the row (from its
+    /// foot), and what fills it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub panels: Vec<(usize, usize, BayPanel)>,
+}
+
+/// What fills a bay of a curtain wall in place of its glass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BayPanel {
+    /// Nothing: the bay is open.
+    Open,
+    /// A closed panel, of what the members are made of.
+    Solid,
+    /// A door leaf in the bay.
+    Door,
+}
+
+impl OwnGrid {
+    /// The equal grid of a face `length` by `height` in bays about `spacing`, as lines of its own.
+    pub fn equal(length: f64, height: f64, spacing: DVec2) -> Self {
+        let lines = |extent: f64, pitch: f64| {
+            let n = ((extent / pitch).round().clamp(1.0, 1e6)) as usize;
+            (1..n).map(|k| extent * k as f64 / n as f64).collect::<Vec<_>>()
+        };
+        Self { along: lines(length, spacing.x), up: lines(height, spacing.y), panels: Vec::new() }
+    }
+
+    /// What fills bay (`column`, `row`), when it is not glass.
+    pub fn panel(&self, column: usize, row: usize) -> Option<BayPanel> {
+        self.panels.iter().find(|(c, r, _)| (*c, *r) == (column, row)).map(|(_, _, p)| *p)
+    }
+
+    /// Its lines with the edges, along and up: from 0 to `length` and to `height`.
+    pub fn stops(&self, length: f64, height: f64) -> (Vec<f64>, Vec<f64>) {
+        let with = |lines: &[f64], extent: f64| std::iter::once(0.0).chain(lines.iter().copied()).chain(std::iter::once(extent)).collect::<Vec<_>>();
+        (with(&self.along, length), with(&self.up, height))
+    }
 }
 
 pub use bim_library::system::Division;
@@ -638,7 +1215,7 @@ impl Element {
         match &self.shape {
             Shape::Point(PointDef { opening: Some(OpeningKind::Door), .. }) => "IfcDoor",
             Shape::Point(PointDef { opening: Some(OpeningKind::Window), .. }) => "IfcWindow",
-            Shape::Point(_) => "IfcBuildingElementProxy",
+            Shape::Point(p) => p.role.class(),
             Shape::Linear(_) if self.pile_number.is_some() => "IfcPile",
             Shape::Linear(_) if self.reinforcing_bar => "IfcReinforcingBar",
             Shape::Linear(l) => l.role.segment_class().unwrap_or_else(|| linear_class(l.end - l.start)),
@@ -646,6 +1223,7 @@ impl Element {
             Shape::Planar(PlanarDef { form: PlanarForm::Slab { role: SlabRole::Roof, .. }, .. }) => "IfcRoof",
             Shape::Planar(PlanarDef { form: PlanarForm::Slab { role: SlabRole::Ceiling, .. }, .. }) => "IfcCovering",
             Shape::Planar(PlanarDef { form: PlanarForm::Slab { .. }, .. }) => "IfcSlab",
+            Shape::Planar(PlanarDef { form: PlanarForm::Stair { .. }, .. }) => "IfcStair",
             Shape::System(_) => "IfcCurtainWall",
             // a join with parts of its own is an assembly of them; one without is a relation only
             Shape::Connection(ConnectionDef { kind: ConnectionKind::EndPlate(_) | ConnectionKind::FinPlate(_) | ConnectionKind::Splice(_) | ConnectionKind::BasePlate(_), .. }) => "IfcElementAssembly",
@@ -694,6 +1272,10 @@ impl Shape {
             Shape::Linear(l) => Some(l.start),
             Shape::Planar(PlanarDef { form: PlanarForm::Wall { start, base, .. }, .. }) => Some(start.extend(*base)),
             Shape::Planar(PlanarDef { form: PlanarForm::Slab { outline, top, .. }, .. }) => outline.first().map(|p| p.extend(*top)),
+            Shape::Planar(PlanarDef { form: PlanarForm::Stair { base, shape, .. }, .. }) => match shape {
+                StairShape::Run { path, .. } => path.first().map(|p| p.extend(*base)),
+                StairShape::Outline { foot, .. } => Some(foot.extend(*base)),
+            },
             Shape::System(s) => Some(s.start.extend(s.base)),
             Shape::Connection(_) => None,
         }
@@ -716,6 +1298,10 @@ impl Shape {
             Shape::Planar(PlanarDef { form: PlanarForm::Slab { outline, holes, top, .. }, .. }) => {
                 outline.iter_mut().chain(holes.iter_mut().flatten()).for_each(|p| *p += flat);
                 *top += delta.z;
+            }
+            Shape::Planar(PlanarDef { form: PlanarForm::Stair { base, shape, .. }, .. }) => {
+                shape.points_mut().for_each(|p| *p += flat);
+                *base += delta.z;
             }
             Shape::System(s) => {
                 s.start += flat;
@@ -806,7 +1392,7 @@ pub fn opening_solids(p: &PointDef) -> Result<Vec<(Solid, bool)>, Refusal> {
     let (sin, cos) = p.rotation.sin_cos();
     let along = DVec3::new(cos, sin, 0.0);
     // a block: its middle along the width, its foot above the sill, and its sizes
-    let block = |x: f64, z: f64, size: DVec3| point_solid(&PointDef { at: p.at + along * x + DVec3::Z * z, rotation: p.rotation, size, opening: None });
+    let block = |x: f64, z: f64, size: DVec3| point_solid(&PointDef { at: p.at + along * x + DVec3::Z * z, rotation: p.rotation, size, opening: None, role: Default::default() });
     let side = w / 2.0 - f / 2.0;
     let mut solids = Vec::new();
     match kind {
@@ -836,6 +1422,13 @@ pub fn planar_solids(p: &PlanarDef) -> Result<Vec<Solid>, Refusal> {
     if !positive(thickness) {
         return Err(Refusal::NotPositive);
     }
+    if let PlanarForm::Stair { base, height, risers, shape, railing } = &p.form {
+        let mut solids = stair_solids(thickness, *base, *height, *risers, shape)?;
+        if *railing {
+            solids.extend(stair_railing(*base, *height, *risers, shape)?);
+        }
+        return Ok(solids);
+    }
     if let Some(b) = &p.build_up {
         b.check()?;
     }
@@ -852,6 +1445,10 @@ pub fn planar_parts(p: &PlanarDef) -> Result<Vec<(Option<String>, Solid)>, Refus
 /// The solids of a planar element as [`planar_parts`] makes them, a wall reaching `extend` metres
 /// past its start and its end (to be cut back to its corners, see `joins`); a slab as it is.
 pub fn planar_parts_extended(p: &PlanarDef, extend: [f64; 2]) -> Result<Vec<(Option<String>, Solid)>, Refusal> {
+    // a stair is its treads, of one material
+    if let PlanarForm::Stair { .. } = &p.form {
+        return Ok(planar_solids(p)?.into_iter().map(|solid| (None, solid)).collect());
+    }
     let Some(b) = &p.build_up else {
         let thickness = p.total_thickness();
         if !positive(thickness) {
@@ -938,6 +1535,8 @@ fn planar_base(p: &PlanarDef, thickness: f64, extend: [f64; 2]) -> Result<(Vec<P
             let profile = Profile::new(ring.iter().map(on).collect(), holes.iter().map(|h| h.iter().map(on).collect()).collect())?;
             Ok((vec![profile], axes))
         }
+        // a stair is no one profile extruded (see `stair_solids`)
+        PlanarForm::Stair { .. } => Err(Refusal::Degenerate),
     }
 }
 
@@ -1325,7 +1924,7 @@ mod tests {
 
     #[test]
     fn a_system_fills_its_domain_with_members_and_panels() {
-        let s = SystemDef { start: DVec2::ZERO, end: DVec2::new(3.0, 0.0), base: 0.0, height: 3.0, spacing: DVec2::new(1.5, 1.5), member: DVec2::new(0.05, 0.15), panel: 0.03, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), division: None };
+        let s = SystemDef { start: DVec2::ZERO, end: DVec2::new(3.0, 0.0), base: 0.0, height: 3.0, spacing: DVec2::new(1.5, 1.5), member: DVec2::new(0.05, 0.15), panel: 0.03, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), grid: None, division: None };
         let parts = system_parts(&s).unwrap();
         let members = parts.iter().filter(|p| p.class == "IfcMember").count();
         let panels = parts.iter().filter(|p| p.class == "IfcPlate").count();
@@ -1340,7 +1939,7 @@ mod tests {
     #[test]
     fn an_element_lives_in_the_tile_of_its_placement() {
         let grid = TileGrid::default();
-        let shape = Shape::Point(PointDef { at: DVec3::new(1500.25, -20.5, 1.0), rotation: 0.0, size: DVec3::ONE, opening: None });
+        let shape = Shape::Point(PointDef { at: DVec3::new(1500.25, -20.5, 1.0), rotation: 0.0, size: DVec3::ONE, opening: None, role: Default::default() });
         let mut e = Element::in_project(&grid, "Box", None, shape.clone());
         assert_eq!(e.tile, TileKey { x: 1, y: -1 });
         assert_eq!(e.shape_in_project(&grid), shape);
@@ -1396,5 +1995,121 @@ mod tests {
         let json = serde_json::to_string(&e).unwrap();
         assert_eq!(serde_json::from_str::<Element>(&json).unwrap(), e, "{json}");
         assert_eq!(e.reshaped(&grid, beam(5.0)).grade.as_deref(), Some("S355"));
+    }
+
+    #[test]
+    fn a_stair_drawn_as_a_line_has_a_tread_on_every_step_but_the_last() {
+        let stair = |path: Vec<DVec2>, risers: usize| PlanarDef { form: PlanarForm::Stair { base: 0.0, height: 3.0, risers, shape: StairShape::Run { path, width: 1.0 }, railing: false }, thickness: 0.15, openings: Vec::new(), build_up: None };
+        // 16 steps of 187.5 mm over 3.75 m: 15 treads of 250 mm
+        let straight = stair(vec![DVec2::ZERO, DVec2::new(3.75, 0.0)], 16);
+        let solids = planar_solids(&straight).unwrap();
+        assert_eq!(solids.len(), 15);
+        let (lo, hi) = solids[0].bounds();
+        assert!((lo - DVec3::new(0.0, -0.5, 0.0)).length() < 1e-9 && (hi - DVec3::new(0.25, 0.5, 0.1875)).length() < 1e-9, "{lo} {hi}");
+        let (lo, hi) = solids[14].bounds();
+        // the top tread is one step under the floor it reaches, and 0.15 thick under the step before it
+        assert!((hi.z - (3.0 - 0.1875)).abs() < 1e-9 && (hi.x - 3.75).abs() < 1e-9 && (lo.z - (3.0 - 2.0 * 0.1875 - 0.15)).abs() < 1e-9, "{lo} {hi}");
+        assert!(solids.iter().all(|s| s.check().is_ok()));
+        // a quarter turn: a landing 1 by 1 on the corner, a tread among the others
+        let turned = stair(vec![DVec2::ZERO, DVec2::new(3.0, 0.0), DVec2::new(3.0, 3.0)], 16);
+        let PlanarForm::Stair { risers, shape, .. } = &turned.form else { panic!() };
+        let treads = stair_treads(*risers, shape).unwrap();
+        assert_eq!(treads.len(), 15);
+        assert_eq!(treads.iter().map(|t| t.1).collect::<Vec<_>>(), (1..=15).collect::<Vec<_>>());
+        let area = |ring: &[DVec2]| (0..ring.len()).map(|i| ring[i].perp_dot(ring[(i + 1) % ring.len()])).sum::<f64>() / 2.0;
+        let landing = treads.iter().find(|t| (area(&t.0) - 1.0).abs() < 1e-9).expect("a landing of 1 by 1");
+        assert!(landing.0.iter().all(|p| (2.5 - 1e-9..=3.5 + 1e-9).contains(&p.x) && (-0.5 - 1e-9..=0.5 + 1e-9).contains(&p.y)), "{:?}", landing.0);
+        assert_eq!(planar_solids(&turned).unwrap().len(), 15);
+        // too few steps for its flights and landing, or none at all, is refused
+        assert_eq!(planar_solids(&stair(vec![DVec2::ZERO, DVec2::new(3.0, 0.0), DVec2::new(3.0, 3.0)], 3)).err(), Some(Refusal::NotPositive));
+        assert_eq!(planar_solids(&stair(vec![DVec2::ZERO, DVec2::new(3.0, 0.0)], 1)).err(), Some(Refusal::NotPositive));
+        // with a railing: on each side a baluster on every tread and a handrail between them, but
+        // none over the landing
+        let railed = |p: &PlanarDef| {
+            let mut p = p.clone();
+            if let PlanarForm::Stair { railing, .. } = &mut p.form {
+                *railing = true;
+            }
+            planar_solids(&p).unwrap()
+        };
+        let with = railed(&straight);
+        assert_eq!(with.len(), 15 + 2 * 15 + 2 * 14);
+        assert!(with.iter().all(|s| s.check().is_ok()));
+        let (_, hi) = with.iter().map(|s| s.bounds()).fold((DVec3::MAX, DVec3::MIN), |(lo, hi), b| (lo.min(b.0), hi.max(b.1)));
+        assert!((hi.z - (3.0 - 0.1875 + RAILING_HEIGHT)).abs() < 0.05, "{hi}");
+        assert_eq!(railed(&turned).len(), 15 + 2 * 14 + 2 * 12);
+        // it is an IfcStair, moves with its points and is kept in the file
+        let e = Element::in_project(&TileGrid::default(), "Stair", None, Shape::Planar(turned.clone()));
+        assert_eq!(e.class(), "IfcStair");
+        assert_eq!(serde_json::from_str::<PlanarDef>(&serde_json::to_string(&turned).unwrap()).unwrap(), turned);
+    }
+
+    #[test]
+    fn a_stair_in_an_outline_is_the_outline_cut_into_treads_across_its_way() {
+        // a tapering footprint: 2 wide at its foot, 1 wide at its head, 3 long; 11 steps: 10 treads of 0.3
+        let outline = vec![DVec2::new(0.0, -1.0), DVec2::new(3.0, -0.5), DVec2::new(3.0, 0.5), DVec2::new(0.0, 1.0)];
+        let shape = StairShape::Outline { outline, foot: DVec2::ZERO, head: DVec2::new(3.0, 0.0) };
+        let treads = stair_treads(11, &shape).unwrap();
+        assert_eq!(treads.len(), 10);
+        let area = |ring: &[DVec2]| (0..ring.len()).map(|i| ring[i].perp_dot(ring[(i + 1) % ring.len()])).sum::<f64>() / 2.0;
+        // together they are the footprint (4.5 m2), each narrower than the one before
+        assert!((treads.iter().map(|t| area(&t.0)).sum::<f64>() - 4.5).abs() < 1e-9);
+        assert!(treads.windows(2).all(|t| area(&t[1].0) < area(&t[0].0)));
+        let p = PlanarDef { form: PlanarForm::Stair { base: 1.0, height: 2.2, risers: 11, shape, railing: true }, thickness: 0.1, openings: Vec::new(), build_up: None };
+        let solids = planar_solids(&p).unwrap();
+        assert!(solids.iter().all(|s| s.check().is_ok()));
+        let (lo, hi) = solids[9].bounds();
+        assert!((hi.z - (1.0 + 2.0)).abs() < 1e-9 && (lo.x - 2.7).abs() < 1e-9, "{lo} {hi}");
+    }
+
+    #[test]
+    fn a_roof_by_footprint_has_a_plane_from_every_eave() {
+        let p = DVec2::new;
+        let area = |ring: &[DVec2]| (0..ring.len()).map(|i| ring[i].perp_dot(ring[(i + 1) % ring.len()])).sum::<f64>() / 2.0;
+        let rect = [p(0.0, 0.0), p(10.0, 0.0), p(10.0, 6.0), p(0.0, 6.0)];
+        let deg = |d: f64| d.to_radians();
+        // every edge an eave at 40 degrees: a hip roof, two trapezia and two triangles
+        let hip = roof_planes(&rect, &[deg(40.0); 4]).unwrap();
+        let mut sizes: Vec<f64> = hip.iter().map(|(ring, _)| area(ring)).collect();
+        sizes.sort_by(f64::total_cmp);
+        assert_eq!(hip.len(), 4);
+        assert!((sizes[0] - 9.0).abs() < 1e-9 && (sizes[1] - 9.0).abs() < 1e-9 && (sizes[2] - 21.0).abs() < 1e-9 && (sizes[3] - 21.0).abs() < 1e-9, "{sizes:?}");
+        // each plane's eave is the edge of the outline it rises from, and it makes a slab that holds
+        for (ring, slope) in &hip {
+            let slope = slope.unwrap();
+            let (a, b) = (ring[slope.edge], ring[(slope.edge + 1) % ring.len()]);
+            assert!(rect.iter().zip(rect.iter().cycle().skip(1)).any(|(c, d)| (a.distance(*c) < 1e-9 && b.distance(*d) < 1e-9)), "{ring:?} {slope:?}");
+            let slab = PlanarDef { form: PlanarForm::Slab { outline: ring.clone(), holes: Vec::new(), top: 3.0, bulges: Vec::new(), role: SlabRole::Roof, slope: Some(slope) }, thickness: 0.2, openings: Vec::new(), build_up: None };
+            assert!(planar_solids(&slab).unwrap().iter().all(|s| s.check().is_ok()));
+        }
+        // the short sides without an angle: gables, and two planes that meet on the ridge
+        let gable = roof_planes(&rect, &[deg(40.0), 0.0, deg(40.0), 0.0]).unwrap();
+        assert_eq!(gable.len(), 2);
+        assert!(gable.iter().all(|(ring, _)| (area(ring) - 30.0).abs() < 1e-9));
+        // one eave: a single pitch over the whole outline; none: flat
+        let mono = roof_planes(&rect, &[deg(15.0), 0.0, 0.0, 0.0]).unwrap();
+        assert_eq!((mono.len(), mono[0].1), (1, Some(Slope { edge: 0, angle: deg(15.0) })));
+        assert_eq!(roof_planes(&rect, &[]).unwrap(), vec![(rect.to_vec(), None)]);
+        // two different angles: the ridge lies nearer the steeper eave
+        let uneven = roof_planes(&rect, &[deg(30.0), 0.0, deg(60.0), 0.0]).unwrap();
+        assert!(area(&uneven[0].0) > area(&uneven[1].0) * 2.9, "{uneven:?}");
+        // an L is roofed in its two wings, 10 by 4 and 4 by 10: a hip roof each, and flat it is one
+        let ell = [p(0.0, 0.0), p(10.0, 0.0), p(10.0, 4.0), p(4.0, 4.0), p(4.0, 10.0), p(0.0, 10.0)];
+        let wings = roof_planes(&ell, &[deg(40.0); 6]).unwrap();
+        assert_eq!(wings.len(), 8);
+        let mut sizes: Vec<f64> = wings.iter().map(|(ring, _)| (area(ring) * 1e6).round() / 1e6).collect();
+        sizes.sort_by(f64::total_cmp);
+        assert_eq!(sizes, [4.0, 4.0, 4.0, 4.0, 16.0, 16.0, 16.0, 16.0]);
+        assert_eq!(roof_planes(&ell, &[]).unwrap().len(), 1);
+        // every plane of every wing is a slab the kernel makes
+        for (ring, slope) in &wings {
+            let slab = PlanarDef { form: PlanarForm::Slab { outline: ring.clone(), holes: Vec::new(), top: 3.0, bulges: Vec::new(), role: SlabRole::Roof, slope: *slope }, thickness: 0.2, openings: Vec::new(), build_up: None };
+            assert!(planar_solids(&slab).is_ok(), "{ring:?} {slope:?}");
+        }
+        // a U has four inner cuts and three wings' worth of planes, none lost
+        let you = [p(0.0, 0.0), p(12.0, 0.0), p(12.0, 10.0), p(8.0, 10.0), p(8.0, 4.0), p(4.0, 4.0), p(4.0, 10.0), p(0.0, 10.0)];
+        let wings = roof_planes(&you, &[deg(30.0); 8]).unwrap();
+        let covered = |q: DVec2| wings.iter().any(|(ring, _)| (0..ring.len()).all(|k| (ring[(k + 1) % ring.len()] - ring[k]).perp_dot(q - ring[k]) >= -1e-9));
+        assert!([p(1.0, 9.0), p(11.0, 9.0), p(6.0, 1.0), p(2.0, 2.0), p(10.0, 5.0)].into_iter().all(covered));
     }
 }

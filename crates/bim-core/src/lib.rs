@@ -31,7 +31,7 @@ pub mod tile;
 
 pub use boolean::{boolean, BooleanOp};
 pub use datum::GridDef;
-pub use element::{Division, Service, LinearRole, Fixity, BaseKind, OpeningKind, SlabRole, Slope, Top, BuildUpDef, ConnectionDef, ConnectionKind, Element, ElementId, LayerDef, LinearDef, Opening, OpeningFraming, PlanarDef, PointDef, Shape, SystemDef};
+pub use element::{Fixity, BaseKind, BayPanel, LinearRole, OwnGrid, PointRole, Service, StairShape, OpeningKind, SlabRole, Slope, Top, BuildUpDef, ConnectionDef, ConnectionKind, Element, ElementId, LayerDef, LinearDef, Opening, OpeningFraming, PlanarDef, PointDef, Shape, SystemDef, Division};
 pub use mesh::Mesh;
 pub use model::{Model, Part};
 pub use profile::{Profile, ProfileDef};
@@ -109,6 +109,8 @@ pub enum Refusal {
     SystemJoin,
     /// A service run is shorter than its fitting.
     TooShortForFitting,
+    /// A sloped roof over an outline that turns inwards.
+    NotConvex,
 }
 
 impl Refusal {
@@ -147,6 +149,7 @@ impl Refusal {
             Refusal::NoUnitJoint => "The frame cannot be split into prefab units clear of its openings.",
             Refusal::SystemJoin => "Two framed systems are joined butt or kept apart.",
             Refusal::TooShortForFitting => "A run is too short for the fitting at its end.",
+            Refusal::NotConvex => "A sloped roof needs an outline without inward corners: draw each wing as a roof of its own.",
         }
     }
 }

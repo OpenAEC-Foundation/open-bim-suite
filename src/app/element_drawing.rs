@@ -245,6 +245,7 @@ pub(super) fn net_drawing(e: &Element, shape: &Shape, frame: &Frame, scale: f64,
     let lift = match &p.form {
         PlanarForm::Wall { base, .. } => DVec2::new(0.0, *base),
         PlanarForm::Slab { .. } => DVec2::ZERO,
+        PlanarForm::Stair { .. } => return None,
     };
     let mm = |v: f64| (v * 1000.0).round() as i64;
     let rows = bim_core::reinforcement::net_groups(&bars);
@@ -498,7 +499,7 @@ mod tests {
         });
         let f = frame(&slab).unwrap();
         assert!(f.side.is_none() && (f.volume - 2.88).abs() < 1e-9, "{f:?}");
-        let object = Shape::Point(bim_core::PointDef { at: DVec3::ZERO, rotation: 0.0, size: DVec3::ONE, opening: None });
+        let object = Shape::Point(bim_core::PointDef { at: DVec3::ZERO, rotation: 0.0, size: DVec3::ONE, opening: None, role: Default::default() });
         assert!(frame(&object).is_none());
     }
 

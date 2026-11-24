@@ -476,6 +476,24 @@ impl App {
                 Ok(json!({ "clicks": points.len(), "messages": sent }))
             }
             "drag_handle" => self.remote_drag_handle(a),
+            "drag" => {
+                let point = |key: &str| -> Result<(f32, f32), String> {
+                    let p = a.get(key).and_then(|v| v.as_array()).filter(|p| p.len() == 2).ok_or_else(|| format!("{key} is required: [x, y]"))?;
+                    Ok((p[0].as_f64().ok_or("a number")? as f32, p[1].as_f64().ok_or("a number")? as f32))
+                };
+                let ((x0, y0), (x1, y1)) = (point("from")?, point("to")?);
+                if !self.drag_selects() {
+                    return Err("a drag selects only in the Modeller with the Select tool on: switch the tool that is on off first".into());
+                }
+                let add = a.get("add").and_then(|v| v.as_bool()).unwrap_or(false);
+                let (width, height) = self.viewport_size;
+                let grids_before = self.modeller.model.grids().to_vec();
+                for done in [false, true] {
+                    let _ = self.update(Message::Navigate(crate::viewport::Navigate::Box { x0, y0, x1, y1, width, height, done, add }));
+                }
+                let moved = self.modeller.model.grids() != grids_before.as_slice();
+                Ok(json!({ "moved_grid_lines": moved, "selected_elements": self.sel.items().len(), "picked_grid_lines": self.grids_picked() }))
+            }
             "open_drawing" => {
                 // the project's own drawings: its floor plans, sections and elevations, and sheets
                 let plans = self.document.plans().iter().map(|p| ("plan", p.name.clone(), p.path.clone()));
@@ -518,6 +536,20 @@ impl App {
                 let found = types.iter().find(is).or_else(|| types.iter().find(holds)).ok_or_else(|| format!("no type '{wanted}'; call tool_type without a type to list them"))?.clone();
                 self.pick_tool_type(found.0.clone());
                 Ok(json!({ "picked": found.0, "name": found.1 }))
+            }
+            "tool_option" => {
+                let language = a.get("language").and_then(|v| v.as_str()).and_then(openaec_ui::Language::from_code).unwrap_or(openaec_ui::Language::English);
+                let lists = self.tool_options(language);
+                if lists.is_empty() {
+                    return Err("the tool that is on has no such list: press a tool of the MEP tab first (Duct, Pipe, Cable tray, Appliance)".into());
+                }
+                if let (Some(list), Some(value)) = (a.get("list").and_then(|v| v.as_str()), a.get("value").and_then(|v| v.as_str())) {
+                    if !self.pick_tool_option(list, value, language) {
+                        return Err(format!("no '{value}' in list '{list}'; call tool_option without a value to see the lists"));
+                    }
+                }
+                let lists: Vec<_> = self.tool_options(language).into_iter().map(|(name, options, picked)| json!({ "list": name, "picked": picked, "options": options.iter().map(|(en, own)| json!({ "name": en, "shown": own })).collect::<Vec<_>>() })).collect();
+                Ok(json!({ "lists": lists }))
             }
             #[cfg(not(target_arch = "wasm32"))]
             "element_drawings" => {

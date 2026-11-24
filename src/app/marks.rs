@@ -21,6 +21,8 @@ use std::sync::Arc;
 const SNAP: f32 = 8.0;
 /// How close a click must come to a dimension line or a text to pick it (logical pixels).
 const PICK: f32 = 5.0;
+/// The colour of the mark of an object snap.
+const OSNAP: Color = Color { r: 0.1, g: 0.72, b: 0.3, a: 1.0 };
 /// How far a dimension line stands off what it measures, on paper (metres): a view's tab draws
 /// its marks at its scale, so they keep their size on the drawing as the view zooms.
 pub(super) const OFFSET: f64 = 0.006;
@@ -342,6 +344,8 @@ impl App {
             sections: crate::drawing2d::plan_sections(&self.document, view),
             word: l.text("Doorsnede", "Section"),
             pick: self.mark_pick,
+            more: self.lines_picked(),
+            square: self.modeller.snaps.square,
             palette: p,
             on_paper: self.drawing_on_paper,
             // on paper the view draws its grid lines and levels itself; over the model the
@@ -469,6 +473,77 @@ impl App {
         Some(container(rows).padding([2, 8]).into())
     }
 
+    /// The lines drawn on the view shown that are picked, each shape by its first line: the one
+    /// picked by a click, and those a selection box took with it.
+    pub(crate) fn lines_picked(&self) -> Vec<usize> {
+        let (Some(view), Some(MarkPick::Line(first))) = (self.shown_view(), self.mark_pick) else { return Vec::new() };
+        let own = self.document.view_lines(view).len();
+        let mut picked: Vec<usize> = Vec::new();
+        for k in std::iter::once(first).chain(self.more_marks.iter().copied()).filter(|k| *k < own) {
+            let start = self.document.shape_of(view, k).0.start;
+            if !picked.contains(&start) {
+                picked.push(start);
+            }
+        }
+        picked
+    }
+
+    /// Picks lines `lines` drawn on the view shown (none: lets a picked line go).
+    pub(crate) fn set_lines_picked(&mut self, lines: Vec<usize>) {
+        if lines.is_empty() {
+            if matches!(self.mark_pick, Some(MarkPick::Line(_))) {
+                self.mark_pick = None;
+            }
+            self.more_marks.clear();
+            return;
+        }
+        self.mark_pick = Some(MarkPick::Line(lines[0]));
+        self.more_marks = lines[1..].to_vec();
+    }
+
+    /// The lines and shapes drawn on the view shown that a selection box takes, each by its first
+    /// line: drawn to the right those that lie in it whole, to the left those it touches too.
+    pub(crate) fn lines_in_box(&self, rect: (glam::Vec2, glam::Vec2), width: f32, height: f32) -> Vec<usize> {
+        let Some(marks) = self.marks_layer(self.theme.palette(), crate::app::standalone_language()) else { return Vec::new() };
+        let screen = marks.screen(Rectangle::new(Point::ORIGIN, Size::new(width.max(1.0), height.max(1.0))));
+        let (lo, hi) = (rect.0.min(rect.1), rect.0.max(rect.1));
+        let touching = rect.1.x < rect.0.x;
+        let inside = |p: Point| p.x >= lo.x && p.x <= hi.x && p.y >= lo.y && p.y <= hi.y;
+        let corners = [Point::new(lo.x, lo.y), Point::new(hi.x, lo.y), Point::new(hi.x, hi.y), Point::new(lo.x, hi.y)];
+        let crosses = |a: Point, b: Point, c: Point, d: Point| {
+            let side = |p: Point, q: Point, r: Point| (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+            side(a, b, c) * side(a, b, d) <= 0.0 && side(c, d, a) * side(c, d, b) <= 0.0
+        };
+        let own = marks.own_lines.min(marks.lines.len());
+        let mut taken = Vec::new();
+        let mut k = 0;
+        while k < own {
+            let run = marks.run_of(k);
+            let ends: Vec<(Point, Point)> = marks.lines[run.start..run.end.min(own)].iter().filter_map(|g| marks.px(&screen, g[0]).zip(marks.px(&screen, g[1]))).collect();
+            let whole = !ends.is_empty() && ends.len() == run.len() && ends.iter().all(|(a, b)| inside(*a) && inside(*b));
+            let touched = ends.iter().any(|(a, b)| inside(*a) || inside(*b) || (0..4).any(|c| crosses(*a, *b, corners[c], corners[(c + 1) % 4])));
+            if whole || (touching && touched) {
+                taken.push(run.start);
+            }
+            k = run.end.max(k + 1);
+        }
+        taken
+    }
+
+    /// Removes the lines and shapes drawn on the view shown that are picked. False when none is.
+    pub(crate) fn remove_lines_picked(&mut self) -> bool {
+        let mut lines = self.lines_picked();
+        let Some(view) = self.shown_view().map(str::to_string).filter(|_| !lines.is_empty() && self.active_doc_sheet.is_none()) else { return false };
+        // from the last on, so the others keep their place
+        lines.sort_unstable();
+        for k in lines.into_iter().rev() {
+            self.document.remove_view_line(&view, k);
+        }
+        self.mark_pick = None;
+        self.more_marks.clear();
+        true
+    }
+
     pub(super) fn reference_controls(&self, view: &str, index: usize, l: Language) -> Element<'static, Message> {
         use iced::widget::{column, pick_list};
         let path: Arc<str> = Arc::from(view);
@@ -498,6 +573,7 @@ impl App {
     pub(super) fn pick_mark(&mut self, pick: Option<MarkPick>) {
         self.reference_target = None;
         self.mark_pick = pick;
+        self.more_marks.clear();
         self.modeller.dimension_value = None;
         if let (Some(MarkPick::Note(k)), Some(view)) = (pick, self.shown_view()) {
             if let Some(note) = self.document.view_notes(view).and_then(|n| n.get(k)) {
@@ -730,6 +806,10 @@ pub(super) struct ViewMarks {
     datums: Vec<crate::drawing2d::Datum2>,
     /// The elements selected: what the view cuts of them shows as a whole in the accent colour.
     selected: Vec<u64>,
+    /// The lines picked beside `pick`, each shape by its first line.
+    more: Vec<usize>,
+    /// Square only: a line or a polyline runs along the drawing's x or y from its last point.
+    square: bool,
     /// The drawing tool that is on.
     drawing: Option<DrawKind>,
     /// How many of `lines` are the view's own (the first ones): those can be picked.
@@ -753,6 +833,8 @@ pub(super) struct MarksState {
     /// The points clicked of the shape a drawing tool is making, and the tool they are of.
     points: Vec<[f64; 2]>,
     drawing: Option<DrawKind>,
+    /// The object snap the aim of a drawing tool is on.
+    osnap: Option<Osnap>,
 }
 
 impl ViewMarks {
@@ -895,18 +977,110 @@ impl ViewMarks {
         self.measuring || self.cutting || self.drawing.is_some()
     }
 
-    /// Where a drawing tool's click lands: on the end of a line drawn on the view when near
-    /// one, else as the other tools of two clicks snap.
-    fn draw_snap(&self, screen: &Screen, pointer: Point) -> Option<[f64; 2]> {
-        let end = self
-            .lines
-            .iter()
-            .take(self.own_lines)
-            .flatten()
-            .filter_map(|q| Some((*q, self.px(screen, *q)?.distance(pointer))))
-            .filter(|(_, d)| *d <= 2.0 * PICK)
-            .min_by(|a, b| a.1.total_cmp(&b.1));
-        end.map(|(q, _)| q).or_else(|| self.snap(screen, pointer)).or_else(|| self.at(screen, pointer))
+    /// Where a drawing tool's click lands: on an object snap of what is drawn there (see
+    /// [`Osnap`]), `from` being the point clicked before; else on the point under the pointer.
+    fn draw_snap(&self, screen: &Screen, pointer: Point, from: Option<[f64; 2]>) -> Option<([f64; 2], Option<Osnap>)> {
+        let (q, kind) = match self.object_snap(screen, pointer, from) {
+            Some((q, kind)) => (q, Some(kind)),
+            None => (self.at(screen, pointer)?, None),
+        };
+        // square only: a line or a polyline goes on along x or y from its last point
+        let lined = matches!(self.drawing, Some(DrawKind::Line | DrawKind::Polyline));
+        match from.filter(|_| self.square && lined) {
+            Some(from) => {
+                let to = crate::app::modeller::snaps::squared(glam::DVec2::from(from), glam::DVec2::from(q));
+                Some(([to.x, to.y], kind.filter(|_| to.distance(glam::DVec2::from(q)) < 1e-9)))
+            }
+            None => Some((q, kind)),
+        }
+    }
+
+    /// The object snap under the pointer, as a drafting program has them: the nearest of the
+    /// ends, middles and crossings of the straight lines there, the centres and quadrants of the
+    /// circles, arcs and ellipses (a centre is taken from on its curve too); else the foot of the
+    /// perpendicular from `from` on the line under the pointer; else the nearest point of that
+    /// line. Of two as near, the one named first wins.
+    fn object_snap(&self, screen: &Screen, pointer: Point, from: Option<[f64; 2]>) -> Option<([f64; 2], Osnap)> {
+        let reach = 2.0 * PICK;
+        let own = self.own_lines.min(self.lines.len());
+        // the view's own lines that are a round shape are no straight lines
+        let round = |k: usize| self.shapes.iter().find(|s| s.run().contains(&k)).filter(|s| matches!(s.kind, crate::document::ShapeKind::Circle | crate::document::ShapeKind::Arc | crate::document::ShapeKind::Ellipse));
+        let straight: Vec<[[f64; 2]; 2]> = (0..own).filter(|k| round(*k).is_none()).map(|k| self.lines[k]).collect();
+        let away = |q: [f64; 2]| self.px(screen, q).map(|c| c.distance(pointer));
+        let on_line = |g: &[[f64; 2]; 2]| self.px(screen, g[0]).zip(self.px(screen, g[1])).map(|(a, b)| near(a, b, pointer));
+        // the lines under the pointer: only those can give it a point
+        let mut under: Vec<[[f64; 2]; 2]> = straight.iter().copied().filter(|g| on_line(g).is_some_and(|d| d <= reach)).collect();
+        // and what the view shows of the model there; its own lines are in that too, and are had
+        // already (a circle's chords are no lines)
+        let same = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).abs() < 1e-4 && (a[1] - b[1]).abs() < 1e-4;
+        let owned = |g: &[[f64; 2]; 2]| self.lines[..own].iter().any(|o| (same(o[0], g[0]) && same(o[1], g[1])) || (same(o[0], g[1]) && same(o[1], g[0])));
+        let shown = self.cut.iter().flat_map(|c| crate::drawing::drawn(c)).map(|g| [[g[0][0] as f64, g[0][1] as f64], [g[1][0] as f64, g[1][1] as f64]]);
+        under.extend(shown.filter(|g| on_line(g).is_some_and(|d| d <= reach)).filter(|g| !owned(g)));
+        let mut points: Vec<([f64; 2], Osnap)> = Vec::new();
+        for g in &under {
+            points.extend([(g[0], Osnap::End), (g[1], Osnap::End), ([(g[0][0] + g[1][0]) / 2.0, (g[0][1] + g[1][1]) / 2.0], Osnap::Middle)]);
+        }
+        for (i, g) in under.iter().enumerate() {
+            for h in &under[i + 1..] {
+                let (u, v) = ([g[1][0] - g[0][0], g[1][1] - g[0][1]], [h[1][0] - h[0][0], h[1][1] - h[0][1]]);
+                let det = u[0] * v[1] - u[1] * v[0];
+                if det.abs() < 1e-12 {
+                    continue;
+                }
+                let w = [h[0][0] - g[0][0], h[0][1] - g[0][1]];
+                let (t, r) = ((w[0] * v[1] - w[1] * v[0]) / det, (w[0] * u[1] - w[1] * u[0]) / det);
+                if (-1e-9..=1.0 + 1e-9).contains(&t) && (-1e-9..=1.0 + 1e-9).contains(&r) {
+                    points.push(([g[0][0] + u[0] * t, g[0][1] + u[1] * t], Osnap::Crossing));
+                }
+            }
+        }
+        // the round shapes: their centre, their quadrants (a circle's), their ends (an arc's)
+        let mut centre_of_curve = None;
+        for shape in self.shapes.iter().filter(|s| s.run().end <= own) {
+            use crate::document::ShapeKind as K;
+            let lines = &self.lines[shape.run()];
+            let Some(centre) = (match shape.kind {
+                K::Circle | K::Ellipse => Some(mean(lines.iter().map(|g| g[0]))),
+                K::Arc => lines.first().zip(lines.get(lines.len() / 2)).zip(lines.last()).and_then(|((a, m), b)| circumcentre(a[0], m[0], b[1])),
+                _ => None,
+            }) else {
+                continue;
+            };
+            points.push((centre, Osnap::Centre));
+            if shape.kind == K::Circle {
+                let radius = lines.first().map_or(0.0, |g| (g[0][0] - centre[0]).hypot(g[0][1] - centre[1]));
+                points.extend([[radius, 0.0], [0.0, radius], [-radius, 0.0], [0.0, -radius]].map(|d| ([centre[0] + d[0], centre[1] + d[1]], Osnap::Quadrant)));
+            }
+            if shape.kind == K::Arc {
+                points.extend(lines.first().map(|g| (g[0], Osnap::End)).into_iter().chain(lines.last().map(|g| (g[1], Osnap::End))));
+            }
+            if centre_of_curve.is_none() && lines.iter().any(|g| on_line(g).is_some_and(|d| d <= reach)) {
+                centre_of_curve = Some(centre);
+            }
+        }
+        let nearest = points
+            .into_iter()
+            .filter_map(|(q, kind)| Some((q, kind, away(q)?)))
+            .filter(|(_, _, d)| *d <= reach)
+            .min_by(|a, b| a.2.total_cmp(&b.2).then(a.1.cmp(&b.1)));
+        if let Some((q, kind, _)) = nearest {
+            return Some((q, kind));
+        }
+        if let Some(centre) = centre_of_curve {
+            return Some((centre, Osnap::Centre));
+        }
+        // on a line, away from its points: square to it from the last point, else the nearest on it
+        let here = self.at(screen, pointer)?;
+        let foot = |g: &[[f64; 2]; 2], q: [f64; 2]| {
+            let u = [g[1][0] - g[0][0], g[1][1] - g[0][1]];
+            let t = ((q[0] - g[0][0]) * u[0] + (q[1] - g[0][1]) * u[1]) / (u[0] * u[0] + u[1] * u[1]).max(1e-300);
+            ((0.0..=1.0).contains(&t)).then(|| [g[0][0] + u[0] * t, g[0][1] + u[1] * t])
+        };
+        let line = under.iter().min_by(|a, b| on_line(a).unwrap_or(f32::MAX).total_cmp(&on_line(b).unwrap_or(f32::MAX)))?;
+        if let Some(square) = from.and_then(|q| foot(line, q)).filter(|q| away(*q).is_some_and(|d| d <= reach)) {
+            return Some((square, Osnap::Square));
+        }
+        foot(line, here).map(|q| (q, Osnap::Nearest))
     }
 
     /// A section's mark on the floor plan, as a sheet draws it: its line dash-dotted, at each end
@@ -943,6 +1117,88 @@ impl ViewMarks {
             }
         }
     }
+}
+
+/// The object snaps of the drawing tools, the first winning where two are as near: an end of a
+/// line or an arc, where two lines cross, the middle of a line, the centre of a circle, an arc or
+/// an ellipse, a quadrant of a circle, the foot of the perpendicular from the last point, the
+/// nearest point of a line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum Osnap {
+    End,
+    Crossing,
+    Middle,
+    Centre,
+    Quadrant,
+    Square,
+    Nearest,
+}
+
+/// The mean of points; the origin of none.
+fn mean(points: impl Iterator<Item = [f64; 2]>) -> [f64; 2] {
+    let (mut sum, mut n) = ([0.0, 0.0], 0.0);
+    for q in points {
+        sum = [sum[0] + q[0], sum[1] + q[1]];
+        n += 1.0;
+    }
+    if n > 0.0 { [sum[0] / n, sum[1] / n] } else { sum }
+}
+
+/// The centre of the circle through three points; none when they lie on one line.
+fn circumcentre(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> Option<[f64; 2]> {
+    let d = 2.0 * (a[0] * (b[1] - c[1]) + b[0] * (c[1] - a[1]) + c[0] * (a[1] - b[1]));
+    if d.abs() < 1e-12 {
+        return None;
+    }
+    let (sa, sb, sc) = (a[0] * a[0] + a[1] * a[1], b[0] * b[0] + b[1] * b[1], c[0] * c[0] + c[1] * c[1]);
+    Some([(sa * (b[1] - c[1]) + sb * (c[1] - a[1]) + sc * (a[1] - b[1])) / d, (sa * (c[0] - b[0]) + sb * (a[0] - c[0]) + sc * (b[0] - a[0])) / d])
+}
+
+/// The mark of an object snap at `c`, as a drafting program draws them: a square on an end, a
+/// cross where lines cross, a triangle on a middle, a circle on a centre, a diamond on a
+/// quadrant, a square corner for square to a line, an hourglass on the nearest point.
+fn draw_osnap(frame: &mut Frame, c: Point, kind: Osnap, color: Color) {
+    let r = 6.0;
+    let at = |dx: f32, dy: f32| Point::new(c.x + dx, c.y + dy);
+    let path = match kind {
+        Osnap::End => Path::rectangle(at(-r, -r), Size::new(2.0 * r, 2.0 * r)),
+        Osnap::Centre => Path::circle(c, r),
+        Osnap::Crossing => Path::new(|b| {
+            b.move_to(at(-r, -r));
+            b.line_to(at(r, r));
+            b.move_to(at(-r, r));
+            b.line_to(at(r, -r));
+        }),
+        Osnap::Middle => Path::new(|b| {
+            b.move_to(at(0.0, -r));
+            b.line_to(at(r, r));
+            b.line_to(at(-r, r));
+            b.close();
+        }),
+        Osnap::Quadrant => Path::new(|b| {
+            b.move_to(at(0.0, -r));
+            b.line_to(at(r, 0.0));
+            b.line_to(at(0.0, r));
+            b.line_to(at(-r, 0.0));
+            b.close();
+        }),
+        Osnap::Square => Path::new(|b| {
+            b.move_to(at(-r, -r));
+            b.line_to(at(-r, r));
+            b.line_to(at(r, r));
+            b.move_to(at(-r, 0.0));
+            b.line_to(at(0.0, 0.0));
+            b.line_to(at(0.0, r));
+        }),
+        Osnap::Nearest => Path::new(|b| {
+            b.move_to(at(-r, -r));
+            b.line_to(at(r, -r));
+            b.line_to(at(-r, r));
+            b.line_to(at(r, r));
+            b.close();
+        }),
+    };
+    frame.stroke(&path, Stroke::default().with_color(color).with_width(1.8));
 }
 
 /// How far `pointer` is from the segment `a`–`b`.
@@ -999,7 +1255,9 @@ impl canvas::Program<Message> for ViewMarks {
                     return Some(canvas::Action::publish(Message::MoveNote(self.view.clone(), k, [q[0] + grip[0], q[1] + grip[1]])).and_capture());
                 }
                 if self.busy() {
-                    state.aim = pointer.and_then(|p| if self.drawing.is_some() { self.draw_snap(&screen, p) } else if self.two_clicks() || self.levelling { self.snap(&screen, p) } else { self.at(&screen, p) });
+                    let drawn = if self.drawing.is_some() { pointer.and_then(|p| self.draw_snap(&screen, p, state.points.last().copied())) } else { None };
+                    state.osnap = drawn.and_then(|(_, kind)| kind);
+                    state.aim = pointer.and_then(|p| if self.drawing.is_some() { drawn.map(|(q, _)| q) } else if self.two_clicks() || self.levelling { self.snap(&screen, p) } else { self.at(&screen, p) });
                     return Some(canvas::Action::request_redraw());
                 }
                 let hover = pointer.and_then(|p| self.mark_at(&screen, p)).is_some();
@@ -1015,7 +1273,7 @@ impl canvas::Program<Message> for ViewMarks {
                     return Some(canvas::Action::publish(Message::InsertDimensionReference(self.view.clone(), i, self.snap(&screen, p)?)).and_capture());
                 }
                 if let Some(kind) = self.drawing {
-                    let q = self.draw_snap(&screen, p)?;
+                    let (q, _) = self.draw_snap(&screen, p, state.points.last().copied())?;
                     // a polyline: a click on its last point ends it, one on its first closes it
                     if kind == DrawKind::Polyline {
                         let on = |a: [f64; 2]| self.px(&screen, a).zip(self.px(&screen, q)).is_some_and(|(a, b)| a.distance(b) <= 2.0 * PICK);
@@ -1223,7 +1481,8 @@ impl canvas::Program<Message> for ViewMarks {
                 }
             })
         };
-        if let Some(MarkPick::Line(k)) = self.pick.filter(|pick| matches!(pick, MarkPick::Line(k) if *k < self.own_lines.min(self.lines.len()))) {
+        let first = self.pick.and_then(|pick| if let MarkPick::Line(k) = pick { Some(k) } else { None });
+        for k in first.into_iter().chain(self.more.iter().copied().filter(|k| Some(*k) != first)).filter(|k| *k < self.own_lines.min(self.lines.len())) {
             let run = self.run_of(k);
             frame.stroke(&through(&self.lines[run.start..run.end.min(self.lines.len())]), Stroke::default().with_color(p.accent).with_width(2.5));
         }
@@ -1237,7 +1496,11 @@ impl canvas::Program<Message> for ViewMarks {
         }
         if let (Some(_), Some(aim)) = (self.drawing, state.aim) {
             if let Some(c) = self.px(&screen, aim) {
-                frame.stroke(&Path::circle(c, 4.0), Stroke::default().with_color(p.accent).with_width(1.5));
+                // on an object snap its mark, else a small ring where the click lands
+                match state.osnap {
+                    Some(kind) => draw_osnap(&mut frame, c, kind, OSNAP),
+                    None => frame.stroke(&Path::circle(c, 4.0), Stroke::default().with_color(p.accent).with_width(1.5)),
+                }
             }
         }
         for (k, note) in self.notes.iter().enumerate() {
@@ -1657,6 +1920,76 @@ mod tests {
         // an axis turned a quarter: the ellipse turns with it
         let turned = DrawKind::Ellipse.shape_lines(&[[0.0, 0.0], [0.0, 2.0], [0.5, 0.0]]);
         assert!(turned.iter().all(|l| ((l[0][0] / 0.5).powi(2) + (l[0][1] / 2.0).powi(2) - 1.0).abs() < 1e-9));
+    }
+
+    #[test]
+    fn a_drawing_tool_snaps_to_the_points_of_what_is_drawn() {
+        let (mut app, plan) = plan_shown();
+        let _ = app.update(Message::AddShape(plan.clone(), DrawKind::Line, DrawKind::Line.shape_lines(&[[0.0, 0.0], [4.0, 0.0]])));
+        let _ = app.update(Message::AddShape(plan.clone(), DrawKind::Line, DrawKind::Line.shape_lines(&[[1.0, -1.0], [1.0, 2.0]])));
+        let _ = app.update(Message::AddShape(plan.clone(), DrawKind::Circle, DrawKind::Circle.shape_lines(&[[20.0, 23.0], [22.0, 23.0]])));
+        let _ = app.update(Message::AddShape(plan.clone(), DrawKind::Line, DrawKind::Line.shape_lines(&[[30.0, 10.0], [34.0, 10.0]])));
+        let marks = layer(&app);
+        let screen = marks.screen(bounds());
+        // a few pixels beside each point: the pointer is taken onto it, and told what it is
+        let snap = |q: [f64; 2], from: Option<[f64; 2]>| {
+            let at = on_screen(&app, q);
+            marks.object_snap(&screen, Point::new(at.x + 3.0, at.y - 2.0), from).map(|(p, kind)| ([(p[0] * 1e6).round() / 1e6, (p[1] * 1e6).round() / 1e6], kind))
+        };
+        assert_eq!(snap([4.0, 0.0], None), Some(([4.0, 0.0], Osnap::End)));
+        assert_eq!(snap([2.5, 0.0], None).map(|s| s.1), Some(Osnap::Nearest));
+        assert_eq!(snap([2.0, 0.0], None), Some(([2.0, 0.0], Osnap::Middle)));
+        assert_eq!(snap([1.0, 0.0], None), Some(([1.0, 0.0], Osnap::Crossing)));
+        assert_eq!(snap([20.0, 23.0], None), Some(([20.0, 23.0], Osnap::Centre)));
+        assert_eq!(snap([20.0, 25.0], None), Some(([20.0, 25.0], Osnap::Quadrant)));
+        // on the circle away from its quadrants: its centre, as hovering a circle gives it
+        let on = [20.0 + 2.0 * 0.6, 23.0 + 2.0 * 0.8];
+        assert_eq!(snap(on, None), Some(([20.0, 23.0], Osnap::Centre)));
+        // from a point above a line, near where the square line from it lands
+        assert_eq!(snap([32.7, 10.0], Some([32.7, 14.0])), Some(([32.7, 10.0], Osnap::Square)));
+        // away from everything: no object snap
+        assert_eq!(snap([40.0, 30.0], None), None);
+    }
+
+    #[test]
+    fn a_selection_box_takes_the_lines_drawn_and_delete_removes_them_together() {
+        use crate::viewport::Navigate;
+        let (mut app, plan) = plan_shown();
+        // three lines and a rectangle, away from the model
+        for y in [20.0, 21.0, 22.0] {
+            let _ = app.update(Message::AddShape(plan.clone(), DrawKind::Line, DrawKind::Line.shape_lines(&[[20.0, y], [24.0, y]])));
+        }
+        let _ = app.update(Message::AddShape(plan.clone(), DrawKind::Rectangle, DrawKind::Rectangle.shape_lines(&[[26.0, 20.0], [28.0, 22.0]])));
+        assert_eq!(app.document.view_lines(&plan).len(), 3 + 4);
+        let size = bounds();
+        let boxed = |app: &mut App, a: [f64; 2], b: [f64; 2]| {
+            let (p, q) = (on_screen(app, a), on_screen(app, b));
+            let _ = app.update(Message::Navigate(Navigate::Box { x0: p.x, y0: p.y, x1: q.x, y1: q.y, width: size.width, height: size.height, done: true, add: false }));
+        };
+        // a box round the first two lines, whichever way it is on screen drawn to the right
+        let (p, q) = (on_screen(&app, [19.5, 19.5]), on_screen(&app, [24.5, 21.5]));
+        let (lo, hi) = (Point::new(p.x.min(q.x), p.y.min(q.y)), Point::new(p.x.max(q.x), p.y.max(q.y)));
+        let _ = app.update(Message::Navigate(Navigate::Box { x0: lo.x, y0: lo.y, x1: hi.x, y1: hi.y, width: size.width, height: size.height, done: true, add: false }));
+        assert_eq!(app.lines_picked(), [0, 1]);
+        // drawn to the left over a corner of the rectangle: all of it, by its first line
+        let _ = app.update(Message::Navigate(Navigate::Box { x0: hi.x, y0: hi.y, x1: lo.x, y1: lo.y, width: size.width, height: size.height, done: true, add: false }));
+        assert_eq!(app.lines_picked(), [0, 1]);
+        let _ = boxed;
+        let (p, q) = (on_screen(&app, [25.5, 19.5]), on_screen(&app, [26.5, 20.5]));
+        let (lo, hi) = (Point::new(p.x.min(q.x), p.y.min(q.y)), Point::new(p.x.max(q.x), p.y.max(q.y)));
+        let _ = app.update(Message::Navigate(Navigate::Box { x0: hi.x, y0: hi.y, x1: lo.x, y1: lo.y, width: size.width, height: size.height, done: true, add: true }));
+        assert_eq!(app.lines_picked(), [0, 1, 3]);
+        // Delete takes the two lines and the rectangle; the third line stays
+        let _ = app.update(Message::DeletePicked);
+        assert_eq!(app.document.view_lines(&plan), [[[20.0, 22.0], [24.0, 22.0]]]);
+        assert!(app.lines_picked().is_empty());
+        // Ctrl+Z gives them back, and again takes back the rectangle's drawing
+        let _ = app.update(Message::Undo);
+        assert_eq!(app.document.view_lines(&plan).len(), 3 + 4);
+        let _ = app.update(Message::Undo);
+        assert_eq!(app.document.view_lines(&plan).len(), 3);
+        let _ = app.update(Message::Redo);
+        assert_eq!(app.document.view_lines(&plan).len(), 3 + 4);
     }
 
     #[test]

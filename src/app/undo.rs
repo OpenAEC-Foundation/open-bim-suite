@@ -124,7 +124,7 @@ impl App {
     /// A move being made in edit mode or with a grip: the model changes at every move of the
     /// cursor, and is one step once it is put down.
     fn moving(&self) -> bool {
-        self.modeller.edit.as_ref().is_some_and(|e| e.grab.is_some()) || self.modeller.grab.is_some()
+        self.modeller.edit.as_ref().is_some_and(|e| e.grab.is_some()) || self.modeller.grab.is_some() || self.modeller.grid_drag.is_some()
     }
 
     /// After any message: when the modelled elements, the library or the drawing standard
@@ -135,7 +135,9 @@ impl App {
         }
         let typing = self.step_typing.take();
         let setup_changed = self.setup_changed();
-        if !self.modeller.touched && !setup_changed {
+        // a line drawn on a view, moved or removed: a step as a change of the model is
+        let drawn_changed = !self.document.drawn_is(&self.modeller.base.drawn);
+        if !self.modeller.touched && !setup_changed && !drawn_changed {
             // the levels changed without the model (a level of the form, a file added): no step,
             // and what later steps are measured against has them
             if self.document.levels() != self.modeller.base.levels.as_slice() {
@@ -146,7 +148,7 @@ impl App {
         self.modeller.touched = false;
         let base = &self.modeller.base;
         let model_same = self.modeller.model == *base.model;
-        if model_same && self.modeller.taken == base.taken && self.modeller.project_file == base.project_file && self.document.levels() == base.levels.as_slice() && !setup_changed {
+        if model_same && self.modeller.taken == base.taken && self.modeller.project_file == base.project_file && self.document.levels() == base.levels.as_slice() && !setup_changed && !drawn_changed {
             return;
         }
         // (a step that left the elements as they were shares them with the step before)
@@ -179,6 +181,7 @@ impl App {
             library: Some(Arc::new(self.library.clone())),
             standard: Some(Arc::new(self.standard.clone())),
             house: Some(Arc::new(self.house.clone())),
+            drawn: if self.document.drawn_is(&self.modeller.base.drawn) { self.modeller.base.drawn.clone() } else { Arc::new(self.document.drawn()) },
         }
     }
 
@@ -261,6 +264,12 @@ impl App {
         // the levels as they stood: a level's move is taken back with what it moved
         if self.document.levels() != step.levels.as_slice() {
             self.document.set_levels(step.levels.to_vec());
+        }
+        // what was drawn on the views as it stood
+        if !self.document.drawn_is(&step.drawn) {
+            self.document.set_drawn(&step.drawn);
+            self.mark_pick = None;
+            self.more_marks.clear();
         }
         self.show_files_without(step.taken.clone());
         self.modeller.base = step;

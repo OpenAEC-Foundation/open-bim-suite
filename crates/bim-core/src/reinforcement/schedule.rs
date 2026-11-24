@@ -504,6 +504,8 @@ impl Nets {
                 let holes = openings.iter().map(|o| rectangle(DVec2::new(o.along, o.sill), DVec2::new(o.along + o.width, o.sill + o.height))).collect();
                 Ok((rectangle(DVec2::ZERO, DVec2::new(start.distance(*end), *height)), holes, def.total_thickness()))
             }
+            // a stair has no nets of its own
+            PlanarForm::Stair { .. } => Err(Refusal::NotRectangular),
         }
     }
 
@@ -582,6 +584,8 @@ impl Nets {
                     let along = (*end - *start).normalize_or_zero();
                     (*start + along * p.x - along.perp() * (thickness / 2.0 - depth)).extend(base + p.y)
                 }
+                // (refused by `plate` before any bar is laid)
+                PlanarForm::Stair { .. } => unreachable!("a stair has no nets"),
             };
             let kind = match (bar.extra, bar.top) {
                 (Some(_), _) => BarKind::Extra,
@@ -616,6 +620,8 @@ impl Nets {
                     let along = (*end - *start).normalize_or_zero();
                     (*start + along * p.x - along.perp() * (thickness / 2.0 - depth)).extend(base + p.y)
                 }
+                // (refused by `plate` before any bar is laid)
+                PlanarForm::Stair { .. } => unreachable!("a stair has no nets"),
             };
             let mut line = |a, b| lines.push(BarLine { a, b, diameter: bar.diameter, stirrup: false });
             line(place(bar.a, bar.depth), place(bar.b, bar.depth));

@@ -62,6 +62,7 @@ fn lifted(mut shape: Shape, dz: f64) -> Shape {
         Shape::Planar(p) => match &mut p.form {
             PlanarForm::Wall { base, .. } => *base += dz,
             PlanarForm::Slab { top, .. } => *top += dz,
+            PlanarForm::Stair { base, .. } => *base += dz,
         },
         Shape::System(s) => s.base += dz,
         Shape::Connection(_) => {}

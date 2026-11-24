@@ -98,6 +98,8 @@ pub fn edit_points(shape: &Shape) -> (Vec<DVec3>, bool) {
         Shape::Linear(l) => (vec![l.start, l.end], false),
         Shape::Planar(PlanarDef { form: PlanarForm::Wall { start, end, base, .. }, .. }) => (vec![start.extend(*base), end.extend(*base)], false),
         Shape::Planar(PlanarDef { form: PlanarForm::Slab { outline, top, .. }, .. }) => (outline.iter().map(|p| p.extend(*top)).collect(), true),
+        // a stair's line, or its outline and then its foot and its head
+        Shape::Planar(PlanarDef { form: PlanarForm::Stair { base, shape, .. }, .. }) => (shape.clone().points_mut().map(|p| p.extend(*base)).collect(), false),
         Shape::System(s) => (vec![s.start.extend(s.base), s.end.extend(s.base)], false),
         Shape::Connection(_) => (Vec::new(), false),
     }
@@ -135,6 +137,12 @@ pub fn with_points(shape: &Shape, points: &[DVec3]) -> Shape {
             }
             *outline = points.iter().map(flat).collect();
             *top = points[0].z;
+        }
+        Shape::Planar(PlanarDef { form: PlanarForm::Stair { base, shape, .. }, .. }) => {
+            for (p, to) in shape.points_mut().zip(points) {
+                *p = flat(to);
+            }
+            *base = points[0].z;
         }
         Shape::System(s) => {
             // its openings stay where they stand, as a wall's do
@@ -491,11 +499,16 @@ impl App {
 
     /// Selects modelled element `id` alone.
     pub(crate) fn select_modelled(&mut self, id: ElementId) {
-        let Some(scene) = self.model.clone() else { return };
-        let entry = if self.models.len() == 1 { 0 } else { self.models.iter().position(|e| Some(e.model.id) == self.modeller.shown).unwrap_or(0) as u32 };
-        if let Some(shown) = scene.element_with_key(crate::model::ElementKey { model: entry, source: id.0 }) {
+        if let Some(shown) = self.shown_modelled(id) {
             self.click(Some(Pickable::Element(shown)), false);
         }
+    }
+
+    /// The element of the scene that modelled element `id` shows as.
+    pub(crate) fn shown_modelled(&self, id: ElementId) -> Option<u64> {
+        let scene = self.model.as_ref()?;
+        let entry = if self.models.len() == 1 { 0 } else { self.models.iter().position(|e| Some(e.model.id) == self.modeller.shown).unwrap_or(0) as u32 };
+        scene.element_with_key(crate::model::ElementKey { model: entry, source: id.0 })
     }
 }
 
@@ -695,7 +708,7 @@ mod tests {
     #[test]
     fn a_system_whose_start_moves_keeps_its_openings_where_they_stand() {
         let opening = bim_core::Opening { along: 2.0, sill: 0.9, width: 1.2, height: 1.2, framing: None };
-        let system = Shape::System(SystemDef { start: DVec2::ZERO, end: DVec2::new(6.0, 0.0), base: 0.0, height: 2.7, spacing: DVec2::new(0.6, 2.7), member: DVec2::new(0.038, 0.14), panel: 0.14, system_type: None, openings: vec![opening], breaks: Vec::new(), outline: Vec::new(), division: None });
+        let system = Shape::System(SystemDef { start: DVec2::ZERO, end: DVec2::new(6.0, 0.0), base: 0.0, height: 2.7, spacing: DVec2::new(0.6, 2.7), member: DVec2::new(0.038, 0.14), panel: 0.14, system_type: None, openings: vec![opening], breaks: Vec::new(), outline: Vec::new(), grid: None, division: None });
         // the start half a metre along the line: the window is that much nearer to it
         let Shape::System(moved) = with_points(&system, &[DVec3::new(0.5, 0.0, 0.0), DVec3::new(6.0, 0.0, 0.0)]) else { panic!("a system") };
         assert!((moved.openings[0].along - 1.5).abs() < 1e-12, "{}", moved.openings[0].along);
@@ -802,7 +815,7 @@ mod tests {
     #[test]
     fn every_shape_gives_its_points_back_unchanged() {
         let shapes = [
-            Shape::Point(PointDef { at: DVec3::new(1.0, 2.0, 0.5), rotation: 0.3, size: DVec3::ONE, opening: None }),
+            Shape::Point(PointDef { at: DVec3::new(1.0, 2.0, 0.5), rotation: 0.3, size: DVec3::ONE, opening: None, role: Default::default() }),
             Shape::Linear(LinearDef { start: DVec3::ZERO, end: DVec3::new(4.0, 0.0, 3.0), profile: ProfileDef::Rectangle { width: 0.2, height: 0.4 }, roll: 0.0, role: Default::default() }),
             Shape::Planar(PlanarDef { form: PlanarForm::Wall { start: DVec2::ZERO, end: DVec2::new(5.0, 1.0), base: 3.0, height: 2.7 }, thickness: 0.2, openings: Vec::new(), build_up: None }),
             Shape::Planar(PlanarDef {
@@ -811,7 +824,7 @@ mod tests {
                 openings: Vec::new(),
                 build_up: None,
             }),
-            Shape::System(SystemDef { start: DVec2::ZERO, end: DVec2::new(6.0, 0.0), base: 0.0, height: 3.0, spacing: DVec2::splat(1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), division: None }),
+            Shape::System(SystemDef { start: DVec2::ZERO, end: DVec2::new(6.0, 0.0), base: 0.0, height: 3.0, spacing: DVec2::splat(1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), grid: None, division: None }),
         ];
         for shape in shapes {
             let (points, _) = edit_points(&shape);

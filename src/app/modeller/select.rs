@@ -9,6 +9,7 @@ impl App {
     pub(in crate::app) fn select_tool(&mut self) {
         self.set_model_tool(None);
         self.modeller.grid_tool = false;
+        self.modeller.curtain = None;
         self.modeller.rebar_tool = None;
         self.modeller.rebar_on = None;
         self.modeller.rebar_at = None;
@@ -27,6 +28,7 @@ impl App {
     pub(crate) fn selecting(&self) -> bool {
         self.modeller.tool.is_none()
             && !self.modeller.grid_tool
+            && self.modeller.curtain.is_none()
             && self.modeller.rebar_tool.is_none()
             && self.modeller.transform.is_none()
             && self.modeller.edit.is_none()
@@ -53,7 +55,8 @@ impl App {
 
     /// Whether a left drag in the viewport draws a selection box: the Select tool of the Modeller.
     pub(crate) fn drag_selects(&self) -> bool {
-        self.modeller.in_modeller && self.modeller.shown.is_some() && self.selecting()
+        // (with the Grid line tool a drag moves a line of a curtain wall: it is no turn of the view)
+        self.modeller.in_modeller && self.modeller.shown.is_some() && (self.selecting() || self.modeller.curtain == Some(super::curtain::CurtainTool::Line))
     }
 
     /// The Modeller's Esc when the tools of its own (placing, the grid, a move) have let theirs go:

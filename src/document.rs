@@ -930,6 +930,9 @@ pub enum LevelError {
     BadElevation,
 }
 
+/// What is drawn by hand on the views: per view its path, its lines and the shapes among them.
+pub type Drawn = Vec<(String, Vec<[[f64; 2]; 2]>, Vec<Shape>)>;
+
 /// The project document.
 #[derive(Debug, Clone, Default)]
 pub struct Document {
@@ -1926,6 +1929,39 @@ impl Document {
             return &p.shapes;
         }
         self.section(path).map_or(&[], |s| &s.shapes[..])
+    }
+
+    /// What is drawn by hand on every view: its path, its lines and the shapes among them. For
+    /// the history, which takes a line drawn or removed back as it takes back an element.
+    pub fn drawn(&self) -> Drawn {
+        let plans = self.plans.iter().map(|p| (p.path.clone(), p.lines.clone(), p.shapes.clone()));
+        plans.chain(self.sections.iter().map(|s| (s.path.clone(), s.lines.clone(), s.shapes.clone()))).collect()
+    }
+
+    /// Whether what is drawn on the views is `drawn` (see [`Document::drawn`]), without copying.
+    pub fn drawn_is(&self, drawn: &Drawn) -> bool {
+        let plans = self.plans.iter().map(|p| (&p.path, &p.lines, &p.shapes));
+        let mut now = plans.chain(self.sections.iter().map(|s| (&s.path, &s.lines, &s.shapes)));
+        let mut then = drawn.iter();
+        loop {
+            match (now.next(), then.next()) {
+                (None, None) => return true,
+                (Some((path, lines, shapes)), Some((p, l, s))) if path == p && lines == l && shapes == s => {}
+                _ => return false,
+            }
+        }
+    }
+
+    /// Puts back what was drawn on the views (see [`Document::drawn`]): a view that is still
+    /// there gets its lines as they were then; one made since has none.
+    pub fn set_drawn(&mut self, drawn: &Drawn) {
+        let then = |path: &str| drawn.iter().find(|(p, ..)| p == path).map(|(_, lines, shapes)| (lines.clone(), shapes.clone())).unwrap_or_default();
+        for p in self.plans.iter_mut() {
+            (p.lines, p.shapes) = then(&p.path);
+        }
+        for s in self.sections.iter_mut() {
+            (s.lines, s.shapes) = then(&s.path);
+        }
     }
 
     /// A view's lines and the shapes among them.

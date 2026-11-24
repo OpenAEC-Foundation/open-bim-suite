@@ -194,7 +194,7 @@ mod tests {
     use glam::DVec2;
 
     fn frame(outline: Vec<DVec2>, openings: Vec<Opening>) -> SystemDef {
-        let generic = SystemDef { start: DVec2::new(2.0, 1.0), end: DVec2::new(2.0, 5.8), base: 0.5, height: 2.7, spacing: DVec2::new(1.5, 1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings, breaks: Vec::new(), outline, division: None };
+        let generic = SystemDef { grid: None, start: DVec2::new(2.0, 1.0), end: DVec2::new(2.0, 5.8), base: 0.5, height: 2.7, spacing: DVec2::new(1.5, 1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings, breaks: Vec::new(), outline, division: None };
         generic.typed_from(&Library::starter(), "system.timber-frame-140").unwrap()
     }
 

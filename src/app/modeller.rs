@@ -20,6 +20,7 @@ use std::sync::Arc;
 pub mod grids;
 pub mod browser;
 pub mod cursor3d;
+pub mod curtain;
 pub mod dim_refs;
 pub mod explorer;
 pub mod grab;
@@ -60,15 +61,22 @@ pub enum ModelTool {
     RoundDuct,
     Pipe,
     CableTray,
+    /// A terminal or an appliance of a building service: a radiator, a boiler, a wash basin.
+    Appliance,
+    /// A stair: two clicks draw a straight one along the line between them; its sketch draws one
+    /// in an outline or along a line with landings (see `sketch`).
+    Stair,
 }
 
 impl ModelTool {
     /// The tools that place an element of their own.
-    pub const ALL: [ModelTool; 6] = [ModelTool::Wall, ModelTool::Slab, ModelTool::Column, ModelTool::Beam, ModelTool::System, ModelTool::Point];
+    pub const ALL: [ModelTool; 7] = [ModelTool::Wall, ModelTool::Slab, ModelTool::Column, ModelTool::Beam, ModelTool::System, ModelTool::Point, ModelTool::Stair];
     /// The tools that make an opening in a wall.
     pub const OPENINGS: [ModelTool; 2] = [ModelTool::Door, ModelTool::Window];
     /// The tools that draw a run of a building service.
     pub const SERVICES: [ModelTool; 4] = [ModelTool::Duct, ModelTool::RoundDuct, ModelTool::Pipe, ModelTool::CableTray];
+    /// The tools that place what the runs of the services serve.
+    pub const APPLIANCES: [ModelTool; 1] = [ModelTool::Appliance];
 
     /// The role of the runs it draws; none for a tool of the building itself.
     pub fn service(self) -> Option<bim_core::LinearRole> {
@@ -100,6 +108,8 @@ impl ModelTool {
             ModelTool::RoundDuct => "mep.round-duct",
             ModelTool::Pipe => "mep.pipe",
             ModelTool::CableTray => "mep.cable-tray",
+            ModelTool::Appliance => "mep.appliance",
+            ModelTool::Stair => "model.stair",
         }
     }
 
@@ -118,17 +128,20 @@ impl ModelTool {
             ModelTool::RoundDuct => l.text("Rond kanaal", "Round duct"),
             ModelTool::Pipe => l.text("Leiding", "Pipe"),
             ModelTool::CableTray => l.text("Kabelgoot", "Cable tray"),
+            ModelTool::Appliance => l.text("Toestel", "Appliance"),
+            ModelTool::Stair => l.text("Trap", "Stair"),
         }
     }
 
     /// Its ribbon icon.
     pub fn icon(self) -> &'static str {
         match self {
-            ModelTool::Point => "draw.coordinate",
+            ModelTool::Point | ModelTool::Appliance => "draw.coordinate",
             ModelTool::Column => "pile.columns",
             ModelTool::Beam => "draw.line",
             ModelTool::Wall => "construction.types",
             ModelTool::Slab => "draw.filled-area",
+            ModelTool::Stair => "draw.polyline",
             ModelTool::System => "curtain.new",
             ModelTool::Door => "frame.new-door",
             ModelTool::Window => "frame.new-turn-tilt",
@@ -141,9 +154,9 @@ impl ModelTool {
     pub fn base(self) -> bim_core::BaseKind {
         use bim_core::BaseKind;
         match self {
-            ModelTool::Point => BaseKind::Point,
+            ModelTool::Point | ModelTool::Appliance => BaseKind::Point,
             ModelTool::Column | ModelTool::Beam | ModelTool::Duct | ModelTool::RoundDuct | ModelTool::Pipe | ModelTool::CableTray => BaseKind::Linear,
-            ModelTool::Wall | ModelTool::Slab | ModelTool::Door | ModelTool::Window => BaseKind::Planar,
+            ModelTool::Wall | ModelTool::Slab | ModelTool::Stair | ModelTool::Door | ModelTool::Window => BaseKind::Planar,
             ModelTool::System => BaseKind::System,
         }
     }
@@ -151,8 +164,8 @@ impl ModelTool {
     /// The clicks it takes.
     pub(super) fn clicks(self) -> usize {
         match self {
-            ModelTool::Point | ModelTool::Column | ModelTool::Door | ModelTool::Window => 1,
-            ModelTool::Beam | ModelTool::Wall | ModelTool::Slab | ModelTool::System | ModelTool::Duct | ModelTool::RoundDuct | ModelTool::Pipe | ModelTool::CableTray => 2,
+            ModelTool::Point | ModelTool::Appliance | ModelTool::Column | ModelTool::Door | ModelTool::Window => 1,
+            ModelTool::Beam | ModelTool::Wall | ModelTool::Slab | ModelTool::Stair | ModelTool::System | ModelTool::Duct | ModelTool::RoundDuct | ModelTool::Pipe | ModelTool::CableTray => 2,
         }
     }
 
@@ -165,9 +178,12 @@ impl ModelTool {
     pub fn hint(self, l: Language, placed: usize) -> &'static str {
         match (self, placed) {
             (ModelTool::Point, _) => l.text("Klik waar het object staat · Esc: stoppen", "Click where the object stands · Esc: stop"),
+            (ModelTool::Appliance, _) => l.text("Klik waar het toestel staat · Esc: stoppen", "Click where the appliance stands · Esc: stop"),
             (ModelTool::Column, _) => l.text("Klik waar de kolom staat · Esc: stoppen", "Click where the column stands · Esc: stop"),
             (ModelTool::Door, _) => l.text("Klik op een wand waar de deur komt · Esc: stoppen", "Click a wall where the door goes · Esc: stop"),
             (ModelTool::Window, _) => l.text("Klik op een wand waar het raam komt · Esc: stoppen", "Click a wall where the window goes · Esc: stop"),
+            (ModelTool::Stair, 0) => l.text("Klik de voet van de trap · Esc: stoppen", "Click the foot of the stair · Esc: stop"),
+            (ModelTool::Stair, _) => l.text("Klik de richting waarin de trap omhoog loopt · Esc: opnieuw", "Click the way the stair climbs · Esc: start again"),
             (ModelTool::Slab, 0) => l.text("Klik een hoek van de vloer · Esc: stoppen", "Click a corner of the slab · Esc: stop"),
             (ModelTool::Slab, _) => l.text("Klik de andere hoek · Esc: opnieuw", "Click the opposite corner · Esc: start again"),
             (_, 0) => l.text("Klik het beginpunt · Esc: stoppen", "Click the start point · Esc: stop"),
@@ -256,9 +272,15 @@ pub struct Modeller {
     /// The kind of snap that took the cursor's point where it is, for its mark; and what that
     /// kind is called, in the interface language.
     pub snap_mark: Option<snaps::Snap>,
-    pub snap_words: [&'static str; 7],
+    pub snap_words: [&'static str; 8],
     /// The series of grid lines being typed beside the picked one (see `grids`); `None`: closed.
     pub grid_series: Option<String>,
+    /// The tool on the grid of curtain walls that is on (see `curtain`).
+    pub curtain: Option<curtain::CurtainTool>,
+    /// The picked grid lines being dragged (see `grids::GridDrag`).
+    pub grid_drag: Option<grids::GridDrag>,
+    /// The angle typed for the turn under way (degrees).
+    pub turn_typed: String,
     /// Which snaps are on (see `snaps`).
     pub snaps: snaps::Snaps,
     /// The names given to spaces, each at a point of its space (see `spaces`).
@@ -336,6 +358,8 @@ pub struct Step {
     pub standard: Option<Arc<bim_library::drawing::Standard>>,
     /// The house style the project follows, kept as the library is.
     pub house: Option<Arc<bim_library::house::HouseStyle>>,
+    /// What is drawn by hand on the views: a line drawn, moved or removed is a step too.
+    pub drawn: Arc<crate::document::Drawn>,
 }
 
 impl App {
@@ -396,6 +420,10 @@ impl App {
 
     /// Switches a tool on (its elements named `name`), or off.
     pub(super) fn set_model_tool(&mut self, tool: Option<(ModelTool, &'static str)>) {
+        // the sketch of a new floor belongs to the Slab tool: it goes with it
+        if self.modeller.sketch.as_ref().is_some_and(|s| s.new.is_some()) {
+            self.modeller.sketch = None;
+        }
         let same = tool.map(|t| t.0) == self.modeller.tool.map(|t| t.0);
         self.modeller.rebar_edit = None;
         self.modeller.tool = if same { None } else { tool };
@@ -524,6 +552,8 @@ impl App {
                 Shape::Point(p) => corners.push(p.at),
                 Shape::Linear(l) => line(l.start, l.end),
                 Shape::Planar(PlanarDef { form: PlanarForm::Wall { start, end, base, .. }, .. }) => line(start.extend(base), end.extend(base)),
+                // a stair: the ends of its line, or the corners of its outline
+                Shape::Planar(PlanarDef { form: PlanarForm::Stair { base, mut shape, .. }, .. }) => corners.extend(shape.points_mut().map(|p| p.extend(base))),
                 Shape::Planar(PlanarDef { form: PlanarForm::Slab { outline, top, .. }, .. }) => {
                     let n = outline.len();
                     for k in 0..n {
@@ -544,8 +574,84 @@ impl App {
         }
         if snaps.grid {
             points.extend(self.grid_snap_points().into_iter().map(|p| (p, Snap::Grid)));
+            // where a grid line crosses the side or the axis of a wall or the edge of a floor: a
+            // column goes against the inside of a wall on its grid line
+            let grids = self.modeller.model.grids();
+            for (a, b, z) in self.outline_lines(except) {
+                for g in grids {
+                    let (u, v) = (b - a, g.end - g.start);
+                    let det = u.perp_dot(v);
+                    if det.abs() < 1e-9 * u.length() * v.length() {
+                        continue;
+                    }
+                    let (t, w) = ((g.start - a).perp_dot(v) / det, (g.start - a).perp_dot(u) / det);
+                    if (-1e-6..=1.0 + 1e-6).contains(&t) && (-1e-6..=1.0 + 1e-6).contains(&w) {
+                        points.push(((a + u * t).extend(z), Snap::Grid));
+                    }
+                }
+            }
         }
         points
+    }
+
+    /// The modelled element whose line passes nearest viewport point (x, y), within
+    /// [`NEAR_PIXELS`]: the axis of a wall, a curtain wall or a member (at its foot and at its
+    /// top), the edge of a floor. For a click that hits no body: a curtain wall or a beam seen
+    /// from above is a few pixels wide, too thin to click on.
+    pub(crate) fn element_near(&self, x: f32, y: f32, width: f32, height: f32) -> Option<ElementId> {
+        let grid = self.modeller.model.grid;
+        let mut best: Option<(f32, ElementId)> = None;
+        for e in self.modeller.model.iter() {
+            let mut lines: Vec<(DVec3, DVec3)> = Vec::new();
+            match e.shape_in_project(&grid) {
+                Shape::Linear(l) => lines.push((l.start, l.end)),
+                Shape::Planar(PlanarDef { form: PlanarForm::Wall { start, end, base, height }, .. }) => lines.extend([(start.extend(base), end.extend(base)), (start.extend(base + height), end.extend(base + height))]),
+                Shape::System(s) if !s.lies() => lines.extend([(s.start.extend(s.base), s.end.extend(s.base)), (s.start.extend(s.base + s.height), s.end.extend(s.base + s.height))]),
+                Shape::Planar(PlanarDef { form: PlanarForm::Slab { outline, top, .. }, .. }) => {
+                    let n = outline.len();
+                    lines.extend((0..n).map(|k| (outline[k].extend(top), outline[(k + 1) % n].extend(top))));
+                }
+                _ => {}
+            }
+            for (a, b) in lines {
+                let (Some(a), Some(b)) = (self.on_screen(a, width, height), self.on_screen(b, width, height)) else { continue };
+                let (a, b, c) = (glam::Vec2::new(a.0, a.1), glam::Vec2::new(b.0, b.1), glam::Vec2::new(x, y));
+                let along = b - a;
+                let t = if along.length_squared() > 0.0 { ((c - a).dot(along) / along.length_squared()).clamp(0.0, 1.0) } else { 0.0 };
+                let d = (a + along * t).distance(c);
+                if d <= NEAR_PIXELS && best.is_none_or(|(least, _)| d < least) {
+                    best = Some((d, e.id));
+                }
+            }
+        }
+        best.map(|(_, id)| id)
+    }
+
+    /// The lines of the outlines of the elements in plan, each with the height it lies at: both
+    /// sides and the axis of a wall and of a standing system, the edges of a floor. Not those of
+    /// element `except`.
+    fn outline_lines(&self, except: ElementId) -> Vec<(DVec2, DVec2, f64)> {
+        let grid = self.modeller.model.grid;
+        let mut lines = Vec::new();
+        let mut band = |start: DVec2, end: DVec2, half: f64, z: f64| {
+            let Some(along) = (end - start).try_normalize() else { return };
+            let side = along.perp() * half;
+            lines.extend([(start, end, z), (start + side, end + side, z), (start - side, end - side, z)]);
+        };
+        let mut edges = Vec::new();
+        for e in self.modeller.model.iter().filter(|e| e.id != except) {
+            match e.shape_in_project(&grid) {
+                Shape::Planar(p @ PlanarDef { form: PlanarForm::Wall { start, end, base, .. }, .. }) => band(start, end, p.total_thickness() / 2.0, base),
+                Shape::System(s) if !s.lies() => band(s.start, s.end, s.member.max_element() / 2.0, s.base),
+                Shape::Planar(PlanarDef { form: PlanarForm::Slab { outline, top, .. }, .. }) => {
+                    let n = outline.len();
+                    edges.extend((0..n).map(|k| (outline[k], outline[(k + 1) % n], top)));
+                }
+                _ => {}
+            }
+        }
+        lines.extend(edges);
+        lines
     }
 
     /// A click on the work plane at `p`: onto a point of an element near the cursor, else in line
@@ -557,6 +663,16 @@ impl App {
     /// The point of [`App::snapped`], and the kind of snap that took it there (none for a click
     /// that is where it is, rounded).
     pub(super) fn snapped_as(&self, p: DVec3, x: f32, y: f32, width: f32, height: f32) -> (DVec3, Option<snaps::Snap>) {
+        let (q, kind) = self.snapped_free(p, x, y, width, height);
+        // square only: along x or y from the last point, whatever it landed on
+        match self.modeller.points.last().filter(|_| self.modeller.snaps.square) {
+            Some(from) => (snaps::squared(from.truncate(), q.truncate()).extend(q.z), kind.or(Some(snaps::Snap::Square))),
+            None => (q, kind),
+        }
+    }
+
+    /// The point of [`App::snapped_as`] before Square only holds it to an axis.
+    fn snapped_free(&self, p: DVec3, x: f32, y: f32, width: f32, height: f32) -> (DVec3, Option<snaps::Snap>) {
         let near = self
             .snap_marks_except(ElementId(0))
             .into_iter()
@@ -692,7 +808,7 @@ impl App {
         }
         let name = self.placed_name(tool, name);
         // a run of a service starting where one ends at another height: a riser between them
-        let service = self.modeller.placement.of(tool).service.filter(|v| Some(v.role()) == tool.service());
+        let service = self.modeller.placement.of(tool).service.filter(|v| tool == ModelTool::Appliance || Some(v.role()) == tool.service());
         if let Some(riser) = self.riser_to(tool, service, &shape) {
             let _ = self.add_element_served(name, level.clone(), None, service, riser);
         }
@@ -1033,7 +1149,7 @@ impl App {
         add(self, "Wall", wall(p(0.0, 0.0), p(10.0, 0.0), vec![door, window]));
         let side = add(self, "Wall", wall(p(10.0, 0.0), p(10.0, 6.0), Vec::new()));
         add(self, "Wall", wall(p(0.0, 6.0), p(0.0, 0.0), Vec::new()));
-        add(self, "Curtain wall", Shape::System(SystemDef { start: p(10.0, 6.0), end: p(0.0, 6.0), base: 0.0, height: 3.0, spacing: SYSTEM_SPACING, member: SYSTEM_MEMBER, panel: SYSTEM_PANEL, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), division: None }));
+        add(self, "Curtain wall", Shape::System(SystemDef { start: p(10.0, 6.0), end: p(0.0, 6.0), base: 0.0, height: 3.0, spacing: SYSTEM_SPACING, member: SYSTEM_MEMBER, panel: SYSTEM_PANEL, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), grid: None, division: None }));
         // a pergola beside it: two columns and three beams in a U; the joins come by themselves
         // (butts at the columns, mitres at the far corners), and one butt becomes an end plate
         let column = |at: DVec2| Shape::Linear(LinearDef { start: at.extend(0.0), end: at.extend(3.0), profile: ProfileDef::Rectangle { width: COLUMN, height: COLUMN }, roll: 0.0, role: Default::default() });
@@ -1049,7 +1165,7 @@ impl App {
             self.modeller.model.replace(joint).expect("the demo's end plate");
             self.show_modelled();
         }
-        add(self, "Object", Shape::Point(PointDef { at: DVec3::new(7.0, 3.0, 0.0), rotation: 0.4, size: OBJECT, opening: None }));
+        add(self, "Object", Shape::Point(PointDef { at: DVec3::new(7.0, 3.0, 0.0), rotation: 0.4, size: OBJECT, opening: None, role: Default::default() }));
         // a beam through the side wall, cutting its way
         let through = add(self, "Beam", beam(p(8.5, 3.0), p(13.0, 3.0)));
         add(self, "Cut-out", Shape::Connection(ConnectionDef { kind: ConnectionKind::Cut, primary: through, secondary: side }));
@@ -1092,8 +1208,9 @@ pub(super) fn tool_shape(tool: ModelTool, a: DVec3, b: DVec3, z: f64, storey: f6
     let build_up = |id: &Option<String>| id.as_deref().and_then(|id| bim_core::BuildUpDef::from_library(library, id));
     match tool {
         // an opening tool places none of its own (see `openings`): an object stands for it
+        ModelTool::Appliance => Shape::Point(PointDef { at: a + DVec3::Z * s.offset, rotation: 0.0, size: DVec3::new(s.width, s.depth.max(0.01), s.height.unwrap_or(OBJECT.z)), opening: None, role: s.appliance }),
         ModelTool::Point | ModelTool::Door | ModelTool::Window => {
-            Shape::Point(PointDef { at: a + DVec3::Z * s.offset, rotation: 0.0, size: DVec3::new(s.width, s.depth.max(0.01), s.height.unwrap_or(OBJECT.z)), opening: None })
+            Shape::Point(PointDef { at: a + DVec3::Z * s.offset, rotation: 0.0, size: DVec3::new(s.width, s.depth.max(0.01), s.height.unwrap_or(OBJECT.z)), opening: None, role: Default::default() })
         }
         ModelTool::Column => {
             let base = z + s.offset;
@@ -1117,6 +1234,20 @@ pub(super) fn tool_shape(tool: ModelTool, a: DVec3, b: DVec3, z: f64, storey: f6
             let wall = PlanarDef { form: PlanarForm::Wall { start: a.truncate(), end: b.truncate(), base, height: up_to(base) }, thickness: s.width, openings: Vec::new(), build_up: None };
             Shape::Planar(wall.with_build_up(build_up(&s.kind)))
         }
+        ModelTool::Stair => {
+            let base = z + s.offset;
+            let height = up_to(base);
+            let risers = stair_risers(s, height);
+            // with a going given the stair is as long as its treads make it, along the way clicked;
+            // with none it runs from click to click
+            let (from, to) = (a.truncate(), b.truncate());
+            let end = match (to - from).try_normalize() {
+                Some(way) if s.depth > 0.0 => from + way * (s.depth * (risers - 1) as f64),
+                _ => to,
+            };
+            let shape = bim_core::StairShape::Run { path: vec![from, end], width: s.width };
+            Shape::Planar(PlanarDef { form: PlanarForm::Stair { base, height, risers, shape, railing: s.railing }, thickness: STAIR_WAIST, openings: Vec::new(), build_up: None })
+        }
         ModelTool::Slab => {
             let (lo, hi) = (a.truncate().min(b.truncate()), a.truncate().max(b.truncate()));
             let outline = vec![lo, DVec2::new(hi.x, lo.y), hi, DVec2::new(lo.x, hi.y)];
@@ -1136,7 +1267,7 @@ pub(super) fn tool_shape(tool: ModelTool, a: DVec3, b: DVec3, z: f64, storey: f6
                 system_type: None,
                 openings: Vec::new(),
                 breaks: Vec::new(),
-                outline: Vec::new(),
+                outline: Vec::new(), grid: None,
                 division: None,
             };
             // a lying type (a floor, a ceiling) is laid in the rectangle between the two clicks, as a
@@ -1183,6 +1314,24 @@ impl App {
     }
 }
 
+/// How thick a stair is under its treads, as its tool makes it (metres).
+pub const STAIR_WAIST: f64 = 0.15;
+/// The highest a step of a stair is when its tool counts the steps (metres).
+pub const HIGHEST_RISER: f64 = 0.185;
+
+/// How many steps the Stair tool gives a stair `height` high: what its strip says, else as few
+/// as keep every step under [`HIGHEST_RISER`].
+pub(super) fn stair_risers(s: &Settings, height: f64) -> usize {
+    let typed = s.sill.round() as usize;
+    if typed >= bim_core::element::FEWEST_RISERS {
+        return typed;
+    }
+    ((height / HIGHEST_RISER).ceil().clamp(2.0, 1000.0)) as usize
+}
+
+/// A click this near the line of an element selects it when it hits no body (logical pixels).
+const NEAR_PIXELS: f32 = 6.0;
+
 /// The colour of what belongs to a service (sRGB): supply warm or fresh, return and waste dull.
 fn service_colour(service: bim_core::Service) -> [f32; 3] {
     use bim_core::Service as S;
@@ -1218,6 +1367,11 @@ fn class_colour(class: &str) -> [f32; 3] {
         "IfcDuctSegment" | "IfcDuctFitting" => [0.45, 0.68, 0.86],
         "IfcPipeSegment" | "IfcPipeFitting" => [0.36, 0.66, 0.42],
         "IfcCableCarrierSegment" | "IfcCableCarrierFitting" => [0.88, 0.72, 0.28],
+        // a stair as concrete is
+        "IfcStair" => [0.74, 0.74, 0.72],
+        "IfcSpaceHeater" | "IfcSanitaryTerminal" => [0.94, 0.94, 0.95],
+        "IfcBoiler" | "IfcPump" | "IfcFan" | "IfcUnitaryEquipment" | "IfcTank" | "IfcValve" => [0.72, 0.74, 0.78],
+        "IfcAirTerminal" | "IfcOutlet" | "IfcLightFixture" => [0.90, 0.90, 0.86],
         _ => [0.90, 0.60, 0.30],
     }
 }
@@ -1412,6 +1566,18 @@ fn properties(model: &bim_core::Model, e: &Element, parts: &[bim_core::Part], le
                 put("Length", m((end - start).length()));
                 put("Height", m(height));
             }
+            // a stair: its steps, how high each is and, where they are all one depth, its going
+            if let PlanarForm::Stair { height, risers, shape, .. } = &p.form {
+                put("Height", m(*height));
+                put("Risers", risers.to_string());
+                put("Riser height", format!("{} mm", bim_library::millimetres(height / *risers as f64, bim_library::Lang::En)));
+                if let bim_core::StairShape::Run { path, width } = shape {
+                    put("Width", m(*width));
+                    if let ([a, b], true) = (&path[..], *risers > 1) {
+                        put("Going", format!("{} mm", bim_library::millimetres(a.distance(*b) / (*risers - 1) as f64, bim_library::Lang::En)));
+                    }
+                }
+            }
         }
         Shape::System(s) => {
             put("Length", m((s.end - s.start).length()));
@@ -1603,6 +1769,106 @@ mod tests {
     }
 
     #[test]
+    fn the_appliance_tool_places_a_radiator_of_its_usual_size_in_a_service() {
+        use super::super::placement::PlaceMessage;
+        use bim_core::{PointRole, Service};
+        let mut app = modelling();
+        app.set_model_tool(Some((ModelTool::Appliance, "Appliance")));
+        app.place_message(PlaceMessage::Service(Some(Service::HeatingSupply)));
+        click(&mut app, 2.0, 3.0);
+        // another kind takes its own usual size and class, and keeps the service
+        app.place_message(PlaceMessage::Appliance(PointRole::Boiler));
+        click(&mut app, 5.0, 3.0);
+        let placed: Vec<(&str, &str, Option<Service>, DVec3, f64)> = app
+            .modeller
+            .model
+            .iter()
+            .filter_map(|e| match &e.shape {
+                Shape::Point(p) => Some((e.name.as_str(), e.class(), e.service, p.size, p.at.z)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            placed,
+            [
+                ("Radiator 1", "IfcSpaceHeater", Some(Service::HeatingSupply), DVec3::new(1.0, 0.1, 0.6), 0.15),
+                ("Boiler 1", "IfcBoiler", Some(Service::HeatingSupply), DVec3::new(0.45, 0.35, 0.7), 1.2),
+            ]
+        );
+        // the remote control picks in the strip's lists by name, in English or as shown
+        assert!(app.pick_tool_option("kind", "pomp", Language::Dutch) && app.pick_tool_option("service", "Cold water", Language::Dutch));
+        assert_eq!(app.tool_settings().map(|(_, s)| (s.appliance, s.service, s.width)), Some((PointRole::Pump, Some(Service::ColdWater), 0.18)));
+        assert!(!app.pick_tool_option("kind", "sofa", Language::Dutch));
+        assert!(app.pick_tool_option("service", "verwarming aanvoer", Language::Dutch));
+        // picked up again, the tool takes its kind, size and service
+        let boiler = app.modeller.model.iter().last().unwrap().id;
+        app.place_message(PlaceMessage::Appliance(PointRole::Pump));
+        app.set_model_tool(None);
+        app.select_modelled(boiler);
+        app.create_similar(Language::English);
+        assert_eq!(app.tool_settings().map(|(tool, s)| (tool, s.appliance, s.service, s.width)), Some((ModelTool::Appliance, PointRole::Boiler, Some(Service::HeatingSupply), 0.45)));
+    }
+
+    #[test]
+    fn a_column_snaps_to_where_a_grid_line_crosses_the_inside_of_a_wall() {
+        let mut app = modelling();
+        // a wall along x, 0.3 thick: its sides at y = -0.15 and 0.15; a grid line across it at x = 4
+        let form = PlanarForm::Wall { start: DVec2::new(0.0, 0.0), end: DVec2::new(8.0, 0.0), base: 0.0, height: 3.0 };
+        app.add_element("Wall", None, Shape::Planar(PlanarDef { form, thickness: 0.3, openings: Vec::new(), build_up: None })).unwrap();
+        app.add_grid_line(DVec2::new(4.0, -3.0), DVec2::new(4.0, 5.0)).unwrap();
+        app.set_model_tool(Some((ModelTool::Column, "Column")));
+        // a click a few centimetres off lands on the crossing with the inner side
+        click(&mut app, 4.04, 0.19);
+        let column = app.modeller.model.iter().last().unwrap().shape_in_project(&app.modeller.model.grid);
+        let Shape::Linear(l) = column else { panic!() };
+        assert!((l.start.truncate() - DVec2::new(4.0, 0.15)).length() < 1e-9, "{:?}", l.start);
+    }
+
+    #[test]
+    fn a_click_beside_a_thin_element_still_selects_it() {
+        let mut app = modelling();
+        app.modeller.in_modeller = true;
+        app.set_model_tool(Some((ModelTool::System, "Curtain wall")));
+        click(&mut app, 0.0, 0.0);
+        click(&mut app, 6.0, 0.0);
+        app.set_model_tool(None);
+        app.modeller.points.clear();
+        let id = app.modeller.model.iter().next().unwrap().id;
+        // from above a curtain wall is a line 5 cm wide: a click 30 cm beside it (3 pixels here)
+        // takes it, one a metre and a half away does not and clears the selection
+        click(&mut app, 3.0, 0.3);
+        assert_eq!(app.selected_modelled(), [id]);
+        click(&mut app, 3.0, 1.5);
+        assert!(app.selected_modelled().is_empty());
+    }
+
+    #[test]
+    fn square_only_draws_along_x_or_y_whatever_is_clicked_and_off_any_angle() {
+        let mut app = modelling();
+        let walls = |app: &App| -> Vec<(DVec2, DVec2)> {
+            let grid = app.modeller.model.grid;
+            app.modeller.model.iter().filter_map(|e| match e.shape_in_project(&grid) { Shape::Planar(PlanarDef { form: PlanarForm::Wall { start, end, .. }, .. }) => Some((start, end)), _ => None }).collect()
+        };
+        // off (as it starts): a wall at any angle
+        app.set_model_tool(Some((ModelTool::Wall, "Wall")));
+        app.modeller.placement.chain = false;
+        click(&mut app, 0.0, 0.0);
+        click(&mut app, 4.0, 3.0);
+        assert_eq!(walls(&app), [(DVec2::ZERO, DVec2::new(4.0, 3.0))]);
+        // on: the same clicks give a wall along x, the longer way; and one mostly up a wall along y
+        let _ = app.update(Message::SnapToggle(snaps::Snap::Square));
+        click(&mut app, 0.0, 10.0);
+        click(&mut app, 4.0, 13.0);
+        click(&mut app, 10.0, 10.0);
+        click(&mut app, 11.0, 15.0);
+        assert_eq!(walls(&app)[1..], [(DVec2::new(0.0, 10.0), DVec2::new(4.0, 10.0)), (DVec2::new(10.0, 10.0), DVec2::new(10.0, 15.0))]);
+        // even a click on the corner of another wall is held to the axis
+        click(&mut app, 0.0, 20.0);
+        click(&mut app, 4.0, 13.0);
+        assert_eq!(walls(&app)[3], (DVec2::new(0.0, 20.0), DVec2::new(0.0, 13.0)));
+    }
+
+    #[test]
     fn a_new_model_has_a_level_and_shows_the_viewport() {
         let app = modelling();
         assert!(app.model.is_some());
@@ -1711,7 +1977,7 @@ mod tests {
     fn tab_on_a_framed_wall_opens_its_sketch_and_a_rectangle_in_it_is_a_framed_opening() {
         use super::sketch::{Segment, SketchError};
         let mut app = App::default();
-        let generic = bim_core::SystemDef { start: glam::DVec2::new(2.0, 1.0), end: glam::DVec2::new(6.8, 1.0), base: 0.0, height: 2.7, spacing: glam::DVec2::new(1.5, 1.5), member: glam::DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), division: None };
+        let generic = bim_core::SystemDef { grid: None, start: glam::DVec2::new(2.0, 1.0), end: glam::DVec2::new(6.8, 1.0), base: 0.0, height: 2.7, spacing: glam::DVec2::new(1.5, 1.5), member: glam::DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), division: None };
         let s = generic.typed_from(&app.library, "system.timber-frame-140").unwrap();
         let grid = app.modeller.model.grid;
         let id = app.modeller.model.add(Element::in_project(&grid, "Frame", None, Shape::System(s))).unwrap();
@@ -1761,7 +2027,7 @@ mod tests {
     fn an_opening_sketched_in_brickwork_goes_to_the_courses_and_gets_a_lintel() {
         use super::sketch::Segment;
         let mut app = App::default();
-        let generic = bim_core::SystemDef { start: glam::DVec2::new(2.0, 1.0), end: glam::DVec2::new(6.4, 1.0), base: 0.0, height: 2.5, spacing: glam::DVec2::new(1.5, 1.5), member: glam::DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), division: None };
+        let generic = bim_core::SystemDef { grid: None, start: glam::DVec2::new(2.0, 1.0), end: glam::DVec2::new(6.4, 1.0), base: 0.0, height: 2.5, spacing: glam::DVec2::new(1.5, 1.5), member: glam::DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), division: None };
         let s = generic.typed_from(&app.library, "system.masonry-waal-stretcher").unwrap();
         let grid = app.modeller.model.grid;
         let id = app.modeller.model.add(Element::in_project(&grid, "Wall", None, Shape::System(s))).unwrap();
@@ -1791,7 +2057,7 @@ mod tests {
     fn a_timber_frame_is_exported_as_an_assembly_for_every_prefab_unit() {
         // 7.2 m of timber frame: three units of 2400
         let mut app = App::default();
-        let generic = bim_core::SystemDef { start: glam::DVec2::new(2.0, 1.0), end: glam::DVec2::new(9.2, 1.0), base: 0.0, height: 2.7, spacing: glam::DVec2::new(1.5, 1.5), member: glam::DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), division: None };
+        let generic = bim_core::SystemDef { grid: None, start: glam::DVec2::new(2.0, 1.0), end: glam::DVec2::new(9.2, 1.0), base: 0.0, height: 2.7, spacing: glam::DVec2::new(1.5, 1.5), member: glam::DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), division: None };
         let s = generic.typed_from(&app.library, "system.timber-frame-140").unwrap();
         let grid = app.modeller.model.grid;
         let id = app.modeller.model.add(Element::in_project(&grid, "Frame", None, Shape::System(s))).unwrap();
@@ -1949,7 +2215,7 @@ mod tests {
     fn two_timber_frames_are_connected_at_their_corner() {
         let mut app = modelling();
         let frame = |a: (f64, f64), b: (f64, f64)| {
-            let s = SystemDef { start: glam::DVec2::new(a.0, a.1), end: glam::DVec2::new(b.0, b.1), base: 0.0, height: 2.7, spacing: SYSTEM_SPACING, member: SYSTEM_MEMBER, panel: SYSTEM_PANEL, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), division: None };
+            let s = SystemDef { start: glam::DVec2::new(a.0, a.1), end: glam::DVec2::new(b.0, b.1), base: 0.0, height: 2.7, spacing: SYSTEM_SPACING, member: SYSTEM_MEMBER, panel: SYSTEM_PANEL, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), grid: None, division: None };
             Shape::System(s.typed_from(&bim_library::Library::starter(), "system.timber-frame-140").unwrap())
         };
         let long = app.add_element("Frame", None, frame((0.0, 0.0), (4.8, 0.0))).unwrap();

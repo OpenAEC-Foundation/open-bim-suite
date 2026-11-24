@@ -54,6 +54,8 @@ fn off_shape(shape: &Shape, q: DVec2) -> Option<f64> {
             let n = points.len();
             (0..n).map(|i| off_segment(q, points[i], points[(i + 1) % n])).min_by(f64::total_cmp)
         }
+        // a stair: its line or its outline
+        Shape::Planar(PlanarDef { form: PlanarForm::Stair { .. }, .. }) => points.windows(2).map(|w| off_segment(q, w[0], w[1])).min_by(f64::total_cmp),
         Shape::System(s) => Some((off_segment(q, points[0], points[1]) - s.member.max_element() / 2.0).max(0.0)),
         Shape::Linear(l) => {
             let half = l.profile.profile().map_or(0.1, |p| p.outer().iter().map(|c| c.x.abs().max(c.y.abs())).fold(0.0, f64::max));

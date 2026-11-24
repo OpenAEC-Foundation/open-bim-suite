@@ -278,6 +278,9 @@ pub struct App {
     pub show_grids: bool,
     /// The grid line picked with a click (index into the model's grids), shown in the properties.
     pub picked_grid: Option<usize>,
+    /// The grid lines picked beside `picked_grid` (a box drawn over several, Shift and a click):
+    /// they count only while that one is picked (see `App::grids_picked`).
+    pub more_grids: Vec<usize>,
     /// Explorer groups opened: views, rooms, layers, schedules, sheets.
     pub explorer_open: [bool; 7],
     /// The explorer's tab shown.
@@ -390,6 +393,9 @@ pub struct App {
     pub note_text: String,
     /// What is picked on the view shown in its tab: a dimension or a text.
     pub mark_pick: Option<marks::MarkPick>,
+    /// The lines drawn on the view picked beside `mark_pick` (a box drawn over several): they
+    /// count only while that one is a line (see `App::lines_picked`).
+    pub more_marks: Vec<usize>,
     /// Groups of layers opened in the explorer (closed by default).
     pub open_layer_groups: HashSet<String>,
     collapsed_view_groups: HashSet<&'static str>,
@@ -520,7 +526,7 @@ pub struct App {
 /// Width of the right-click menu (logical pixels), and about its height, to keep it inside the
 /// viewport.
 const MENU_WIDTH: f32 = 230.0;
-const MENU_HEIGHT: f32 = 260.0;
+const MENU_HEIGHT: f32 = 292.0;
 
 type HoverScene = (Option<SectionBox>, Option<SectionPlane>, Vec<bool>, Arc<UnitKeySet>);
 
@@ -536,6 +542,8 @@ pub enum MenuItem {
     PivotHere,
     ClearPivot,
     Undo,
+    /// The selected modelled elements and the picked grid lines go, as Delete.
+    Delete,
 }
 
 #[derive(Debug, Clone)]
@@ -961,6 +969,21 @@ pub enum Message {
     ToolDigit(char),
     /// The series field of the picked grid line.
     GridSeries(modeller::grids::SeriesMessage),
+    /// A tool on the grid of curtain walls: on, or off when it is on.
+    CurtainTool(modeller::curtain::CurtainTool),
+    /// Grid line `index` of the selected curtain wall goes: an upright one (true) or a level one.
+    RemoveGridLine(bool, usize),
+    /// The selected curtain wall gets its equal grid back.
+    EqualGrid,
+    /// The Roof tool, named as its roofs are: the Slab tool making a roof, its sketch open.
+    RoofTool(&'static str),
+    /// The angle typed for the picked line of a roof's sketch.
+    SketchSlope(String),
+    /// The Stair tool's Sketch: opens the sketch of a new stair, or closes it.
+    StairSketch,
+    /// The angle typed for the turn under way (degrees), and Enter: the turn is made by it.
+    TurnTyped(String),
+    TurnApply,
     /// A snap switched on or off at the right of the status bar.
     SnapToggle(modeller::snaps::Snap),
     /// The name typed for the space selected, and Enter in its field.
@@ -1139,6 +1162,7 @@ impl Default for App {
             active_view: None,
             show_grids: true,
             picked_grid: None,
+            more_grids: Vec::new(),
             explorer_open: [false, false, true, false, false, false, false],
             explorer_tab: ExplorerTab::Model,
             library: bim_library::Library::starter(),
@@ -1197,6 +1221,7 @@ impl Default for App {
             draw_tool: None,
             note_text: String::new(),
             mark_pick: None,
+            more_marks: Vec::new(),
             open_layer_groups: HashSet::new(),
             collapsed_view_groups: HashSet::new(),
             open_sheets: Vec::new(),
@@ -2292,7 +2317,7 @@ impl App {
             Message::ClearMeasurements => self.measurements.clear(),
             Message::NewModel(level) => self.new_model(level),
             Message::Reinforcement(action) => self.rebar_action(action),
-            Message::ModelTool(tool) => self.set_model_tool(tool),
+            Message::ModelTool(tool) => self.start_model_tool(tool),
             Message::GridTool => self.toggle_grid_tool(),
             Message::RebarTool(tool) => self.toggle_rebar_tool(tool),
             Message::ExtraRemove(k) => self.remove_extra(k),
@@ -2317,6 +2342,14 @@ impl App {
                 self.tool_digit(c);
             }
             Message::GridSeries(message) => self.series_message(message),
+            Message::CurtainTool(tool) => self.toggle_curtain_tool(tool),
+            Message::RemoveGridLine(upright, index) => self.remove_grid_line(upright, index),
+            Message::EqualGrid => self.equal_grid(),
+            Message::StairSketch => self.toggle_stair_sketch(),
+            Message::RoofTool(name) => self.start_roof_tool(name),
+            Message::SketchSlope(typed) => self.sketch_slope_typed(typed),
+            Message::TurnTyped(typed) => self.modeller.turn_typed = typed,
+            Message::TurnApply => self.turn_by_typed(),
             Message::SnapToggle(snap) => self.modeller.snaps.toggle(snap),
             Message::SpaceName(typed) => self.type_space_name(typed),
             Message::SpaceNameDone => self.modeller.space_typing = None,
@@ -2611,6 +2644,10 @@ impl App {
                 Navigate::Pick { x, y, width, height, add } => self.pick(x, y, width, height, add),
                 Navigate::Context { x, y, width, height } => self.context_click(x, y, width, height),
                 Navigate::Cursor3d { x, y, width, height } => self.place_cursor3d(x, y, width, height),
+                // with the Grid line tool on, a drag moves the line of a curtain wall it began on
+                Navigate::Box { x0, y0, x1, y1, width, height, done, .. } if self.curtain_drag((x0, y0), (x1, y1), width, height, done) => {}
+                // a drag that starts on a picked grid line moves the picked grid lines
+                Navigate::Box { x0, y0, x1, y1, width, height, done, .. } if self.drag_grids((x0, y0), (x1, y1), width, height, done) => {}
                 Navigate::Box { x0, y0, x1, y1, width, height, done, add } => {
                     let rect = (Vec2::new(x0, y0), Vec2::new(x1, y1));
                     self.box_select = (!done).then_some(rect);
@@ -2665,6 +2702,7 @@ impl App {
                     MenuItem::ShowAll => Message::ShowAllElements,
                     MenuItem::SelectLayer => Message::SelectLayerOfSelection,
                     MenuItem::Undo => Message::Undo,
+                    MenuItem::Delete => Message::DeletePicked,
                     MenuItem::ClearSelection => {
                         self.sel.clear();
                         self.selection_changed();
@@ -2950,10 +2988,9 @@ impl App {
                     // in the sketch of a floor: the picked line goes
                 } else if self.modeller.edit.is_some() {
                     // in edit mode Delete takes nothing: the element stays
-                } else if self.delete_modelled() {
-                    // modelled elements selected: they go
-                } else if self.delete_picked_grid() {
-                    // the picked grid line of the modelled project goes
+                } else if self.delete_modelled() | self.delete_picked_grid() | self.remove_lines_picked() {
+                    // modelled elements selected, the picked grid lines of the modelled project
+                    // and the picked lines drawn on the view: they go
                 } else if self.active_doc_sheet.is_some() {
                     if self.sheet_pick.is_some() {
                         self.remove_picked();
@@ -3395,6 +3432,11 @@ impl App {
             if !self.structural.selected.contains(&h.element) {
                 self.click_structural(h.element, false);
             }
+        } else if let Some(g) = self.grid_under(x, y, width, height, triangle) {
+            // a grid line not picked yet is picked, so the menu's Delete takes it
+            if !self.grids_picked().contains(&g) {
+                self.pick_grid(Some(g));
+            }
         } else if let Some(item) = hit.map(|(l, t, _)| pickable_at(&model, l, t)) {
             if !self.sel.contains(item) {
                 self.click(Some(item), false);
@@ -3462,6 +3504,9 @@ impl App {
         if self.modeller.grid_tool {
             return self.grid_click(x, y, width, height);
         }
+        if self.modeller.curtain.is_some() {
+            return self.curtain_click(x, y, width, height, add);
+        }
         if self.modeller.rebar_on.is_some() {
             return self.rebar_second(x, y, width, height);
         }
@@ -3516,11 +3561,27 @@ impl App {
         // (a reinforcement tool takes the element under the cursor, also where a grid line lies on it)
         let reinforcing = self.modeller.rebar_tool.is_some();
         if let Some(g) = self.grid_under(x, y, width, height, triangle).filter(|_| !reinforcing) {
+            // with Shift or Ctrl it joins the grid lines picked, or leaves them
+            if add {
+                let mut grids = self.grids_picked();
+                match grids.iter().position(|&p| p == g) {
+                    Some(k) => drop(grids.remove(k)),
+                    None => grids.push(g),
+                }
+                return self.set_picked_grids(grids);
+            }
             return self.pick_grid(Some(g));
         }
         if let Some(h) = self.pick_structural(x, y, width, height, triangle).filter(|_| !reinforcing) {
             self.click_structural(h.element, add);
             return;
+        }
+        // a click that hits no body takes the modelled element whose line it is beside: a curtain
+        // wall or a beam seen from above is too thin to click on
+        if hit.is_none() && self.modeller.in_modeller {
+            if let Some(near) = self.element_near(x, y, width, height).and_then(|id| self.shown_modelled(id)) {
+                return self.click(Some(Pickable::Element(near)), add);
+            }
         }
         self.click(hit.map(|(l, t, _)| pickable_at(&model, l, t)), add);
         // a reinforcement tool: what is clicked is reinforced, or its stretch or line starts there
@@ -3749,12 +3810,30 @@ impl App {
                 UnitOwner::LayerRest(l) => Some(Pickable::Layer(l)),
             })
             .collect();
+        // the grid lines the box takes go with them (a selection of elements alone lets them go)
+        let mut grids = if add { self.grids_picked() } else { Vec::new() };
+        for g in self.grids_in_box(rect, width, height) {
+            if !grids.contains(&g) {
+                grids.push(g);
+            }
+        }
         if !add {
             self.sel.clear();
             self.set_structural_selection(Vec::new());
         }
         self.sel.extend(items);
         self.selection_changed();
+        self.set_picked_grids(grids);
+        // and the lines and shapes drawn on the view shown
+        let mut lines = if add { self.lines_picked() } else { Vec::new() };
+        for k in self.lines_in_box(rect, width, height) {
+            if !lines.contains(&k) {
+                lines.push(k);
+            }
+        }
+        if !lines.is_empty() || !add {
+            self.set_lines_picked(lines);
+        }
     }
 
     /// What is shown now, for undo.
@@ -4377,16 +4456,16 @@ impl App {
         if let Some(rows) = self.ifc_properties(p, l) {
             content = content.push(section("IFCX")).push(rows).push(rule::horizontal(1));
         }
+        // the sketch of a floor: its tools, first, so Finish and Cancel are in sight
+        if let Some(rows) = self.sketch_bar(p, l) {
+            content = content.push(section(l.text("Schets", "Sketch"))).push(rows).push(rule::horizontal(1));
+        }
         // a tool on: its type and sizes
         if let Some(rows) = self.placement_bar(p, l) {
             let name = self.modeller.tool.map_or("", |(t, _)| t.label(l));
             content = content.push(section(name)).push(rows).push(rule::horizontal(1));
         }
-        // the sketch of a floor: its tools
         if let Some(rows) = self.rebar_bar(l) { content = content.push(rows); }
-        if let Some(rows) = self.sketch_bar(p, l) {
-            content = content.push(section(l.text("Schets", "Sketch"))).push(rows).push(rule::horizontal(1));
-        }
         // a sheet of the file: its export
         if self.active_sheet.is_some() && self.active_doc_sheet.is_none() {
             content = content.push(section(l.text("Tekening", "Drawing"))).push(container(self.export_control(p, l)).padding([2, 8])).push(rule::horizontal(1));
@@ -4810,6 +4889,8 @@ impl App {
             Some(l.text("Wapeningsgebied · sluit op het beginpunt · Tab: klaar · Esc: annuleren","Reinforcement area · close at first point · Tab: finish · Esc: cancel").to_string())
         } else if let Some(hint) = self.grab_hint(l) {
             Some(hint)
+        } else if let Some(hint) = self.curtain_hint(l) {
+            Some(hint)
         } else if let Some(hint) = self.sketch_hint(l) {
             Some(hint)
         } else if let Some((edit, element)) = editing {
@@ -4932,7 +5013,7 @@ impl App {
                     view_proj: self.camera.view_proj(self.aspect()),
                     fill: p.surface,
                     ink: p.text_secondary,
-                    picked: self.picked_grid,
+                    picked: self.grids_picked(),
                     accent: p.accent,
                     seen: if self.shown_view().is_none() { self.heads_seen.1.clone() } else { Vec::new() },
                     dims: self.grid_dimensions(),
@@ -5002,6 +5083,7 @@ impl App {
             .push(editing)
             .push(temp_fields)
             .push(self.grid_series_overlay(p, l).filter(|_| overlay.is_none()))
+            .push(self.turn_overlay(p, l).filter(|_| overlay.is_none()))
             .push(boxed)
             .push(picking)
             .push(cube)
@@ -5036,6 +5118,7 @@ impl App {
             item(l.text("Laag selecteren", "Select layer"), "", MenuItem::SelectLayer, !self.sel.is_empty()),
             item(l.text("Selectie opheffen", "Clear selection"), "Esc", MenuItem::ClearSelection, selected),
             rule::horizontal(1),
+            item(l.text("Verwijderen", "Delete"), "Del", MenuItem::Delete, self.modeller.in_modeller && (!self.selected_modelled().is_empty() || !self.picked_modelled_grids().is_empty() || self.mark_pick.is_some())),
             item(l.text("Draaipunt hier plaatsen", "Set pivot here"), l.text("dubbelklik", "double click"), MenuItem::PivotHere, self.model.is_some()),
             item(l.text("Draaipunt opheffen", "Clear pivot"), "", MenuItem::ClearPivot, self.has_marked_pivot()),
             rule::horizontal(1),

@@ -200,6 +200,8 @@ struct Face<'a> {
     panel: (f64, Option<&'a str>),
     /// How it is carried over an opening (brickwork).
     lintel: Option<Lintel>,
+    /// The system's own grid, on a face with members on a stacked grid.
+    own: Option<&'a crate::element::OwnGrid>,
 }
 
 impl Face<'_> {
@@ -217,6 +219,12 @@ impl Face<'_> {
         if self.member.is_none() {
             let whole = |extent: f64, pitch: f64| count(((extent - LINEAR_TOLERANCE) / pitch).ceil());
             return (whole(length, self.spacing.x), whole(height, self.spacing.y), self.spacing.x, self.spacing.y);
+        }
+        // lines of its own: as many bays as they make, and the narrowest of them
+        if let Some(own) = self.own {
+            let (us, vs) = own.stops(length, height);
+            let least = |stops: &[f64]| stops.windows(2).map(|p| p[1] - p[0]).fold(f64::INFINITY, f64::min);
+            return (us.len() - 1, vs.len() - 1, least(&us), least(&vs));
         }
         // slabs are no longer than the grid's row: that is the longest they are made
         let rows = if self.whole { count(((height - LINEAR_TOLERANCE) / self.spacing.y).ceil()) } else { count((height / self.spacing.y).round()) };
@@ -241,13 +249,19 @@ impl Face<'_> {
     /// The lines between its bays along a face `length` long, from 0 to `length`. What is left
     /// beside the whole bays is wider than a member, or it goes with the bay next to it.
     fn lines(&self, length: f64) -> Vec<f64> {
-        self.cut(length, self.spacing.x, false)
+        match self.own {
+            Some(own) => own.stops(length, 0.0).0,
+            None => self.cut(length, self.spacing.x, false),
+        }
     }
 
     /// The lines between its rows up (or, lying, across) a face `height` high, from 0 to
     /// `height`: divided as its bays are, but rows of slabs equal and no longer than the grid's.
     fn rows(&self, height: f64) -> Vec<f64> {
-        self.cut(height, self.spacing.y, true)
+        match self.own {
+            Some(own) => own.stops(0.0, height).1,
+            None => self.cut(height, self.spacing.y, true),
+        }
     }
 
     /// The lines that divide `length` in bays of `p` (its rows, when `up`).
@@ -387,6 +401,8 @@ fn faces(s: &SystemDef) -> Vec<Face<'_>> {
         division: s.divided(),
         panel: (s.panel, t.map(|t| t.panel_material.as_str())),
         lintel: t.and_then(|t| t.lintel),
+        // (a framed or a bonded face keeps the grid of its type)
+        own: s.grid.as_ref().filter(|_| !s.lies() && t.is_none_or(|t| t.framing.is_none() && t.pattern == Pattern::Stack)),
     };
     let layers = t.into_iter().flat_map(|t| &t.layers).map(|l| Face {
         offset: l.offset,
@@ -400,6 +416,7 @@ fn faces(s: &SystemDef) -> Vec<Face<'_>> {
         division: Division::Equal,
         panel: (l.panels.thickness, Some(l.panels.material.as_str())),
         lintel: None,
+        own: None,
     });
     std::iter::once(own).chain(layers).collect()
 }
@@ -1117,9 +1134,19 @@ impl Line {
                     None => (0..bays).map(|i| (i as f64 * bay, bay)).collect(),
                 };
                 // (an air cavity between the members is no part)
-                for (u, du) in columns.into_iter().filter(|_| f.panel.1 != Some("air")) {
+                for (i, (u, du)) in columns.into_iter().enumerate().filter(|_| f.panel.1 != Some("air")) {
                     for j in 0..rows {
-                        parts.extend(panel(u, up(j), du, if f.member.is_some() { up(j + 1) - up(j) } else { row })?);
+                        let (v, dv) = (up(j), if f.member.is_some() { up(j + 1) - up(j) } else { row });
+                        match f.own.and_then(|own| own.panel(i, j)) {
+                            Some(crate::element::BayPanel::Open) => {}
+                            // a closed panel is a cladding of the members' material, a door a leaf
+                            Some(crate::element::BayPanel::Solid) => {
+                                let material = f.member.and_then(|(_, m)| m).map(str::to_string);
+                                parts.extend(panel(u, v, du, dv)?.into_iter().map(|p| PartSolid { class: "IfcCovering", material: material.clone(), ..p }));
+                            }
+                            Some(crate::element::BayPanel::Door) => parts.extend(panel(u, v, du, dv)?.into_iter().map(|p| PartSolid { class: "IfcDoor", material: None, ..p })),
+                            None => parts.extend(panel(u, v, du, dv)?),
+                        }
                     }
                 }
             }
@@ -1457,7 +1484,7 @@ mod tests {
     use super::*;
 
     fn system(length: f64, height: f64) -> SystemDef {
-        SystemDef { start: DVec2::ZERO, end: DVec2::new(length, 0.0), base: 0.0, height, spacing: DVec2::new(1.5, 1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), division: None }
+        SystemDef { start: DVec2::ZERO, end: DVec2::new(length, 0.0), base: 0.0, height, spacing: DVec2::new(1.5, 1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), division: None, grid: None }
     }
 
     fn typed(length: f64, height: f64, id: &str) -> SystemDef {
@@ -2066,6 +2093,40 @@ mod tests {
         let volume: f64 = parts.iter().filter(|p| p.class == "IfcMember").map(|p| p.solid.volume()).sum();
         let middle = (3.0 - w) * w * depth;
         assert!((volume - (ring(3.0, 3.0, w, depth) + middle)).abs() < 1e-9, "{volume}");
+    }
+
+    #[test]
+    fn a_curtain_wall_with_lines_of_its_own_has_its_members_there_and_bays_of_their_own() {
+        use crate::element::{BayPanel, OwnGrid};
+        // 6 by 3 in bays of 1.5: three lines along, one up, as lines of its own
+        let plain = system(6.0, 3.0);
+        let equal = OwnGrid::equal(6.0, 3.0, plain.spacing);
+        assert_eq!((equal.along.clone(), equal.up.clone()), (vec![1.5, 3.0, 4.5], vec![1.5]));
+        let same = SystemDef { grid: Some(equal.clone()), ..plain.clone() };
+        let volume = |s: &SystemDef| parts(s).unwrap().iter().map(|p| p.solid.volume()).sum::<f64>();
+        assert_eq!(parts(&same).unwrap().len(), parts(&plain).unwrap().len());
+        assert!((volume(&same) - volume(&plain)).abs() < 1e-9);
+        // a line moved, one taken away and one added: the members stand on them
+        let own = OwnGrid { along: vec![1.0, 4.5], up: vec![1.0, 2.0], panels: vec![(0, 0, BayPanel::Open), (1, 1, BayPanel::Solid)] };
+        let made = parts(&SystemDef { grid: Some(own.clone()), ..plain.clone() }).unwrap();
+        let members: Vec<_> = made.iter().filter(|p| p.class == "IfcMember").collect();
+        let panels: Vec<_> = made.iter().filter(|p| p.class == "IfcPlate" || p.class == "IfcCovering").collect();
+        assert_eq!(made.iter().filter(|p| p.class == "IfcCovering").count(), 1, "the closed bay");
+        // four vertical lines and three bays of four horizontal ones; nine bays less the open one
+        assert_eq!((members.len(), panels.len()), (4 + 3 * 4, 9 - 1));
+        let at = |x: f64| members.iter().any(|m| {
+            let (lo, hi) = m.solid.bounds();
+            (lo.x + hi.x) / 2.0 - x < 1e-9 && ((lo.x + hi.x) / 2.0 - x).abs() < 1e-9 && hi.z - lo.z > 2.9
+        });
+        assert!(at(1.0) && at(4.5) && !at(1.5) && !at(3.0));
+        // lines out of order or closer than a member is wide are refused
+        let bad = |along: Vec<f64>| parts(&SystemDef { grid: Some(OwnGrid { along, ..own.clone() }), ..plain.clone() });
+        assert_eq!(bad(vec![4.5, 1.0]).err(), Some(Refusal::NotPositive));
+        assert_eq!(bad(vec![1.0, 1.03]).err(), Some(Refusal::NotPositive));
+        assert_eq!(bad(vec![1.0, 6.5]).err(), Some(Refusal::NotPositive));
+        // and it is kept in the file
+        let s = SystemDef { grid: Some(own), ..plain };
+        assert_eq!(serde_json::from_str::<SystemDef>(&serde_json::to_string(&s).unwrap()).unwrap(), s);
     }
 
     #[test]
