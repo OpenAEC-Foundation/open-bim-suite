@@ -5,6 +5,7 @@
 
 use crate::document::{Dimension, Document, Note, SHEET_SCALE};
 use crate::drawing::Cut;
+use bim_library::drawing::{Drawn, Line};
 use std::sync::Arc;
 
 /// Text on paper: 2.5 mm capitals (metres).
@@ -74,13 +75,16 @@ impl Pen {
 /// ([`Rules::of`]). Without a kind it is drawn as drawings were before there was a standard.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Rules {
-    /// The width of what is cut (millimetres on paper).
-    pub cut: f64,
-    /// The width of what is seen beyond the cut (millimetres on paper).
-    pub beyond: f64,
-    /// What is hidden: dash, gap, dash, gap, ... (millimetres on paper); empty: a continuous
-    /// line.
-    pub hidden: Vec<f64>,
+    /// What is cut: its width and dashes (millimetres on paper) and its colour.
+    pub cut: Drawn,
+    /// What is seen beyond the cut.
+    pub beyond: Drawn,
+    /// What is hidden.
+    pub hidden: Drawn,
+    /// Grid lines and levels.
+    pub grid: Drawn,
+    /// The line of a section on a floor plan.
+    pub section: Drawn,
     /// The height of its texts and dimensions on paper (metres).
     pub text: f64,
     /// Whether what is cut is hatched by its material.
@@ -89,22 +93,36 @@ pub struct Rules {
 
 impl Default for Rules {
     fn default() -> Self {
-        Rules { cut: Pen::Cut.weight_mm(), beyond: Pen::Beyond.weight_mm(), hidden: vec![2.0, 1.0], text: TEXT, hatched: true }
+        let line = |width: f64, dashes: &[f64]| Drawn { width, dashes: dashes.to_vec(), colour: None };
+        Rules {
+            cut: line(Pen::Cut.weight_mm(), &[]),
+            beyond: line(Pen::Beyond.weight_mm(), &[]),
+            hidden: line(Pen::Beyond.weight_mm(), &[2.0, 1.0]),
+            grid: line(Pen::Grids.weight_mm(), &[8.0, 1.5, 0.35, 1.5]),
+            // a chain line, as a sheet's tab always drew it
+            section: line(Pen::Frame.weight_mm(), &[8.0, 1.5, 0.35, 1.5]),
+            text: TEXT,
+            hatched: true,
+        }
     }
 }
 
 impl Rules {
-    /// The rules of kind of drawing `kind` of `standard`: its pens' widths, the dashes of its
-    /// hidden line style at the width of what is seen beyond (a line style gives them as
-    /// multiples of the line's width), its text style's height and whether it hatches. A pen or
-    /// a style the standard no longer has leaves that rule as it is by default.
-    pub fn of(standard: &bim_library::drawing::Standard, kind: &bim_library::drawing::DrawingKind) -> Self {
+    /// The rules of kind of drawing `kind` of `standard` at `scale` (1 to this): each line in
+    /// the line style the kind gives it, at the width its pen has at that scale, or by the
+    /// kind's pens ([`bim_library::drawing::Standard::stroke`]); its text style's height and
+    /// whether it hatches. A line the kind says nothing of, or a pen or a style the standard
+    /// no longer has, leaves that rule as it is by default.
+    pub fn of(standard: &bim_library::drawing::Standard, kind: &bim_library::drawing::DrawingKind, scale: f64) -> Self {
         let plain = Rules::default();
-        let beyond = standard.pen(&kind.beyond).map_or(plain.beyond, |pen| pen.width);
+        let scale = if scale.is_finite() { scale.round().clamp(1.0, f64::from(u32::MAX)) as u32 } else { 1 };
+        let line = |line: Line, plain: Drawn| standard.stroke(kind, line, scale).unwrap_or(plain);
         Rules {
-            cut: standard.pen(&kind.cut).map_or(plain.cut, |pen| pen.width),
-            beyond,
-            hidden: standard.line_pattern(&kind.hidden).map_or(plain.hidden, |style| style.dashes.iter().map(|d| d * beyond).collect()),
+            cut: line(Line::Cut, plain.cut),
+            beyond: line(Line::Beyond, plain.beyond),
+            hidden: line(Line::Hidden, plain.hidden),
+            grid: line(Line::Grid, plain.grid),
+            section: line(Line::Section, plain.section),
             text: standard.text_style(&kind.text).map_or(plain.text, |style| style.height / 1000.0),
             hatched: kind.hatched,
         }
@@ -303,7 +321,8 @@ pub struct Drawing2d {
 impl Drawing2d {
     /// Draws grid lines and levels as the view's tab shows them: a grid with a bubble and its name
     /// past both ends, a level with its name and height past both ends.
-    pub fn datums(&mut self, datums: &[Datum2]) {
+    /// The lines as `grid` draws them: its width, its dashes on paper at every scale, its colour.
+    pub fn datums(&mut self, datums: &[Datum2], grid: &Drawn) {
         let unit = 1.0 / self.paper_per_unit();
         let (r, h) = (BUBBLE * unit, TEXT * unit);
         for d in datums {
@@ -313,16 +332,7 @@ impl Drawing2d {
                 continue;
             }
             let u = [dx / run, dy / run];
-            // A chain line uses the same paper pattern at every view scale.
-            let mut at = 0.0;
-            for (i, mm) in [8.0, 1.5, 0.35, 1.5].into_iter().cycle().enumerate() {
-                let end = (at + mm * unit / 1000.0).min(run);
-                if i % 2 == 0 {
-                    self.line(Pen::Grids, add(d.a, u, at), add(d.a, u, end));
-                }
-                at = end;
-                if at >= run { break; }
-            }
+            self.dashed(Pen::Grids, d.a, d.b, grid, unit / 1000.0, &mut 0.0);
             match d.level {
                 None => {
                     for (end, out) in [(d.a, [-u[0], -u[1]]), (d.b, u)] {
@@ -332,7 +342,7 @@ impl Drawing2d {
                             [c[0] + r * t.cos(), c[1] + r * t.sin()]
                         };
                         for k in 0..BUBBLE_SIDES {
-                            self.line(Pen::Grids, point(k), point(k + 1));
+                            self.line_as(Pen::Grids, point(k), point(k + 1), grid);
                         }
                         self.texts.push(Text2d { family: None, bold: false, color: None, pen: Pen::Grids, at: [c[0], c[1] - h / 2.0], height: h, text: d.name.clone(), align: Align::Center, angle: 0.0 });
                     }
@@ -407,9 +417,71 @@ impl Drawing2d {
         self.lines.push(Line2d::new(pen, a, b));
     }
 
-    /// A line in `pen`, `width` millimetres wide on paper.
-    fn line_wide(&mut self, pen: Pen, a: [f64; 2], b: [f64; 2], width: f64) {
-        self.lines.push(Line2d { pen, a, b, width, color: None });
+    /// A line in `pen`, as wide as `stroke` and in its colour, whole whatever its dashes.
+    fn line_as(&mut self, pen: Pen, a: [f64; 2], b: [f64; 2], stroke: &Drawn) {
+        self.lines.push(Line2d { pen, a, b, width: stroke.width, color: stroke.colour });
+    }
+
+    /// The line from `a` to `b` in `pen` as `stroke` draws it: whole, or in its dashes and gaps,
+    /// `per_mm` of the drawing's metres to a millimetre on paper. `phase` is how far into the
+    /// pattern the line begins (millimetres on paper) and is left where it ends, so the pieces
+    /// of one run carry the pattern on round a corner.
+    fn dashed(&mut self, pen: Pen, a: [f64; 2], b: [f64; 2], stroke: &Drawn, per_mm: f64, phase: &mut f64) {
+        let pattern: Vec<f64> = stroke.dashes.iter().map(|mm| mm * per_mm).collect();
+        let period: f64 = pattern.iter().sum();
+        let length = (b[0] - a[0]).hypot(b[1] - a[1]);
+        if period <= 0.0 || !period.is_finite() || pattern.iter().any(|part| *part < 0.0) || length <= 0.0 {
+            self.line_as(pen, a, b, stroke);
+            return;
+        }
+        let at = |d: f64| [a[0] + (b[0] - a[0]) * d / length, a[1] + (b[1] - a[1]) * d / length];
+        let (mut d, mut within) = (0.0, (*phase * per_mm).rem_euclid(period));
+        while d < length {
+            // the part of the pattern `within` is in (a dash when it is even), and how far that
+            // part still runs; at its very end the next one begins
+            let (mut part, mut from) = (0, 0.0);
+            while part + 1 < pattern.len() && within >= from + pattern[part] - period * 1e-6 {
+                from += pattern[part];
+                part += 1;
+            }
+            let step = (from + pattern[part] - within).max(period * 1e-6);
+            let end = (d + step).min(length);
+            if part % 2 == 0 {
+                self.line_as(pen, at(d), at(end), stroke);
+            }
+            within = (within + (end - d)) % period;
+            d = end;
+        }
+        *phase = within / per_mm;
+    }
+
+    /// `segments` of a view's drawing (cut back to `crop`, through `to`) in `pen` as `stroke`
+    /// draws them: each whole when the stroke is continuous, else run by run in its dashes, so
+    /// they run on round a curve of many short pieces.
+    fn stroked(&mut self, pen: Pen, segments: &[crate::drawing::Segment], crop: Option<([f64; 2], [f64; 2])>, to: &dyn Fn([f64; 2]) -> [f64; 2], stroke: &Drawn, per_mm: f64) {
+        let piece = |a: [f32; 2], b: [f32; 2]| {
+            let (a, b) = (a.map(f64::from), b.map(f64::from));
+            match crop {
+                Some((lo, hi)) => clip(a, b, lo, hi),
+                None => Some((a, b)),
+            }
+        };
+        if stroke.dashes.is_empty() {
+            for [a, b] in segments {
+                if let Some((a, b)) = piece(*a, *b) {
+                    self.line_as(pen, to(a), to(b), stroke);
+                }
+            }
+            return;
+        }
+        for run in crate::drawing::chained(segments) {
+            let mut phase = 0.0f64;
+            for pair in run.windows(2) {
+                if let Some((a, b)) = piece(pair[0], pair[1]) {
+                    self.dashed(pen, to(a), to(b), stroke, per_mm, &mut phase);
+                }
+            }
+        }
     }
 
     /// The widths its lines of `pen` have (millimetres on paper), the narrowest first: a
@@ -480,6 +552,7 @@ impl Drawing2d {
     /// A view's lines (cut back to its crop), dimensions and texts, through `to` (a point of the
     /// view's drawing to this drawing), `unit` drawing metres per paper metre, `per_metre` metres
     /// of the view's drawing per paper metre (its scale), drawn as `rules` say.
+    /// `to` keeps lengths but for that scale (it moves, turns and scales alike both ways).
     #[allow(clippy::too_many_arguments)]
     fn view(&mut self, cut: Option<&Cut>, crop: Option<([f64; 2], [f64; 2])>, marks: (&[Dimension], &[Note]), doc: &Document, to: &dyn Fn([f64; 2]) -> [f64; 2], unit: f64, per_metre: f64, rules: &Rules) {
         if let Some(cut) = cut {
@@ -497,61 +570,15 @@ impl Drawing2d {
                     }
                 }
             }
-            // what a structural plan sees through the floor, in the dashes and gaps of its line
-            // style on paper, run by run, so they run on round a curve of many short pieces
-            let pattern: Vec<f64> = rules.hidden.iter().map(|mm| mm / 1000.0 * per_metre).collect();
-            let period: f64 = pattern.iter().sum();
+            // every line as the view's kind of drawing draws it: what a structural plan sees
+            // through the floor in its hidden line, what is seen beyond the cut, what is cut
+            let per_mm = unit / 1000.0;
             for segments in [&cut.hidden, &cut.faint_hidden] {
-                for run in crate::drawing::chained(segments) {
-                    // how far into the pattern the run is
-                    let mut phase = 0.0f64;
-                    for pair in run.windows(2) {
-                        let (a, b) = ([pair[0][0] as f64, pair[0][1] as f64], [pair[1][0] as f64, pair[1][1] as f64]);
-                        let piece = match crop {
-                            Some((lo, hi)) => clip(a, b, lo, hi),
-                            None => Some((a, b)),
-                        };
-                        let Some((a, b)) = piece else { continue };
-                        // (a continuous line style: the piece whole)
-                        if period <= 0.0 {
-                            self.line_wide(Pen::Beyond, to(a), to(b), rules.beyond);
-                            continue;
-                        }
-                        let length = (b[0] - a[0]).hypot(b[1] - a[1]);
-                        let at = |d: f64| [a[0] + (b[0] - a[0]) * d / length, a[1] + (b[1] - a[1]) * d / length];
-                        let mut d = 0.0;
-                        while d < length {
-                            // the part of the pattern `phase` is in (a dash when it is even), and
-                            // how far that part still runs; at its very end the next one begins
-                            let (mut part, mut from) = (0, 0.0);
-                            while part + 1 < pattern.len() && phase >= from + pattern[part] - period * 1e-6 {
-                                from += pattern[part];
-                                part += 1;
-                            }
-                            let step = (from + pattern[part] - phase).max(period * 1e-6);
-                            let end = (d + step).min(length);
-                            if part % 2 == 0 {
-                                self.line_wide(Pen::Beyond, to(at(d)), to(at(end)), rules.beyond);
-                            }
-                            phase = (phase + (end - d)) % period;
-                            d = end;
-                        }
-                    }
-                }
+                self.stroked(Pen::Beyond, segments, crop, to, &rules.hidden, per_mm);
             }
             let inked = cut.inked.iter().map(|i| (if i.cut { Pen::Cut } else { Pen::Beyond }, &i.lines));
             for (pen, segments) in [(Pen::Beyond, &cut.faint_below), (Pen::Beyond, &cut.faint_segments), (Pen::Beyond, &cut.below), (Pen::Cut, &cut.segments)].into_iter().chain(inked) {
-                for [a, b] in segments {
-                    let (a, b) = ([a[0] as f64, a[1] as f64], [b[0] as f64, b[1] as f64]);
-                    let piece = match crop {
-                        Some((lo, hi)) => clip(a, b, lo, hi),
-                        None => Some((a, b)),
-                    };
-                    if let Some((a, b)) = piece {
-                        // what is cut and what is seen beyond it as wide as the view's kind draws them
-                        self.line_wide(pen, to(a), to(b), if pen == Pen::Cut { rules.cut } else { rules.beyond });
-                    }
-                }
+                self.stroked(pen, segments, crop, to, if pen == Pen::Cut { &rules.cut } else { &rules.beyond }, per_mm);
             }
         }
         let (dimensions, notes) = marks;
@@ -673,12 +700,18 @@ fn marks<'a>(doc: &'a Document, path: &str) -> (&'a [Dimension], Vec<Note>, Opti
     (dimensions, doc.view_notes(path).unwrap_or(&[]).iter().chain(doc.view_tags(path)).cloned().collect(), crop)
 }
 
+/// The scale view `path` is drawn at by itself (1 to this): that of the first sheet it is placed
+/// on, else its own.
+pub fn drawn_scale(doc: &Document, path: &str) -> f64 {
+    doc.sheets().iter().flat_map(|s| &s.views).find(|v| v.plan == path).map_or_else(|| doc.view_scale(path).unwrap_or(SHEET_SCALE), |v| v.scale)
+}
+
 /// The drawing of a floor plan, section or elevation (`path`) from its `cut`, with its dimensions
 /// and texts, at the scale of the first sheet it is placed on (else its own), cut back to its
 /// crop and drawn as `rules` say.
 pub fn view_drawing(doc: &Document, path: &str, cut: &Cut, rules: &Rules) -> Option<Drawing2d> {
     let name = doc.view_name(path)?.to_string();
-    let scale = doc.sheets().iter().flat_map(|s| &s.views).find(|v| v.plan == path).map_or_else(|| doc.view_scale(path).unwrap_or(SHEET_SCALE), |v| v.scale);
+    let scale = drawn_scale(doc, path);
     let (dimensions, notes, crop) = marks(doc, path);
     let mut d = Drawing2d { polygons: Vec::new(), images: Vec::new(), name, space: Space::Model { scale }, paper: None, lines: Vec::new(), texts: Vec::new(), dimensions: Vec::new() };
     if let Some(photo) = doc.plan(path).and_then(|p| p.orthophoto.as_ref()) { d.images.extend(photo.image.placed(crop, |q| q)); }
@@ -690,12 +723,12 @@ pub fn view_drawing(doc: &Document, path: &str, cut: &Cut, rules: &Rules) -> Opt
 /// The drawing of a sheet as its tab draws it: the paper's edge, its border and title, and each
 /// placed view's lines (`cut` gives a view's cut by its path), dimensions, texts, the marks of the
 /// sections on the floor plans, its name and scale. `rules` gives how a view is drawn, by its
-/// path.
-pub fn sheet_drawing(doc: &Document, path: &str, cut: &dyn Fn(&str) -> Option<Arc<Cut>>, datums: &dyn Fn(&str) -> Vec<Datum2>, rules: &dyn Fn(&str) -> Rules) -> Option<Drawing2d> {
+/// path and the scale it is placed at.
+pub fn sheet_drawing(doc: &Document, path: &str, cut: &dyn Fn(&str) -> Option<Arc<Cut>>, datums: &dyn Fn(&str) -> Vec<Datum2>, rules: &dyn Fn(&str, f64) -> Rules) -> Option<Drawing2d> {
     sheet_drawing_with_style(doc, &bim_library::house::HouseStyle::starter(), path, cut, datums, rules)
 }
 
-pub fn sheet_drawing_with_style(doc: &Document, style: &bim_library::house::HouseStyle, path: &str, cut: &dyn Fn(&str) -> Option<Arc<Cut>>, datums: &dyn Fn(&str) -> Vec<Datum2>, rules: &dyn Fn(&str) -> Rules) -> Option<Drawing2d> {
+pub fn sheet_drawing_with_style(doc: &Document, style: &bim_library::house::HouseStyle, path: &str, cut: &dyn Fn(&str) -> Option<Arc<Cut>>, datums: &dyn Fn(&str) -> Vec<Datum2>, rules: &dyn Fn(&str, f64) -> Rules) -> Option<Drawing2d> {
     let sheet = doc.sheet(path)?;
     let [w, h] = sheet.paper;
     let mut d = Drawing2d { polygons: Vec::new(), images: Vec::new(), name: sheet.title.clone(), space: Space::Paper, paper: Some(sheet.paper), lines: Vec::new(), texts: Vec::new(), dimensions: Vec::new() };
@@ -723,17 +756,18 @@ pub fn sheet_drawing_with_style(doc: &Document, style: &bim_library::house::Hous
             (None, None) => ([v.at[0] - 0.02, v.at[1] - 0.015], [v.at[0] + 0.02, v.at[1] + 0.015]),
         };
         let drawn = c.as_ref().is_some_and(|c| crate::drawing::drawn(c).next().is_some());
-        d.view(c.as_deref().filter(|_| drawn), crop, (dimensions, &notes), doc, &to, 1.0, v.scale, &rules(&v.plan));
+        let rules = rules(&v.plan, v.scale);
+        d.view(c.as_deref().filter(|_| drawn), crop, (dimensions, &notes), doc, &to, 1.0, v.scale, &rules);
         // the lines drawn on the view that are no model, and those the model draws by itself
         d.view_details(doc, &v.plan, &to);
         // its grid lines and levels, as its own tab shows them
         let placed: Vec<Datum2> = datums(&v.plan).into_iter().map(|m| Datum2 { a: to(m.a), b: to(m.b), ..m }).collect();
-        d.datums(&placed);
+        d.datums(&placed, &rules.grid);
         if doc.view_has_sheet_caption(&v.plan) && (!drawn || crop.is_some()) {
             d.rectangle(Pen::Frame, lo, hi);
         }
         for (label, a, b) in plan_sections(doc, &v.plan) {
-            section_mark(&mut d, to(a), to(b), label);
+            section_mark(&mut d, to(a), to(b), label, &rules.section);
         }
         if !doc.placed_view_has_title(v) { continue; }
         let name = doc.view_name(&v.plan).unwrap_or_default().to_string();
@@ -804,18 +838,18 @@ pub fn model_sheet_drawing(doc: &Document, sheet: &crate::model::Sheet, cut: &dy
     d
 }
 
-/// A section's mark on a floor plan (paper): its line, an arrow at each end the way it looks and
-/// its letter past them.
-fn section_mark(d: &mut Drawing2d, from: [f64; 2], to: [f64; 2], letter: String) {
+/// A section's mark on a floor plan (paper): its line as `stroke` draws it, an arrow at each end
+/// the way it looks and its letter past them.
+fn section_mark(d: &mut Drawing2d, from: [f64; 2], to: [f64; 2], letter: String, stroke: &Drawn) {
     let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
     let run = dx.hypot(dy);
     if run <= 0.0 {
         return;
     }
     let n = [-dy / run, dx / run];
-    d.line(Pen::Frame, from, to);
+    d.dashed(Pen::Frame, from, to, stroke, 0.001, &mut 0.0);
     for end in [from, to] {
-        d.line(Pen::Frame, end, add(end, n, ARROW));
+        d.line_as(Pen::Frame, end, add(end, n, ARROW), stroke);
         let at = add(end, n, ARROW * 1.8);
         d.text([at[0], at[1] - TEXT / 2.0], TEXT, letter.clone(), Align::Center);
     }
@@ -947,7 +981,7 @@ mod tests {
         doc.place_plan(&sheet, &plan).unwrap();
         doc.put_placed(&sheet, 0, [0.09, 0.12]);
         doc.put_placed(&sheet, 1, [0.28, 0.12]);
-        let render = |doc: &Document| sheet_drawing(doc, &sheet, &|_| None, &|_| vec![], &|_| Rules::default()).unwrap();
+        let render = |doc: &Document| sheet_drawing(doc, &sheet, &|_| None, &|_| vec![], &|_, _| Rules::default()).unwrap();
         let name = doc.view_name(&plan).unwrap().to_owned();
         let title_x = |d: &Drawing2d| d.texts.iter().filter(|t| t.text == name).map(|t| t.at[0]).collect::<Vec<_>>();
         let normal = render(&doc);
@@ -982,7 +1016,7 @@ mod tests {
         doc.place_plan(&sheet, &plan).unwrap();
         assert!(doc.move_placed(&sheet, 0, [0.2, 0.15]));
         let cut = Arc::new(room());
-        let d = sheet_drawing(&doc, &sheet, &|p| (p == plan).then(|| cut.clone()), &|_| Vec::new(), &|_| Rules::default()).unwrap();
+        let d = sheet_drawing(&doc, &sheet, &|p| (p == plan).then(|| cut.clone()), &|_| Vec::new(), &|_, _| Rules::default()).unwrap();
         assert_eq!(d.space, Space::Paper);
         // the room's middle (4, 2.5) stands at (0.2, 0.15); the 8 m wall is 8 cm long
         let wall = d.lines.iter().find(|l| l.pen == Pen::Cut && (l.a[1] - l.b[1]).abs() < 1e-12 && l.a[1] < 0.13).unwrap();
@@ -998,7 +1032,7 @@ mod tests {
     fn a_sheet_has_its_frame_and_title() {
         let mut doc = Document::default();
         let sheet = doc.add_sheet("Plattegronden");
-        let d = sheet_drawing(&doc, &sheet, &|_| None, &|_| Vec::new(), &|_| Rules::default()).unwrap();
+        let d = sheet_drawing(&doc, &sheet, &|_| None, &|_| Vec::new(), &|_, _| Rules::default()).unwrap();
         assert_eq!(d.paper, Some(A3_LANDSCAPE));
         let near = |p: [f64; 2], q: [f64; 2]| (p[0] - q[0]).abs() < 1e-12 && (p[1] - q[1]).abs() < 1e-12;
         assert!(d.lines.iter().any(|l| l.pen == Pen::Frame && near(l.a, [0.02, 0.01]) && near(l.b, [0.41, 0.01])), "{:?}", d.lines);
@@ -1040,18 +1074,74 @@ mod tests {
         let (mut doc, plan) = plan();
         let sheet = doc.add_sheet("Plattegronden");
         doc.place_plan(&sheet, &plan).unwrap();
-        let base = sheet_drawing(&doc, &sheet, &|_| None, &|_| Vec::new(), &|_| Rules::default()).unwrap();
+        let base = sheet_drawing(&doc, &sheet, &|_| None, &|_| Vec::new(), &|_, _| Rules::default()).unwrap();
         doc.add_section("Section A", [0.0, 2.0], [8.0, 2.0], 10.0).unwrap();
-        let d = sheet_drawing(&doc, &sheet, &|_| None, &|_| Vec::new(), &|_| Rules::default()).unwrap();
+        // the section's line continuous: the line and an arrow at each end
+        let whole = |colour| Rules { section: Drawn { width: 0.5, dashes: Vec::new(), colour }, ..Rules::default() };
+        let d = sheet_drawing(&doc, &sheet, &|_| None, &|_| Vec::new(), &|_, _| whole(Some([0, 0, 200]))).unwrap();
+        let marks: Vec<&Line2d> = d.lines.iter().filter(|l| l.color == Some([0, 0, 200])).collect();
+        assert!(marks.len() == 3 && marks.iter().all(|l| l.pen == Pen::Frame && l.width == 0.5), "{marks:?}");
+        // by itself a chain line, as the sheet's tab draws it: 8 m at 1:100 is 80 mm on paper,
+        // a long dash and a short one to every 11.35 mm begun, and the two arrows
+        let chain = sheet_drawing(&doc, &sheet, &|_| None, &|_| Vec::new(), &|_, _| Rules::default()).unwrap();
+        let scale = doc.sheet(&sheet).unwrap().views[0].scale;
+        let periods = 8000.0 / scale / 11.35;
+        assert!(count(&chain, Pen::Frame) as f64 >= count(&base, Pen::Frame) as f64 + 2.0 * periods.floor() + 2.0, "{} at 1:{scale}", count(&chain, Pen::Frame));
+        let d = sheet_drawing(&doc, &sheet, &|_| None, &|_| Vec::new(), &|_, _| whole(None)).unwrap();
         // a level of the view goes with it: its line and its name at both ends, at the view's place
-        let with = sheet_drawing(&doc, &sheet, &|_| None, &|_| vec![Datum2 { name: "01".into(), a: [-1.0, 3.0], b: [1.0, 3.0], level: Some(3.0) }], &|_| Rules::default()).unwrap();
+        let with = sheet_drawing(&doc, &sheet, &|_| None, &|_| vec![Datum2 { name: "01".into(), a: [-1.0, 3.0], b: [1.0, 3.0], level: Some(3.0) }], &|_, _| whole(None)).unwrap();
         assert!(count(&with, Pen::Grids) > count(&d, Pen::Grids));
         assert_eq!(with.texts.iter().filter(|t| t.text == "01 +3.000").count(), 2);
         assert_eq!(count(&d, Pen::Frame), count(&base, Pen::Frame) + 3);
         // cut: only what lies beyond is thin
         let cut = Arc::new(room());
-        let d = sheet_drawing(&doc, &sheet, &|p| (p == plan).then(|| cut.clone()), &|_| Vec::new(), &|_| Rules::default()).unwrap();
+        let d = sheet_drawing(&doc, &sheet, &|p| (p == plan).then(|| cut.clone()), &|_| Vec::new(), &|_, _| Rules::default()).unwrap();
         assert_eq!(count(&d, Pen::Beyond), 1, "{:?}", d.lines);
+    }
+
+    #[test]
+    fn lines_are_drawn_as_their_line_style_says() {
+        let (doc, plan) = plan();
+        // a cut of two cut lines round a corner, one edge beyond and one hidden
+        let cut = Cut {
+            segments: vec![[[0.0, 0.0], [4.0, 0.0]], [[4.0, 0.0], [4.0, 3.0]]],
+            below: vec![[[1.0, 1.0], [3.0, 1.0]]],
+            hidden: vec![[[0.0, 2.0], [4.0, 2.0]]],
+            extent: Some(([0.0, 0.0], [4.0, 3.0])),
+            ..Cut::default()
+        };
+        let line = |width: f64, dashes: &[f64], colour| Drawn { width, dashes: dashes.to_vec(), colour };
+        // what is cut red in dashes of 10 mm and gaps of 5 mm, what is seen beyond blue and whole
+        let rules = Rules { cut: line(0.7, &[10.0, 5.0], Some([200, 0, 0])), beyond: line(0.25, &[], Some([0, 0, 200])), hidden: line(0.13, &[1.0, 1.0], None), ..Rules::default() };
+        let d = view_drawing(&doc, &plan, &cut, &rules).unwrap();
+        let Space::Model { scale } = d.space else { panic!("a view's drawing is in the model's metres") };
+        let of = |pen: Pen, width: f64| d.lines.iter().filter(|l| l.pen == pen && l.width == width).collect::<Vec<_>>();
+        let length = |lines: &[&Line2d]| lines.iter().map(|l| (l.b[0] - l.a[0]).hypot(l.b[1] - l.a[1])).sum::<f64>();
+        // the 7 m of cut line is one run: two thirds of it drawn, and the pattern runs on round
+        // the corner instead of beginning again there
+        let cut_lines = of(Pen::Cut, 0.7);
+        assert!(cut_lines.iter().all(|l| l.color == Some([200, 0, 0])));
+        let (dash, period) = (0.010 * scale, 0.015 * scale);
+        let drawn: f64 = (0..).map(|k| k as f64 * period).take_while(|from| *from < 7.0).map(|from| (from + dash).min(7.0) - from).sum();
+        assert!((length(&cut_lines) - drawn).abs() < 1e-6, "{} of {drawn}", length(&cut_lines));
+        assert!(cut_lines.iter().all(|l| (l.b[0] - l.a[0]).hypot(l.b[1] - l.a[1]) <= dash + 1e-9));
+        // what is seen beyond whole and blue; what is hidden half drawn, in no colour of its own
+        let beyond = of(Pen::Beyond, 0.25);
+        assert!(beyond.len() == 1 && beyond[0].color == Some([0, 0, 200]) && beyond[0].a == [1.0, 1.0] && beyond[0].b == [3.0, 1.0], "{beyond:?}");
+        let hidden = of(Pen::Beyond, 0.13);
+        assert!(hidden.iter().all(|l| l.color.is_none()) && (length(&hidden) - 2.0).abs() < 0.002 * scale, "{}", length(&hidden));
+        // a writer gets the colours with the widths
+        assert!(d.strokes(Pen::Cut).iter().all(|(width, colour, _)| *width == 0.7 && *colour == [200, 0, 0]));
+        // grid lines in their own style: the width and colour of the bubbles too, and no dashes
+        // for a continuous one
+        let mut with = d.clone();
+        with.datums(&[Datum2 { name: "A".into(), a: [0.0, -1.0], b: [0.0, 6.0], level: Some(0.0) }], &line(0.35, &[], Some([0, 150, 0])));
+        let grids: Vec<&Line2d> = with.lines.iter().filter(|l| l.pen == Pen::Grids).collect();
+        assert!(grids.len() == 1 && grids[0].width == 0.35 && grids[0].color == Some([0, 150, 0]) && grids[0].b == [0.0, 6.0], "{grids:?}");
+        // a pattern that cannot be drawn (no length at all) draws the line whole
+        let mut odd = d.clone();
+        odd.datums(&[Datum2 { name: "A".into(), a: [0.0, -1.0], b: [0.0, 6.0], level: Some(0.0) }], &line(0.35, &[0.0, 0.0], None));
+        assert_eq!(odd.lines.iter().filter(|l| l.pen == Pen::Grids).count(), 1);
     }
 
     #[test]
@@ -1067,7 +1157,7 @@ mod tests {
         d.datums(&[
             Datum2 { name: "A".into(), a: [0.0, -1.0], b: [0.0, 6.0], level: None },
             Datum2 { name: "01".into(), a: [-1.0, 3.0], b: [9.0, 3.0], level: Some(3.0) },
-        ]);
+        ], &Rules::default().grid);
         let grid_lines = d.lines.iter().filter(|l| l.pen == Pen::Grids).count();
         // the two lines, and a round bubble at both ends of the grid
         assert!(grid_lines >= 2 + 2 * 16, "{grid_lines}");

@@ -173,7 +173,7 @@ impl App {
             let picked = pick_list(scales, now, |c: Choice| Message::ViewScale(c.key.parse().unwrap_or(100))).text_size(12).padding([2, 6]).width(Length::FillPortion(3));
             rows = rows.push(pick_row(p, l.text("Schaal", "Scale"), picked.into()));
             let rules = self.view_rules(&path);
-            rows = rows.push(row(l.text("Lijndiktes", "Line weights"), format!("{} / {} mm", rules.cut, rules.beyond)));
+            rows = rows.push(row(l.text("Lijndiktes", "Line weights"), format!("{} / {} mm", rules.cut.width, rules.beyond.width)));
             // the kind's own fields open under the view's: what is set there holds for every
             // drawing of the kind
             let open = self.standard_view.picked == Some(super::standards::Setting::Kind(kind.key.clone()));

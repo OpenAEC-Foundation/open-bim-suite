@@ -278,7 +278,7 @@ mod tests {
         assert!(doc.set_dimension_style_of(&plan,0,style_index));
         let sheet = doc.add_sheet("Foundation");
         doc.place_plan(&sheet,&plan);
-        let drawing = crate::drawing2d::sheet_drawing(doc,&sheet,&|_| None,&|_| vec![],&|_| Default::default()).unwrap();
+        let drawing = crate::drawing2d::sheet_drawing(doc,&sheet,&|_| None,&|_| vec![],&|_, _| Default::default()).unwrap();
         let label = drawing.dimensions[0].label();
         assert_eq!(label.family.as_deref(), Some("Arial Narrow"));
         assert!((label.height*72./0.0254-6.8).abs()<1e-9);

@@ -12,6 +12,9 @@
 //!   name ("hidden line", "centre line"): Revit's line style, and what a layer gives a line in
 //!   AutoCAD.
 //!
+//! A kind of drawing draws each of its lines ([`Line`]: what is cut, what is seen beyond, what is
+//! hidden, grid lines, section lines) in a line style, or by its pens ([`Standard::stroke`]).
+//!
 //! A standard belongs to a country. The suite starts with the Dutch one ([`Standard::netherlands`]):
 //!
 //! - The kinds, their views, scales and numbers are those of the drawings and sheets of the INB
@@ -182,6 +185,42 @@ pub struct Drawn {
     pub colour: Option<[u8; 3]>,
 }
 
+/// What a drawing draws a line for. A kind of drawing gives each a line style, or leaves it to
+/// its pens ([`Standard::stroke`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Line {
+    /// Where the plan's or section's plane cuts the model.
+    Cut,
+    /// What is seen beyond the cut.
+    Beyond,
+    /// What is hidden behind what is seen.
+    Hidden,
+    /// Grid lines and levels.
+    Grid,
+    /// The line of a section on a floor plan.
+    Section,
+}
+
+impl Line {
+    pub const ALL: [Line; 5] = [Line::Cut, Line::Beyond, Line::Hidden, Line::Grid, Line::Section];
+
+    /// Its name in a file: "cut", "grid".
+    pub fn key(self) -> &'static str {
+        match self {
+            Line::Cut => "cut",
+            Line::Beyond => "beyond",
+            Line::Hidden => "hidden",
+            Line::Grid => "grid",
+            Line::Section => "section",
+        }
+    }
+
+    pub fn of_key(key: &str) -> Option<Line> {
+        Line::ALL.into_iter().find(|line| line.key() == key)
+    }
+}
+
 /// A text style: a text height.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TextStyle {
@@ -215,6 +254,12 @@ pub struct DrawingKind {
     pub text: String,
     /// Whether what is cut is hatched by its material.
     pub hatched: bool,
+    /// The line style each line is drawn in, by its key. A line without one is drawn by the
+    /// pens above: what is cut and what is seen beyond continuous in their pen, what is hidden
+    /// in the pen of what is seen beyond; grid lines and section lines as a drawing draws them
+    /// by itself.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub lines: std::collections::BTreeMap<Line, String>,
     pub origin: Origin,
 }
 
@@ -289,6 +334,8 @@ impl Standard {
                 hidden: "dashed".into(),
                 text: "2.5".into(),
                 hatched: !matches!(view, View::Elevation | View::Model),
+                // what is cut and seen beyond by the pens of the scale; the rest by a line style
+                lines: [(Line::Hidden, "hidden"), (Line::Grid, "grid"), (Line::Section, "cutting-plane")].map(|(line, style)| (line, style.to_string())).into(),
                 origin,
             }
         };
@@ -387,6 +434,27 @@ impl Standard {
         Some(Drawn { width, dashes: self.line_pattern(&style.pattern)?.lengths(width), colour: style.colour })
     }
 
+    /// How kind of drawing `kind` draws `line` at `scale` (1 to this): by the line style the
+    /// kind gives that line; without one what is cut and what is seen beyond continuous in the
+    /// kind's pen for them at that scale, and what is hidden in the kind's line pattern for it,
+    /// as wide as what is seen beyond. None where the kind says nothing of the line (a grid
+    /// line or a section line without a line style), or names what the standard no longer has.
+    pub fn stroke(&self, kind: &DrawingKind, line: Line, scale: u32) -> Option<Drawn> {
+        if let Some(style) = kind.lines.get(&line) {
+            return self.drawn(style, scale);
+        }
+        let plain = |pen: &str| self.pen(pen).map(|pen| pen.width_at(scale));
+        match line {
+            Line::Cut => plain(&kind.cut).map(|width| Drawn { width, dashes: Vec::new(), colour: None }),
+            Line::Beyond => plain(&kind.beyond).map(|width| Drawn { width, dashes: Vec::new(), colour: None }),
+            Line::Hidden => {
+                let width = plain(&kind.beyond)?;
+                Some(Drawn { width, dashes: self.line_pattern(&kind.hidden)?.lengths(width), colour: None })
+            }
+            Line::Grid | Line::Section => None,
+        }
+    }
+
     /// The pen whose width is nearest `width` (millimetres on paper): the pen a line weight from
     /// elsewhere (a DXF's, a Revit file's) is drawn with. Of two as near, the narrower.
     pub fn nearest_pen(&self, width: f64) -> Option<&Pen> {
@@ -457,6 +525,9 @@ impl Standard {
             }
             if self.text_style(&kind.text).is_none() {
                 return Err(LibraryError::UnknownSetting(kind.text.clone()));
+            }
+            if let Some(style) = kind.lines.values().find(|style| self.line_style(style).is_none()) {
+                return Err(LibraryError::UnknownSetting(style.clone()));
             }
         }
         Ok(())
@@ -673,6 +744,40 @@ mod tests {
     }
 
     #[test]
+    fn a_kind_of_drawing_draws_its_lines_by_a_line_style_or_by_its_pens() {
+        let mut nl = Standard::netherlands();
+        let plan = nl.kind("floor-plan").unwrap().clone();
+        // what is cut and what is seen beyond by the kind's pens, continuous
+        assert_eq!(nl.stroke(&plan, Line::Cut, 50), Some(Drawn { width: 0.5, dashes: vec![], colour: None }));
+        assert_eq!(nl.stroke(&plan, Line::Beyond, 50), Some(Drawn { width: 0.25, dashes: vec![], colour: None }));
+        // what is hidden, grid lines and section lines by their line styles
+        assert_eq!(nl.stroke(&plan, Line::Hidden, 50), nl.drawn("hidden", 50));
+        assert_eq!(nl.stroke(&plan, Line::Grid, 50).map(|d| d.width), Some(0.18));
+        assert_eq!(nl.stroke(&plan, Line::Section, 50), nl.drawn("cutting-plane", 50));
+        // a kind without line styles (a file of before): hidden in its pattern, as wide as
+        // what is seen beyond; of grid lines and section lines it says nothing
+        let old = DrawingKind { lines: Default::default(), ..plan.clone() };
+        assert_eq!(nl.stroke(&old, Line::Hidden, 50), Some(Drawn { width: 0.25, dashes: vec![3.0, 0.75], colour: None }));
+        assert_eq!((nl.stroke(&old, Line::Grid, 50), nl.stroke(&old, Line::Section, 50)), (None, None));
+        // a line style for what is cut wins from the pen, with its colour and at the scale
+        nl.line_styles[2].colour = Some([200, 0, 0]);
+        nl.pens.iter_mut().find(|p| p.key == "0.5").unwrap().at = [(50, 0.5), (200, 0.35)].into();
+        let own = DrawingKind { lines: [(Line::Cut, "wide".to_string())].into(), ..old.clone() };
+        assert_eq!(nl.stroke(&own, Line::Cut, 50), Some(Drawn { width: 0.5, dashes: vec![], colour: Some([200, 0, 0]) }));
+        assert_eq!(nl.stroke(&own, Line::Cut, 200).map(|d| d.width), Some(0.35));
+        // the kind's own pen follows the scale too
+        assert_eq!(nl.stroke(&old, Line::Cut, 200).map(|d| d.width), Some(0.35));
+        // it is written with the kind and read back; a kind of before reads without
+        let text = serde_json::to_string(&own).unwrap();
+        assert!(text.contains(r#""lines":{"cut":"wide"}"#), "{text}");
+        assert_eq!(serde_json::from_str::<DrawingKind>(&text).unwrap(), own);
+        let before = serde_json::to_string(&old).unwrap();
+        assert!(!before.contains("lines"));
+        assert_eq!(serde_json::from_str::<DrawingKind>(&before).unwrap(), old);
+        assert_eq!(Line::ALL.map(|line| Line::of_key(line.key())), Line::ALL.map(Some));
+    }
+
+    #[test]
     fn a_standard_is_checked() {
         let nl = Standard::netherlands();
         let with = |change: &dyn Fn(&mut Standard)| {
@@ -693,6 +798,9 @@ mod tests {
         assert_eq!(with(&|s| s.line_styles[1].key = "thin".into()), Err(LibraryError::Duplicate("thin".into())));
         // the pattern of a line style stays while the style is there
         assert_eq!(with(&|s| s.line_patterns.retain(|p| p.key != "long-double-short")), Err(LibraryError::UnknownSetting("long-double-short".into())));
+        // a kind draws a line in a line style the standard has, and that style stays meanwhile
+        assert_eq!(with(&|s| s.kinds[1].lines = [(Line::Cut, "wavy".to_string())].into()), Err(LibraryError::UnknownSetting("wavy".into())));
+        assert_eq!(with(&|s| s.line_styles.retain(|l| l.key != "grid")), Err(LibraryError::UnknownSetting("grid".into())));
         // a pen's width at a scale is a width
         assert_eq!(with(&|s| s.pens[0].at = [(100, 0.0)].into()), Err(LibraryError::NotPositive));
         assert_eq!(with(&|s| s.pens[0].at = [(0, 0.1)].into()), Err(LibraryError::NotPositive));
@@ -768,6 +876,11 @@ mod tests {
         // a file from before line styles reads as a standard without them
         let mut old = file(&[nl.clone()], "s.ifcx", "test", "2026-11-23T00:00:00Z");
         old["data"].as_array_mut().unwrap().retain(|node| node["attributes"].get(LINE_STYLE).is_none());
+        for node in old["data"].as_array_mut().unwrap() {
+            if let Some(kind) = node["attributes"].get_mut(KIND).and_then(|kind| kind.as_object_mut()) {
+                kind.remove("lines");
+            }
+        }
         let read_back = read(&old).unwrap();
         assert!(read_back[0].line_styles.is_empty() && read_back[0].line_patterns.len() == 15);
     }

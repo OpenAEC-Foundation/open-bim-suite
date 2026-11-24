@@ -2048,6 +2048,10 @@
     "from height": "aus Höhe",
     "Railing": "Geländer",
     "Square only": "Nur rechtwinklig",
-    "Draw only level and upright from the last point; off: any angle": "Nur waagerecht und senkrecht vom letzten Punkt zeichnen; aus: jeder Winkel"
+    "Draw only level and upright from the last point; off: any angle": "Nur waagerecht und senkrecht vom letzten Punkt zeichnen; aus: jeder Winkel",
+    "Line style per line": "Linienstil je Linie",
+    "by the pens above": "nach den Stiften oben",
+    "Grid and level": "Raster und Ebene",
+    "Section line": "Schnittlinie"
   }
 }

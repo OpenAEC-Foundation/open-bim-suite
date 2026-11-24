@@ -486,7 +486,7 @@ impl App {
                     caption: self.document.placed_view_has_title(v),
                     is_plan: self.document.plan(&v.plan).is_some(),
                     sections: crate::drawing2d::plan_sections(&self.document, &v.plan),
-                    rules: self.view_rules(&v.plan),
+                    rules: self.view_rules_at(&v.plan, v.scale),
                 }
             })
             .collect();
@@ -707,6 +707,21 @@ struct Placed {
     /// How its kind of drawing draws it: the widths of its lines, and whether what is cut is
     /// hatched.
     rules: crate::drawing2d::Rules,
+}
+
+/// The stroke of a line as its line style draws it on a sheet shown `scale` pixels to a metre of
+/// paper: its width, its colour where it has one (else `plain`) and its dashes (`dash`, made by
+/// [`dashes_on_screen`]).
+fn stroke_of<'a>(line: &bim_library::drawing::Drawn, plain: Color, scale: f64, dash: &'a [f32]) -> Stroke<'a> {
+    let color = line.colour.map_or(plain, |c| Color { a: plain.a, ..Color::from_rgb8(c[0], c[1], c[2]) });
+    let mut stroke = Stroke::default().with_color(color).with_width(on_screen(scale, line.width));
+    stroke.line_dash = canvas::LineDash { segments: dash, offset: 0 };
+    stroke
+}
+
+/// The dashes and gaps of a line style in logical canvas pixels.
+fn dashes_on_screen(line: &bim_library::drawing::Drawn, scale: f64) -> Vec<f32> {
+    line.dashes.iter().map(|mm| on_screen(scale, *mm)).collect()
 }
 
 /// Converts a paper line weight in millimetres to logical canvas pixels.
@@ -1237,14 +1252,16 @@ impl canvas::Program<Message> for PaperDrawing {
                             b.line_to(fit.point(self.to_paper(i, z)));
                         }
                     });
-                    frame.stroke(&below, Stroke::default().with_color(Color { a: 0.55, ..ink }).with_width(on_screen(fit.scale, placed.rules.beyond)));
+                    // each as the view's kind of drawing draws it at the scale it is placed at
+                    let (cut_dash, beyond_dash) = (dashes_on_screen(&placed.rules.cut, fit.scale), dashes_on_screen(&placed.rules.beyond, fit.scale));
+                    frame.stroke(&below, stroke_of(&placed.rules.beyond, Color { a: 0.55, ..ink }, fit.scale, &beyond_dash));
                     let lines = Path::new(|b| {
                         for (a, z) in cut.segments.iter().filter_map(|[a, z]| piece(a, z)) {
                             b.move_to(fit.point(self.to_paper(i, a)));
                             b.line_to(fit.point(self.to_paper(i, z)));
                         }
                     });
-                    frame.stroke(&lines, Stroke::default().with_color(ink).with_width(on_screen(fit.scale, placed.rules.cut)));
+                    frame.stroke(&lines, stroke_of(&placed.rules.cut, ink, fit.scale, &cut_dash));
                     // the lines the view's filters give a pen of their own
                     for inked in &cut.inked {
                         let lines = Path::new(|b| {
@@ -1253,7 +1270,7 @@ impl canvas::Program<Message> for PaperDrawing {
                                 b.line_to(fit.point(self.to_paper(i, z)));
                             }
                         });
-                        let (plain, width) = if inked.cut { (ink, on_screen(fit.scale, placed.rules.cut)) } else { (Color { a: 0.55, ..ink }, on_screen(fit.scale, placed.rules.beyond)) };
+                        let (plain, width) = if inked.cut { (ink, on_screen(fit.scale, placed.rules.cut.width)) } else { (Color { a: 0.55, ..ink }, on_screen(fit.scale, placed.rules.beyond.width)) };
                         let color = inked.ink.color.map_or(plain, |c| Color::from_rgb8(c[0], c[1], c[2]));
                         frame.stroke(&lines, Stroke::default().with_color(color).with_width(inked.ink.wide(width, inked.cut)));
                     }
@@ -1284,7 +1301,7 @@ impl canvas::Program<Message> for PaperDrawing {
             super::marks::draw_detail_lines(&mut frame, &placed.lines, &placed.pens, placed.crop, ink, &|q| Some(fit.point(self.to_paper(i, q))), (fit.scale / 1000.0) as f32);
             for d in &placed.datums {
                 let (a, b) = (fit.point(self.to_paper(i, d.a)), fit.point(self.to_paper(i, d.b)));
-                super::marks::draw_datum(&mut frame, a, b, &d.name, d.level.is_some(), (fit.scale / 1000.0) as f32, ink, Color::WHITE);
+                super::marks::draw_datum(&mut frame, a, b, &d.name, d.level.is_some(), (fit.scale / 1000.0) as f32, &placed.rules.grid, ink, Color::WHITE);
             }
             for (k, note) in placed.notes.iter().enumerate() {
                 if crate::drawing2d::crop_segment(note.at, note.at, placed.crop).is_none() { continue; }
@@ -1298,7 +1315,7 @@ impl canvas::Program<Message> for PaperDrawing {
             }
             // the sections drawn on this floor plan
             for (label, from, to) in &placed.sections {
-                draw_section_mark(&mut frame, &fit, self.to_paper(i, *from), self.to_paper(i, *to), label.clone(), ink);
+                draw_section_mark(&mut frame, &fit, self.to_paper(i, *from), self.to_paper(i, *to), label.clone(), &placed.rules.section, ink);
             }
             if !placed.caption { continue; }
             let under = fit.point([lo[0], lo[1] - 0.009]);
@@ -1339,7 +1356,7 @@ impl canvas::Program<Message> for PaperDrawing {
                 frame.stroke(&Path::circle(c, 4.0), Stroke::default().with_color(p.accent).with_width(1.5));
                 if let Some((j, from)) = state.first.filter(|(j, _)| *j == i) {
                     if self.section_tool {
-                        draw_section_mark(&mut frame, &fit, self.to_paper(j, from), self.to_paper(i, q), String::new(), p.accent);
+                        draw_section_mark(&mut frame, &fit, self.to_paper(j, from), self.to_paper(i, q), String::new(), &crate::drawing2d::Rules::default().section, p.accent);
                     } else {
                         let length = Dimension { from, to: q, style: 0, anchors: [None, None], chain: None }.length();
                         draw_dimension(&mut frame, &fit, self.to_paper(j, from), self.to_paper(i, q), length, p.accent, &self.styles[0]);
@@ -1376,20 +1393,24 @@ impl canvas::Program<Message> for PaperDrawing {
 
 /// A section's line on a floor plan between two paper points: dash-dot, with its letter at both
 /// ends and an arrow at each end towards where it looks (its left).
-fn draw_section_mark(frame: &mut Frame, fit: &Fit, from: [f64; 2], to: [f64; 2], letter: String, color: Color) {
+/// A section's mark on a sheet: its line as `line` draws it (in its colour where it has one,
+/// else `color`), an arrow at each end the way it looks and its letter past them.
+fn draw_section_mark(frame: &mut Frame, fit: &Fit, from: [f64; 2], to: [f64; 2], letter: String, line: &bim_library::drawing::Drawn, color: Color) {
     let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
     let run = dx.hypot(dy);
     if run <= 0.0 {
         return;
     }
     let n = [-dy / run, dx / run];
-    let mut line = Stroke::default().with_color(color).with_width(1.0);
-    line.line_dash = canvas::LineDash { segments: &[10.0, 3.0, 2.0, 3.0], offset: 0 };
-    frame.stroke(&Path::line(fit.point(from), fit.point(to)), line);
+    let dash = dashes_on_screen(line, fit.scale);
+    let color = line.colour.map_or(color, |c| Color::from_rgb8(c[0], c[1], c[2]));
+    let stroke = stroke_of(line, color, fit.scale, &dash);
+    let width = stroke.width;
+    frame.stroke(&Path::line(fit.point(from), fit.point(to)), stroke);
     let arrow = 0.005;
     for end in [from, to] {
         let tip = [end[0] + n[0] * arrow, end[1] + n[1] * arrow];
-        frame.stroke(&Path::line(fit.point(end), fit.point(tip)), Stroke::default().with_color(color).with_width(1.6));
+        frame.stroke(&Path::line(fit.point(end), fit.point(tip)), Stroke::default().with_color(color).with_width(width * 1.6));
         if !letter.is_empty() {
             let at = fit.point([end[0] + n[0] * arrow * 1.8, end[1] + n[1] * arrow * 1.8]);
             frame.fill_text(canvas::Text {

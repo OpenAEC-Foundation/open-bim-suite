@@ -64,10 +64,41 @@ The table is a proposal. The uses of the ISO line types and the names of Revit's
 styles were written from memory; neither a Revit template nor NEN's drawing standards were read
 for it. An office changes every row in the Library product.
 
+## What a drawing draws with
+
+A kind of drawing (`DrawingKind::lines`) gives a line a line style, by what the line is drawn
+for (`Line`):
+
+| Line | What it is | Without a style |
+|---|---|---|
+| `cut` | Where the plane of a plan or section cuts the model | The kind's cut pen, continuous |
+| `beyond` | What is seen beyond the cut | The kind's beyond pen, continuous |
+| `hidden` | What a structural plan sees through the floor | The kind's hidden line pattern, as wide as what is seen beyond |
+| `grid` | Grid lines and levels, with their bubbles | 0.18 mm, dashes of 8 and 0.35 mm with gaps of 1.5 mm |
+| `section` | The line of a section on a floor plan, with its arrows | 0.35 mm, the same dashes |
+
+- `Standard::stroke(kind, line, scale)` gives the line as it is drawn: the width its pen has at
+  that scale, its dashes in millimetres on paper and its colour.
+- The scale is the one the view is drawn at: on a sheet the scale it is placed at, by itself
+  that of the first sheet it is on, else its own. A pen with another width at a scale
+  (`Pen::at`) so draws the same view narrower at 1:200 than at 1:50.
+- Every exported drawing (DWG, DXF, IFCCAD, PDF, PNG, SVG) and the sheet's tab draw that way;
+  a view's own tab draws its grid lines and levels that way.
+- Dashes are laid run by run: lines that meet end to end carry the pattern on round the corner.
+- The starter kinds give `hidden` the style `hidden`, `grid` the style `grid` and `section`
+  the style `cutting-plane`. What is cut and what is seen beyond stay with the pens the kind
+  picks for its scale (0.7 and 0.35 up to 1:20, 0.5 and 0.25 up to 1:50, 0.35 and 0.18 beyond).
+- A file written before has kinds without line styles and draws as it did, with one change: a
+  section's line on an exported sheet is now the chain line the sheet's tab always showed.
+- A line style a kind draws with cannot be removed from the standard.
+
 ## Not yet
 
-- No drawing draws by a line style: a kind of drawing still picks the pens of what is cut and
-  seen and the pattern of what is hidden itself, and a view template names pens.
+- A view's own tab draws what is cut and seen as the 3D view does, not by the kind's styles.
+- The sheet's tab does not draw hidden lines at all (as before); an exported drawing does.
+- Lines a view's filters give a pen of their own take the width of the kind's line, not its
+  dashes; hatches, dimensions, texts and detail lines have no line style of the kind.
+- A view template names pens, not line styles.
 - Revit's object styles (a weight, a colour and a pattern per category, cut and projected) are
   not here.
 - The readers of Revit and DXF files do not map their line patterns and weights onto the
