@@ -40,6 +40,7 @@ pub mod drawn_props;
 mod edit;
 mod element_drawing;
 mod element_props;
+pub(crate) mod rebar;
 mod grips;
 mod openings;
 #[cfg(test)]
@@ -1020,6 +1021,12 @@ pub enum Message {
     LevelEdit(modeller::levels::LevelEditMessage),
     /// Switch the Modeller's Grid tool on or off.
     GridTool,
+    /// Switches a reinforcement tool on or off.
+    RebarTool(rebar::RebarTool),
+    /// Takes away one of the selected element's extras (stirrups or bars over a stretch, bars
+    /// along a line), or makes it the next of its forms (below or on top, or hairpins).
+    ExtraRemove(usize),
+    ExtraForm(usize),
     /// The Modeller's Select tool: every other tool off.
     SelectTool,
     /// A key of the Modeller (see modeller::keys), with the interface language its tools are named in.
@@ -2312,6 +2319,9 @@ impl App {
             Message::Reinforcement(action) => self.rebar_action(action),
             Message::ModelTool(tool) => self.start_model_tool(tool),
             Message::GridTool => self.toggle_grid_tool(),
+            Message::RebarTool(tool) => self.toggle_rebar_tool(tool),
+            Message::ExtraRemove(k) => self.remove_extra(k),
+            Message::ExtraForm(k) => self.next_extra_form(k),
             Message::SelectTool => self.select_tool(),
             Message::ModelKey(key, l) => self.model_key(key, l),
             Message::LevelEdit(message) => self.level_edit_message(message),
@@ -2645,7 +2655,7 @@ impl App {
                         self.select_box(rect, width, height, add);
                     }
                 }
-                Navigate::Hover { x, y, width, height } if self.rebar_hover(x,y,width,height) => {}
+                Navigate::Hover { x, y, width, height } if self.rebar_hover(x, y, width, height) || self.rebar_area_hover(x, y, width, height) => {}
                 Navigate::Hover { x, y, width, height } if self.grab_hover(x, y, width, height) => {}
                 Navigate::Hover { x, y, width, height } if self.sketch_hover(x, y, width, height) => {}
                 Navigate::Hover { x, y, width, height } if self.edit_hover(x, y, width, height) => {}
@@ -2659,6 +2669,7 @@ impl App {
                 }
                 Navigate::HoverOff => {
                     self.modeller.cursor = None;
+                    self.modeller.rebar_at = None;
                     self.modeller.aim = None;
                     if let Some(sketch) = &mut self.modeller.sketch { sketch.cursor = None; }
                     self.hover_request = None;
@@ -3319,6 +3330,7 @@ impl App {
             // Esc drops a length being typed first; the tool goes on drawing
             Message::Escape if !self.modeller.length_typed.is_empty() => self.modeller.length_typed.clear(),
             Message::Escape if self.modeller.grid_tool => self.escape_grid_tool(),
+            Message::Escape if self.modeller.rebar_tool.is_some() => self.escape_rebar_tool(),
             Message::Escape if self.modeller.tool.is_some() || self.modeller.refusal.is_some() => {
                 if !self.escape_model_tool() {
                     self.modeller.refusal = None;
@@ -3495,6 +3507,9 @@ impl App {
         if self.modeller.curtain.is_some() {
             return self.curtain_click(x, y, width, height, add);
         }
+        if self.modeller.rebar_on.is_some() {
+            return self.rebar_second(x, y, width, height);
+        }
         if self.modeller.tool.is_some() {
             return self.model_click(x, y, width, height);
         }
@@ -3543,7 +3558,9 @@ impl App {
         // selection
         let mm = self.model_matrix();
         let triangle = hit.and_then(|(l, t, s)| face_at(&model.layers[l], t, origin - s, dir).map(|(p, _)| mm.transform_point3(p + s)));
-        if let Some(g) = self.grid_under(x, y, width, height, triangle) {
+        // (a reinforcement tool takes the element under the cursor, also where a grid line lies on it)
+        let reinforcing = self.modeller.rebar_tool.is_some();
+        if let Some(g) = self.grid_under(x, y, width, height, triangle).filter(|_| !reinforcing) {
             // with Shift or Ctrl it joins the grid lines picked, or leaves them
             if add {
                 let mut grids = self.grids_picked();
@@ -3555,7 +3572,7 @@ impl App {
             }
             return self.pick_grid(Some(g));
         }
-        if let Some(h) = self.pick_structural(x, y, width, height, triangle) {
+        if let Some(h) = self.pick_structural(x, y, width, height, triangle).filter(|_| !reinforcing) {
             self.click_structural(h.element, add);
             return;
         }
@@ -3567,6 +3584,10 @@ impl App {
             }
         }
         self.click(hit.map(|(l, t, _)| pickable_at(&model, l, t)), add);
+        // a reinforcement tool: what is clicked is reinforced, or its stretch or line starts there
+        if let Some(tool) = self.modeller.rebar_tool {
+            self.rebar_first(tool, x, y, width, height);
+        }
     }
 
     /// Selects the element of triangle `t` of layer `l` (the whole layer without elements), or
@@ -4789,7 +4810,7 @@ impl App {
             drag_selects: self.drag_selects(),
             cursor3d: self.has_cursor3d(),
             buttons: self.mouse_buttons,
-            hover: (self.measure.tool.is_some() || self.structural_hover_on() || self.edit_follows_cursor() || self.modeller.sketch.is_some() || self.modeller.grab.is_some() || self.modeller.tool.is_some() || self.modeller.grid_tool || self.copying() || self.modeller.rebar_edit.is_some()) && !self.plane_picking,
+            hover: (self.measure.tool.is_some() || self.structural_hover_on() || self.edit_follows_cursor() || self.modeller.sketch.is_some() || self.modeller.grab.is_some() || self.modeller.tool.is_some() || self.modeller.grid_tool || self.copying() || self.modeller.rebar_edit.is_some() || self.modeller.rebar_on.is_some()) && !self.plane_picking,
             crosshair: (self.measure.tool.is_some() && !self.plane_picking) || (self.shown_view().is_some() && (self.dimension_tool || self.note_tool)),
             structural_selected: &self.structural.selected_marks,
             structural_hovered: &self.structural.hovered_marks,
@@ -4906,6 +4927,12 @@ impl App {
             Some(hint)
         } else if let Some(hint) = self.grid_hint(l) {
             Some(hint)
+        } else if let Some(tool) = self.modeller.rebar_tool {
+            let (word, hint) = (tool.label(l), tool.hint(l, self.modeller.rebar_on.is_some()));
+            Some(match self.modeller.refusal {
+                Some(refusal) => format!("{word}: {} · {hint}", l.translate(refusal.reason())),
+                None => format!("{word}: {hint}"),
+            })
         } else if let Some((tool, _)) = self.modeller.tool {
             let hint = tool.hint(l, self.modeller.points.len());
             Some(match self.modeller.refusal {

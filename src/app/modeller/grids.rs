@@ -351,6 +351,7 @@ impl App {
         let on = !self.modeller.grid_tool;
         self.set_model_tool(None);
         self.modeller.grid_tool = on;
+        self.modeller.rebar_tool = None;
         if on {
             self.measure.tool = None;
             self.plane_picking = false;

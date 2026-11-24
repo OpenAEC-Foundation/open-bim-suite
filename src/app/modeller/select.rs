@@ -10,6 +10,9 @@ impl App {
         self.set_model_tool(None);
         self.modeller.grid_tool = false;
         self.modeller.curtain = None;
+        self.modeller.rebar_tool = None;
+        self.modeller.rebar_on = None;
+        self.modeller.rebar_at = None;
         self.modeller.points.clear();
         self.modeller.cursor = None;
         self.modeller.transform = None;
@@ -26,6 +29,7 @@ impl App {
         self.modeller.tool.is_none()
             && !self.modeller.grid_tool
             && self.modeller.curtain.is_none()
+            && self.modeller.rebar_tool.is_none()
             && self.modeller.transform.is_none()
             && self.modeller.edit.is_none()
             && self.modeller.sketch.is_none()

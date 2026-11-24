@@ -82,7 +82,7 @@ mod tests {
     use bim_library::Library;
 
     fn frame(length: f64, id: &str) -> (Model, crate::ElementId) {
-        let generic = SystemDef { start: DVec2::new(2.0, 1.0), end: DVec2::new(2.0, 1.0 + length), base: 0.5, height: 2.7, spacing: DVec2::new(1.5, 1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), division: None };
+        let generic = SystemDef { grid: None, start: DVec2::new(2.0, 1.0), end: DVec2::new(2.0, 1.0 + length), base: 0.5, height: 2.7, spacing: DVec2::new(1.5, 1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), division: None };
         let s = generic.typed_from(&Library::starter(), id).unwrap();
         let mut m = Model::new(TileGrid::default());
         let grid = m.grid;

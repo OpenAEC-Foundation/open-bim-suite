@@ -659,7 +659,7 @@ impl App {
         let sketch = self.modeller.sketch.as_ref()?;
         let own = sketch.points().into_iter().filter(|p| but.is_none_or(|b| b.distance(*p) > MEET));
         // a floor's sketch takes the points of other elements too, in plan; a wall's its own
-        let others: Vec<DVec2> = if sketch.face.is_none() { self.snap_points_except(sketch.element).into_iter().map(|q| q.truncate()).collect() } else { Vec::new() };
+        let others: Vec<DVec2> = if sketch.face.is_none() { self.snap_points_except(sketch.element.unwrap_or(ElementId(0))).into_iter().map(|q| q.truncate()).collect() } else { Vec::new() };
         let near = own
             .chain(others)
             .filter_map(|q| self.on_screen(sketch.lift(q), width, height).map(|s| (q, (s.0 - x).hypot(s.1 - y))))

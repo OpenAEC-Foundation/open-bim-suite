@@ -235,6 +235,13 @@ pub struct Modeller {
     pub level: Option<String>,
     /// The Grid tool is on: two clicks draw a grid line (see `grids`).
     pub grid_tool: bool,
+    /// The reinforcement tool that is on (see `rebar`), and the element its first click was on:
+    /// that click's place is the first of `points`.
+    pub rebar_tool: Option<super::rebar::RebarTool>,
+    pub rebar_on: Option<ElementId>,
+    /// Where the stretch or the line under way would end with a click where the cursor is
+    /// (see `rebar::App::rebar_place`): the preview runs to it.
+    pub rebar_at: Option<DVec3>,
     /// The points clicked so far for the tool (scene coordinates).
     pub points: Vec<DVec3>,
     /// The viewer model that shows the elements (its id), an entry of `App::models`.
@@ -253,7 +260,7 @@ pub struct Modeller {
     pub pile_schedule: String,
     /// What the bar schedule, its columns and its kinds of bar are called, in the interface
     /// language (see `structure::BAR_WORDS`), and the name the schedule has now.
-    pub bar_words: [&'static str; 11],
+    pub bar_words: [&'static str; 19],
     pub bar_schedule: String,
     /// The same of the precast schedule (see `structure::PLANK_WORDS`).
     pub plank_words: [&'static str; 8],
@@ -265,7 +272,7 @@ pub struct Modeller {
     /// The kind of snap that took the cursor's point where it is, for its mark; and what that
     /// kind is called, in the interface language.
     pub snap_mark: Option<snaps::Snap>,
-    pub snap_words: [&'static str; 7],
+    pub snap_words: [&'static str; 8],
     /// The series of grid lines being typed beside the picked one (see `grids`); `None`: closed.
     pub grid_series: Option<String>,
     /// The tool on the grid of curtain walls that is on (see `curtain`).
@@ -422,6 +429,9 @@ impl App {
         self.modeller.tool = if same { None } else { tool };
         self.modeller.length_typed.clear();
         self.modeller.grid_tool = false;
+        self.modeller.rebar_tool = None;
+        self.modeller.rebar_on = None;
+        self.modeller.rebar_at = None;
         self.modeller.points.clear();
         self.modeller.cursor = None;
         self.modeller.aim = None;
@@ -1023,7 +1033,7 @@ impl App {
         self.modeller.touched = true;
         self.issue_pile_numbers();
         let levels: Vec<(String, String)> = self.document.levels().iter().map(|l| (l.path.clone(), l.name.clone())).collect();
-        let (mut layers, parts, assemblies) = viewer_layers(&self.modeller.model, &levels, &self.library);
+        let (mut layers, parts, assemblies, bars) = viewer_layers(&self.modeller.model, &levels, &self.library);
         // the spaces its walls close in stand beside its elements, on a layer of their own
         layers.extend(spaces::space_layer(&self.spaces(), &levels));
         let mut built = Model::new(PathBuf::from("model.ifcx"), "IFCX", layers);
@@ -1036,6 +1046,7 @@ impl App {
         built.project.parts = parts;
         // a framed system is an assembly per prefab unit
         built.project.assemblies = assemblies;
+        built.project.bars = bars;
         built.project.part_materials = crate::hatching::part_materials(&self.library);
         // and its drawing standard: the kinds of drawing and their settings, a node each
         built.project.types.extend(bim_library::drawing::nodes(&self.standard));
@@ -1371,10 +1382,11 @@ fn class_colour(class: &str) -> [f32; 3] {
 /// `levels` names the levels by path.
 /// A part of a layered element has the colour of its layer's material in `library`.
 pub fn viewer_model(model: &bim_core::Model, levels: &[(String, String)], library: &bim_library::Library) -> Model {
-    let (layers, parts, assemblies) = viewer_layers(model, levels, library);
+    let (layers, parts, assemblies, bars) = viewer_layers(model, levels, library);
     let mut built = Model::new(PathBuf::from("model.ifcx"), "IFCX", layers);
     built.project.parts = parts;
     built.project.assemblies = assemblies;
+    built.project.bars = bars;
     built.project.part_materials = crate::hatching::part_materials(library);
     built.project.cut_patterns = crate::hatching::library_patterns(library);
     built
@@ -1384,14 +1396,16 @@ pub fn viewer_model(model: &bim_core::Model, levels: &[(String, String)], librar
 /// parts of the elements that are of several materials (see `ProjectData::parts`): the layer,
 /// the first index and the index count of each part, and its material in the library's order.
 /// And the assemblies of the framed systems (see `ProjectData::assemblies`): the parts of such
-/// a system are drawn assembly by assembly.
+/// a system are drawn assembly by assembly. And the runs of reinforcing bars (see
+/// `ProjectData::bars`).
 #[allow(clippy::type_complexity)]
-fn viewer_layers(model: &bim_core::Model, levels: &[(String, String)], library: &bim_library::Library) -> (Vec<Layer>, Vec<(usize, u32, u32, u32)>, Vec<crate::model::Assembly>) {
+fn viewer_layers(model: &bim_core::Model, levels: &[(String, String)], library: &bim_library::Library) -> (Vec<Layer>, Vec<(usize, u32, u32, u32)>, Vec<crate::model::Assembly>, Vec<(usize, u32, u32)>) {
     let grid = model.grid;
     let mut layers: Vec<Layer> = Vec::new();
     let mut of_parts: Vec<(usize, u32, u32, u32)> = Vec::new();
     let has_rebar_areas = model.iter().any(|e| !e.reinforcement_areas.is_empty());
     let mut of_assemblies: Vec<crate::model::Assembly> = Vec::new();
+    let mut bars: Vec<(usize, u32, u32)> = Vec::new();
     for element in model.iter() {
         let Ok(mut parts) = model.evaluate(element.id) else { continue };
         if parts.is_empty() {
@@ -1420,7 +1434,9 @@ fn viewer_layers(model: &bim_core::Model, levels: &[(String, String)], library: 
         let layer = &mut layers[k];
         let first = layer.indices.len() as u32;
         // of several materials: each part is told from the others where it is cut
-        let several = parts.iter().filter_map(|p| p.material.as_deref()).collect::<std::collections::HashSet<_>>().len() > 1;
+        // (its reinforcing bars are no part of that: no drawing cuts them)
+        let bar = |p: &bim_core::Part| p.class == bim_core::reinforcement::BAR_CLASS;
+        let several = parts.iter().filter(|p| !bar(p)).filter_map(|p| p.material.as_deref()).collect::<std::collections::HashSet<_>>().len() > 1;
         for (n, part) in parts.iter().enumerate() {
             if n == 0 || ends.contains(&n) {
                 unit_firsts.push(layer.indices.len() as u32);
@@ -1430,6 +1446,12 @@ fn viewer_layers(model: &bim_core::Model, levels: &[(String, String)], library: 
             // tile-local f64 to the scene's f32, through the tile origin in f64
             let origin = grid.origin(part.tile);
             let base = (layer.positions.len() / 3) as u32;
+            if part.class == bim_core::reinforcement::BAR_CLASS {
+                match bars.last_mut() {
+                    Some(run) if run.0 == k && run.1 + run.2 == base => run.2 += mesh.positions.len() as u32,
+                    _ => bars.push((k, base, mesh.positions.len() as u32)),
+                }
+            }
             let material = part.material.as_deref().and_then(|key| library.material(key));
             // of a service: in its colour, so the systems are told apart
             let plain = element.service.map_or_else(|| class_colour(part.class), service_colour);
@@ -1441,7 +1463,7 @@ fn viewer_layers(model: &bim_core::Model, levels: &[(String, String)], library: 
                 layer.normals.extend(n.as_vec3().to_array());
             }
             layer.indices.extend(mesh.indices.iter().map(|i| i + base));
-            if let Some(material) = part.material.as_deref().filter(|_| several).and_then(|key| library.materials.iter().position(|m| m.key == key)) {
+            if let Some(material) = part.material.as_deref().filter(|_| several && !bar(part)).and_then(|key| library.materials.iter().position(|m| m.key == key)) {
                 of_parts.push((k, part_first, layer.indices.len() as u32 - part_first, material as u32));
             }
         }
@@ -1460,7 +1482,8 @@ fn viewer_layers(model: &bim_core::Model, levels: &[(String, String)], library: 
     }
     of_parts.sort_unstable();
     of_assemblies.sort_by_key(|a| (a.layer, a.first));
-    (layers, of_parts, of_assemblies)
+    bars.sort_unstable();
+    (layers, of_parts, of_assemblies, bars)
 }
 
 /// The NL-SfB code of an element: of its build-up, its linear type (found by the name its
@@ -1530,6 +1553,9 @@ fn properties(model: &bim_core::Model, e: &Element, parts: &[bim_core::Part], le
         }
         Shape::Planar(p) => {
             put("Thickness", m(p.total_thickness()));
+            if let Some(n) = &e.nets {
+                put("Reinforcement", crate::app::element_props::nets_text(n, "bottom", "top"));
+            }
             if let Some(b) = &p.build_up {
                 // property values are data, in English as an IFC file's
                 put("Type", library.name(&b.id, bim_library::Lang::En).unwrap_or_else(|| b.id.clone()));
@@ -1600,8 +1626,13 @@ fn properties(model: &bim_core::Model, e: &Element, parts: &[bim_core::Part], le
         put(crate::export::ifc::NLSFB, code);
     }
     // what it is made of, when it is of one material: the cut of it takes that material's hatch
-    if let Some(key) = parts.first().and_then(|p| p.material.as_deref()).filter(|key| parts.iter().all(|p| p.material.as_deref() == Some(key))) {
+    // (the bars in it apart: concrete with bars is concrete)
+    let body = || parts.iter().filter(|p| p.class != bim_core::reinforcement::BAR_CLASS);
+    if let Some(key) = body().next().and_then(|p| p.material.as_deref()).filter(|key| body().all(|p| p.material.as_deref() == Some(key))) {
         put("Material", library.material(key).map_or(key, |m| m.name(bim_library::Lang::En)).to_string());
+    } else if e.reinforcement.is_some() || e.nets.is_some() {
+        // of no material told, with bars in it: reinforced concrete, and cut as concrete
+        put("Material", "Reinforced concrete".into());
     }
     let volume: f64 = parts.iter().map(|p| p.solid.volume()).sum();
     if volume > 0.0 {
@@ -1946,7 +1977,7 @@ mod tests {
     fn tab_on_a_framed_wall_opens_its_sketch_and_a_rectangle_in_it_is_a_framed_opening() {
         use super::sketch::{Segment, SketchError};
         let mut app = App::default();
-        let generic = bim_core::SystemDef { start: glam::DVec2::new(2.0, 1.0), end: glam::DVec2::new(6.8, 1.0), base: 0.0, height: 2.7, spacing: glam::DVec2::new(1.5, 1.5), member: glam::DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), division: None };
+        let generic = bim_core::SystemDef { grid: None, start: glam::DVec2::new(2.0, 1.0), end: glam::DVec2::new(6.8, 1.0), base: 0.0, height: 2.7, spacing: glam::DVec2::new(1.5, 1.5), member: glam::DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), division: None };
         let s = generic.typed_from(&app.library, "system.timber-frame-140").unwrap();
         let grid = app.modeller.model.grid;
         let id = app.modeller.model.add(Element::in_project(&grid, "Frame", None, Shape::System(s))).unwrap();
@@ -1996,7 +2027,7 @@ mod tests {
     fn an_opening_sketched_in_brickwork_goes_to_the_courses_and_gets_a_lintel() {
         use super::sketch::Segment;
         let mut app = App::default();
-        let generic = bim_core::SystemDef { start: glam::DVec2::new(2.0, 1.0), end: glam::DVec2::new(6.4, 1.0), base: 0.0, height: 2.5, spacing: glam::DVec2::new(1.5, 1.5), member: glam::DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), division: None };
+        let generic = bim_core::SystemDef { grid: None, start: glam::DVec2::new(2.0, 1.0), end: glam::DVec2::new(6.4, 1.0), base: 0.0, height: 2.5, spacing: glam::DVec2::new(1.5, 1.5), member: glam::DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), division: None };
         let s = generic.typed_from(&app.library, "system.masonry-waal-stretcher").unwrap();
         let grid = app.modeller.model.grid;
         let id = app.modeller.model.add(Element::in_project(&grid, "Wall", None, Shape::System(s))).unwrap();
@@ -2026,7 +2057,7 @@ mod tests {
     fn a_timber_frame_is_exported_as_an_assembly_for_every_prefab_unit() {
         // 7.2 m of timber frame: three units of 2400
         let mut app = App::default();
-        let generic = bim_core::SystemDef { start: glam::DVec2::new(2.0, 1.0), end: glam::DVec2::new(9.2, 1.0), base: 0.0, height: 2.7, spacing: glam::DVec2::new(1.5, 1.5), member: glam::DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), division: None };
+        let generic = bim_core::SystemDef { grid: None, start: glam::DVec2::new(2.0, 1.0), end: glam::DVec2::new(9.2, 1.0), base: 0.0, height: 2.7, spacing: glam::DVec2::new(1.5, 1.5), member: glam::DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), division: None };
         let s = generic.typed_from(&app.library, "system.timber-frame-140").unwrap();
         let grid = app.modeller.model.grid;
         let id = app.modeller.model.add(Element::in_project(&grid, "Frame", None, Shape::System(s))).unwrap();

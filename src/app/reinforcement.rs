@@ -388,7 +388,7 @@ impl App {
                 .clamp(DVec2::ZERO, DVec2::new(f.length, f.height))
         })
     }
-    pub(super) fn rebar_hover(&mut self, x: f32, y: f32, w: f32, h: f32) -> bool {
+    pub(super) fn rebar_area_hover(&mut self, x: f32, y: f32, w: f32, h: f32) -> bool {
         if self.modeller.rebar_edit.is_none() {
             return false;
         }
@@ -448,7 +448,7 @@ impl App {
         }
         true
     }
-    pub(super) fn rebar_overlay(&self, ink: Color, fill: Color) -> Option<EditOverlay> {
+    pub(super) fn rebar_area_overlay(&self, ink: Color, fill: Color) -> Option<EditOverlay> {
         let e = self.modeller.rebar_edit.as_ref()?;
         let f = frame(&self.modeller.model, e.wall)?;
         let depth = match &e.area.layout {

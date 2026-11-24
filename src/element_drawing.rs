@@ -1094,7 +1094,7 @@ mod tests {
     #[test]
     fn a_ceiling_on_channels_gets_a_laying_plan_of_its_boards_and_channels() {
         let ceiling = |id: &str| {
-            let generic = SystemDef { start: DVec2::new(1.0, 1.0), end: DVec2::new(5.8, 1.0), base: 2.6, height: 3.6, spacing: DVec2::new(1.5, 1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), division: None };
+            let generic = SystemDef { grid: None, start: DVec2::new(1.0, 1.0), end: DVec2::new(5.8, 1.0), base: 2.6, height: 3.6, spacing: DVec2::new(1.5, 1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), division: None };
             let s = generic.laid(Library::starter().system_type(id).unwrap()).unwrap();
             let mut m = Model::new(TileGrid::default());
             let grid = m.grid;
