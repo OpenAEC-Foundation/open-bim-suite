@@ -533,7 +533,7 @@ impl App {
         let fit_button = || container(button(text(l.text("Passend", "Fit sheet")).size(11)).padding([3, 7]).on_press(Message::Fit))
             .padding(8).align_right(Fill).align_top(Fill);
         if images.is_empty() {
-            return Some(iced::widget::stack![canvas_widget(drawing).width(Fill).height(Fill), fit_button()].into());
+            return Some(crate::clip::clip(iced::widget::stack![canvas_widget(drawing).width(Fill).height(Fill), fit_button()]));
         }
         let paper = drawing.sheet.paper;
         let (zoom, pan) = (drawing.zoom, drawing.pan);
@@ -546,7 +546,7 @@ impl App {
             frame.fill_rectangle(at, size, if p.dark { Color::from_rgb(0.16, 0.16, 0.18) } else { Color::WHITE });
             for image in &images { image.draw(frame, |q| Some(fit.point(q))); }
         });
-        Some(iced::widget::stack![canvas_widget(background).width(Fill).height(Fill), canvas_widget(drawing).width(Fill).height(Fill), fit_button()].into())
+        Some(crate::clip::clip(iced::widget::stack![canvas_widget(background).width(Fill).height(Fill), canvas_widget(drawing).width(Fill).height(Fill), fit_button()]))
     }
 
     /// The Sheet section of the right pane while a sheet is shown: its paper, its arranging, its

@@ -108,7 +108,7 @@ impl App {
             empty: l.text("Van deze tekening is nog niets gelezen", "Nothing of this drawing is read yet").to_string(),
             words: [l.text("Lijn", "Line"), l.text("Tekst", "Text"), l.text("Maat", "Dimension")],
         };
-        container(canvas_widget(drawing).width(Fill).height(Fill)).width(Fill).height(Fill).style(move |_| p.panel()).into()
+        container(crate::clip::clip(canvas_widget(drawing).width(Fill).height(Fill))).width(Fill).height(Fill).style(move |_| p.panel()).into()
     }
 }
 

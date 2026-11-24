@@ -178,7 +178,7 @@ impl App {
         // the schedules on it, with what the computed ones add to what the file stores
         let tables = sheet.tables.iter().map(|t| t.filled(self.schedules.iter().find(|s| s.name == t.schedule))).collect();
         let drawing = SheetDrawing { model, sheet: index, placed, tables, styles: self.document.dimension_styles().to_vec(), palette: p, empty };
-        container(canvas_widget(drawing).width(Fill).height(Fill)).width(Fill).height(Fill).style(move |_| p.panel()).into()
+        container(crate::clip::clip(canvas_widget(drawing).width(Fill).height(Fill))).width(Fill).height(Fill).style(move |_| p.panel()).into()
     }
 }
 
