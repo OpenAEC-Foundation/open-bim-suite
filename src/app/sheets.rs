@@ -46,7 +46,7 @@ impl App {
             self.active_schedule = None;
             self.ifc.shown = false;
             self.docs.shown = false;
-            self.active_doc_sheet = None;
+            self.active_doc_sheet = None; self.booklet.shown = false;
             self.active_draft = None;
         }
         // the plans and sections on it are cut once, to be drawn in their viewports

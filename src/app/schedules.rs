@@ -108,7 +108,7 @@ impl App {
         // a schedule's tab replaces a shown sheet, under the 3D view
         if i.is_some() {
             self.active_sheet = None; self.active_draft = None;
-            self.active_doc_sheet = None;
+            self.active_doc_sheet = None; self.booklet.shown = false;
             self.ifc.shown = false;
             self.docs.shown = false;
             self.load_view(None);

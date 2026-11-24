@@ -52,7 +52,7 @@ impl App {
             self.active_schedule = None;
             self.ifc.shown = false;
             self.docs.shown = false;
-            self.active_doc_sheet = None;
+            self.active_doc_sheet = None; self.booklet.shown = false;
         }
         Task::none()
     }

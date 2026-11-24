@@ -50,6 +50,8 @@ pub enum DocTab {
     Ifc,
     /// The documents of the project folder.
     Docs,
+    /// Every sheet of the document, one under the other.
+    Booklet,
 }
 
 impl App {
@@ -116,7 +118,7 @@ impl App {
     /// above, orthographic, the section box from just under its level up to its cut; a section
     /// or elevation level, in its box; a 3D view as it was left.
     pub(super) fn open_plan(&mut self, path: &str) {
-        self.active_doc_sheet = None;
+        self.active_doc_sheet = None; self.booklet.shown = false;
         let mut drawing = None;
         if !self.open_plans.iter().any(|o| o.path == path) {
             let slot = match self.view_3d_slot(path) {
@@ -351,7 +353,8 @@ impl App {
         let own = (0..self.open_doc_sheets.len()).map(DocTab::DocSheet);
         let ifc = self.ifc.open.then_some(DocTab::Ifc);
         let docs = self.docs.open.then_some(DocTab::Docs);
-        std::iter::once(DocTab::Model).chain(plans).chain(schedules).chain(sheets).chain(drafts).chain(own).chain(ifc).chain(docs).collect()
+        let booklet = self.booklet.open.then_some(DocTab::Booklet);
+        std::iter::once(DocTab::Model).chain(plans).chain(schedules).chain(sheets).chain(drafts).chain(own).chain(booklet).chain(ifc).chain(docs).collect()
     }
 
     /// The tab that shows: a sheet, else a floor plan, else a schedule (under the 3D view), else
@@ -362,7 +365,7 @@ impl App {
         let plan = self.active_plan.as_ref().and_then(|p| self.open_plans.iter().position(|o| o.path == *p));
         let own = self.active_doc_sheet.as_ref().and_then(|p| self.open_doc_sheets.iter().position(|s| s == p));
         // Docs fills the workspace: nothing else shows with it
-        self.docs.shown.then(|| at(DocTab::Docs)).flatten().or_else(|| own.and_then(|k| at(DocTab::DocSheet(k))))
+        self.docs.shown.then(|| at(DocTab::Docs)).flatten().or_else(|| self.booklet.shown.then(|| at(DocTab::Booklet)).flatten()).or_else(|| own.and_then(|k| at(DocTab::DocSheet(k))))
             .or_else(|| self.active_sheet.and_then(|s| at(DocTab::Sheet(s))))
             .or_else(|| self.active_draft.and_then(|d| at(DocTab::Draft(d))))
             .or_else(|| plan.and_then(|k| at(DocTab::Plan(k))))
@@ -382,6 +385,7 @@ impl App {
             DocTab::DocSheet(k) => self.open_doc_sheets.get(k).and_then(|p| self.document.sheet(p)).map_or("", |s| s.title.as_str()),
             DocTab::Ifc => "IFC",
             DocTab::Docs => "Docs",
+            DocTab::Booklet => "Booklet",
         }
     }
 
@@ -389,7 +393,7 @@ impl App {
         match self.doc_tabs().get(i).copied() {
             Some(DocTab::Model) => {
                 self.active_sheet = None; self.active_draft = None;
-                self.active_doc_sheet = None;
+                self.active_doc_sheet = None; self.booklet.shown = false;
                 self.ifc.shown = false;
                 self.docs.shown = false;
                 self.load_view(None);
@@ -414,6 +418,10 @@ impl App {
             }
             Some(DocTab::Docs) => {
                 self.show_docs();
+                Task::none()
+            }
+            Some(DocTab::Booklet) => {
+                self.show_booklet();
                 Task::none()
             }
             None => Task::none(),
@@ -441,6 +449,10 @@ impl App {
             }
             Some(DocTab::Docs) => {
                 self.close_docs();
+                Task::none()
+            }
+            Some(DocTab::Booklet) => {
+                self.close_booklet();
                 Task::none()
             }
             Some(DocTab::Model) | None => Task::none(),
