@@ -2049,6 +2049,10 @@
     "from height": "yükseklikten",
     "Railing": "Korkuluk",
     "Square only": "Yalnızca dik",
-    "Draw only level and upright from the last point; off: any angle": "Son noktadan yalnızca yatay ve dikey çiz; kapalı: her açı"
+    "Draw only level and upright from the last point; off: any angle": "Son noktadan yalnızca yatay ve dikey çiz; kapalı: her açı",
+    "Line style per line": "Çizgi başına çizgi stili",
+    "by the pens above": "yukarıdaki kalemlere göre",
+    "Grid and level": "Aks ve kot",
+    "Section line": "Kesit çizgisi"
   }
 }

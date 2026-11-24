@@ -2049,6 +2049,10 @@
     "from height": "según la altura",
     "Railing": "Barandilla",
     "Square only": "Solo ortogonal",
-    "Draw only level and upright from the last point; off: any angle": "Dibujar solo en horizontal y vertical desde el último punto; desactivado: cualquier ángulo"
+    "Draw only level and upright from the last point; off: any angle": "Dibujar solo en horizontal y vertical desde el último punto; desactivado: cualquier ángulo",
+    "Line style per line": "Estilo de línea por línea",
+    "by the pens above": "según las plumas de arriba",
+    "Grid and level": "Rejilla y nivel",
+    "Section line": "Línea de sección"
   }
 }

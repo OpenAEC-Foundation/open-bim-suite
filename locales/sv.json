@@ -2049,6 +2049,10 @@
     "from height": "från höjden",
     "Railing": "Räcke",
     "Square only": "Endast vinkelrätt",
-    "Draw only level and upright from the last point; off: any angle": "Rita bara vågrätt och lodrätt från den senaste punkten; av: valfri vinkel"
+    "Draw only level and upright from the last point; off: any angle": "Rita bara vågrätt och lodrätt från den senaste punkten; av: valfri vinkel",
+    "Line style per line": "Linjestil per linje",
+    "by the pens above": "enligt pennorna ovan",
+    "Grid and level": "Stomlinje och nivå",
+    "Section line": "Snittlinje"
   }
 }

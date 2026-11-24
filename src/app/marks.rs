@@ -342,6 +342,7 @@ impl App {
             levelling: self.note_tool && self.level_tool && !is_plan,
             cutting: self.section_tool && is_plan,
             sections: crate::drawing2d::plan_sections(&self.document, view),
+            grid: self.view_rules(view).grid,
             word: l.text("Doorsnede", "Section"),
             pick: self.mark_pick,
             more: self.lines_picked(),
@@ -804,6 +805,8 @@ pub(super) struct ViewMarks {
     /// The grid lines and levels the view draws itself, on its drawing: those of a view shown on
     /// paper.
     datums: Vec<crate::drawing2d::Datum2>,
+    /// How the view's kind of drawing draws those grid lines and levels.
+    grid: bim_library::drawing::Drawn,
     /// The elements selected: what the view cuts of them shows as a whole in the accent colour.
     selected: Vec<u64>,
     /// The lines picked beside `pick`, each shape by its first line.
@@ -1412,7 +1415,7 @@ impl canvas::Program<Message> for ViewMarks {
         // the grid lines and levels of the view, as its drawing has them
         for d in &self.datums {
             if let (Some(a), Some(b)) = (self.px(&screen, d.a), self.px(&screen, d.b)) {
-                draw_datum(&mut frame, a, b, &d.name, d.level.is_some(), self.paper(&screen, d.a) / 1000.0, ink, if p.dark { Color::from_rgb(0.16, 0.16, 0.18) } else { Color::WHITE });
+                draw_datum(&mut frame, a, b, &d.name, d.level.is_some(), self.paper(&screen, d.a) / 1000.0, &self.grid, ink, if p.dark { Color::from_rgb(0.16, 0.16, 0.18) } else { Color::WHITE });
             }
         }
         for (k, d) in self.dimensions.iter().enumerate() {
@@ -1672,17 +1675,20 @@ pub(super) fn draw_detail_lines(frame: &mut Frame, lines: &[[[f64; 2]; 2]], pens
     draw(start..lines.len(), ink, base);
 }
 
-/// A grid line or a level of a view on its drawing, from `a` to `b` on screen: a dash-dot line;
-/// a grid line with its name in a bubble past both ends, a level with its name past its end.
-pub(super) fn draw_datum(frame: &mut Frame, a: Point, b: Point, name: &str, level: bool, px_per_mm: f32, ink: Color, paper: Color) {
+/// A grid line or a level of a view on its drawing, from `a` to `b` on screen, as `grid` draws
+/// it (its width, its dashes, its colour where it has one, else `ink`); a grid line with its
+/// name in a bubble past both ends, a level with its name past its end.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn draw_datum(frame: &mut Frame, a: Point, b: Point, name: &str, level: bool, px_per_mm: f32, grid: &bim_library::drawing::Drawn, ink: Color, paper: Color) {
     let length = a.distance(b);
     if length < 1.0 || !px_per_mm.is_finite() || px_per_mm <= 0.0 {
         return;
     }
     let (ux, uy) = ((b.x - a.x) / length, (b.y - a.y) / length);
     let at = |d: f32| Point::new(a.x + ux * d, a.y + uy * d);
-    let dash = [8.0, 1.5, 0.35, 1.5].map(|mm| mm * px_per_mm);
-    let weight = crate::drawing2d::Pen::Grids.weight_mm() as f32 * px_per_mm;
+    let dash: Vec<f32> = grid.dashes.iter().map(|mm| *mm as f32 * px_per_mm).collect();
+    let weight = grid.width as f32 * px_per_mm;
+    let ink = grid.colour.map_or(ink, |c| Color::from_rgb8(c[0], c[1], c[2]));
     let mut stroke = Stroke::default().with_color(ink).with_width(weight);
     stroke.line_dash = canvas::LineDash { segments: &dash, offset: 0 };
     frame.stroke(&Path::line(a, b), stroke);

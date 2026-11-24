@@ -2049,6 +2049,10 @@
     "from height": "z wysokości",
     "Railing": "Balustrada",
     "Square only": "Tylko prostopadle",
-    "Draw only level and upright from the last point; off: any angle": "Rysuj tylko poziomo i pionowo od ostatniego punktu; wyłączone: dowolny kąt"
+    "Draw only level and upright from the last point; off: any angle": "Rysuj tylko poziomo i pionowo od ostatniego punktu; wyłączone: dowolny kąt",
+    "Line style per line": "Styl linii dla każdej linii",
+    "by the pens above": "według pisaków powyżej",
+    "Grid and level": "Siatka i poziom",
+    "Section line": "Linia przekroju"
   }
 }

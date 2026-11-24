@@ -3,8 +3,10 @@
 //! A floor plan, a section or an elevation is a kind of drawing of the project's drawing
 //! standard (`bim_library::drawing`): a floor plan the kind "floor plan" until it is given
 //! another, a structural plan "structural plan", and so on. Its kind says how it is drawn: the
-//! width of what is cut and of what is seen beyond it, the dashes of what is hidden, the height
-//! of its texts and dimensions, whether what is cut is hatched, and the scales it is drawn at.
+//! line style of each of its lines (what is cut, what is seen beyond it, what is hidden, grid
+//! lines and levels, the lines of sections), or the pens of what is cut and seen where it gives
+//! none; the height of its texts and dimensions, whether what is cut is hatched, and the scales
+//! it is drawn at. A line is as wide as its pen is at the scale the view is drawn at.
 //! The drawing on a sheet and every exported drawing follow the kind as it is at that moment:
 //! change a pen of a kind in Library, or in the view's own properties, and its drawings change.
 //!
@@ -50,9 +52,16 @@ impl App {
         self.document.view_drawing(path).and_then(fits).or_else(|| fits(usual)).or_else(|| self.standard.kinds.iter().find(|kind| kind.view == view))
     }
 
-    /// How view `path` is drawn: by the rules of its kind of drawing, or plainly without one.
+    /// How view `path` is drawn by itself: by the rules of its kind of drawing at the scale it is
+    /// drawn at (that of the first sheet it is on, else its own), or plainly without a kind.
     pub(super) fn view_rules(&self, path: &str) -> Rules {
-        self.view_kind(path).map_or_else(Rules::default, |kind| Rules::of(&self.standard, kind))
+        self.view_rules_at(path, crate::drawing2d::drawn_scale(&self.document, path))
+    }
+
+    /// How view `path` is drawn at `scale` (1 to this), as a sheet places it: a pen that is
+    /// narrower at a smaller scale draws it so there.
+    pub(super) fn view_rules_at(&self, path: &str, scale: f64) -> Rules {
+        self.view_kind(path).map_or_else(Rules::default, |kind| Rules::of(&self.standard, kind, scale))
     }
 
     /// The scales view `path` is offered: those of its kind, the usual one first.
@@ -101,6 +110,7 @@ impl App {
 mod tests {
     use super::super::layers::tests::{app_with_plan, shows};
     use super::super::standards::{Field, StandardMessage};
+    use bim_library::drawing::Line;
     use super::super::Message;
     use super::*;
     use crate::drawing::Cut;
@@ -164,24 +174,31 @@ mod tests {
     #[test]
     fn a_drawing_is_drawn_by_the_rules_of_its_kind() {
         let (mut app, plan) = app_with_plan();
-        // a floor plan of the Dutch standard: cut 0.5, beyond 0.25, dashes of 12 and 3 line
-        // widths, text 2.5 mm, hatched
+        // a floor plan of the Dutch standard: cut 0.5, beyond 0.25, what is hidden in the
+        // hidden line style (0.18 mm, dashes of 12 and gaps of 3 line widths), text 2.5 mm,
+        // hatched
         let rules = app.view_rules(&plan);
-        assert_eq!((rules.cut, rules.beyond, rules.hidden.clone(), rules.text, rules.hatched), (0.5, 0.25, vec![3.0, 0.75], 0.0025, true));
+        assert_eq!((rules.cut.width, rules.beyond.width, rules.text, rules.hatched), (0.5, 0.25, 0.0025, true));
+        assert!(rules.cut.dashes.is_empty() && rules.beyond.dashes.is_empty() && rules.cut.colour.is_none());
+        assert_eq!(Some(&rules.hidden), app.standard.drawn("hidden", 50).as_ref());
+        assert_eq!((rules.hidden.width, rules.hidden.dashes.len()), (0.18, 2));
         let widths = |app: &App, pen: Pen| view_drawing(&app.document, &plan, &cut(), &app.view_rules(&plan)).unwrap().widths(pen);
-        assert_eq!((widths(&app, Pen::Cut), widths(&app, Pen::Beyond)), (vec![0.5], vec![0.25]));
+        assert_eq!((widths(&app, Pen::Cut), widths(&app, Pen::Beyond)), (vec![0.5], vec![0.18, 0.25]));
         // the kind's pens changed in the standard: the drawing follows
         let _ = app.update(Message::Standard(StandardMessage::Pick(Setting::Kind("floor-plan".into()))));
         let _ = app.update(Message::Standard(StandardMessage::Set(Field::Cut, "0.7".into())));
         let _ = app.update(Message::Standard(StandardMessage::Set(Field::Beyond, "0.35".into())));
-        assert_eq!((widths(&app, Pen::Cut), widths(&app, Pen::Beyond)), (vec![0.7], vec![0.35]));
-        // what is hidden in the kind's line style: a continuous one draws the edge whole
+        assert_eq!((widths(&app, Pen::Cut), widths(&app, Pen::Beyond)), (vec![0.7], vec![0.18, 0.35]));
+        // what is hidden in the kind's hidden line style: 4 m on paper at the plan's scale, in
+        // dashes of 2.16 mm and gaps of 0.54 mm, a dash to every 2.7 mm begun
         let hidden = |app: &App| view_drawing(&app.document, &plan, &cut(), &app.view_rules(&plan)).unwrap().lines.iter().filter(|line| line.pen == Pen::Beyond && line.a[1] == 2.0).count();
-        let dashed = hidden(&app);
-        // 4 m on paper at the plan's scale, in dashes of 4.2 mm and gaps of 1.05 mm: a dash to
-        // every 5.25 mm begun
         let on_paper = 4000.0 / app.document.view_scale(&plan).unwrap();
-        assert_eq!(dashed, (on_paper / 5.25).ceil() as usize, "{on_paper} mm on paper");
+        assert_eq!(hidden(&app), (on_paper / 2.7 - 1e-9).ceil() as usize, "{on_paper} mm on paper");
+        // without a line style for it: in the kind's line pattern, as wide as what is seen
+        // beyond (dashes of 4.2 mm and gaps of 1.05 mm); a continuous one draws the edge whole
+        let _ = app.update(Message::Standard(StandardMessage::Set(Field::Line(Line::Hidden), String::new())));
+        assert_eq!(widths(&app, Pen::Beyond), [0.35]);
+        assert_eq!(hidden(&app), (on_paper / 5.25).ceil() as usize, "{on_paper} mm on paper");
         let _ = app.update(Message::Standard(StandardMessage::Set(Field::Hidden, "continuous".into())));
         assert_eq!(hidden(&app), 1);
         // its texts and dimensions as high as the kind's text style, on paper
@@ -197,8 +214,45 @@ mod tests {
         app.document.place_plan(&sheet, &plan);
         app.document.place_plan(&sheet, &section);
         let both = Arc::new(cut());
-        let drawing = sheet_drawing(&app.document, &sheet, &|_| Some(both.clone()), &|_| Vec::new(), &|path| app.view_rules(path)).unwrap();
+        let drawing = sheet_drawing(&app.document, &sheet, &|_| Some(both.clone()), &|_| Vec::new(), &|path, scale| app.view_rules_at(path, scale)).unwrap();
         assert_eq!(drawing.widths(Pen::Cut), [0.5, 0.7], "the section's and the floor plan's");
+    }
+
+    #[test]
+    fn a_kind_draws_a_line_in_the_line_style_picked_for_it() {
+        let (mut app, plan) = app_with_plan();
+        let drawing = |app: &App| view_drawing(&app.document, &plan, &cut(), &app.view_rules(&plan)).unwrap();
+        let _ = app.update(Message::Standard(StandardMessage::Pick(Setting::Kind("floor-plan".into()))));
+        assert_eq!(drawing(&app).lines.iter().filter(|line| line.pen == Pen::Cut).count(), 2);
+        // what is cut in the plot boundary's style, made red: 0.35 mm, in its dashes, red
+        let _ = app.update(Message::Standard(StandardMessage::Set(Field::Line(Line::Cut), "boundary".into())));
+        app.standard.line_styles.iter_mut().find(|style| style.key == "boundary").unwrap().colour = Some([200, 0, 0]);
+        let d = drawing(&app);
+        let cut_lines: Vec<_> = d.lines.iter().filter(|line| line.pen == Pen::Cut).collect();
+        assert!(cut_lines.len() > 2 && cut_lines.iter().all(|line| line.width == 0.35 && line.color == Some([200, 0, 0])), "{}", cut_lines.len());
+        assert!(d.lines.iter().filter(|line| line.pen == Pen::Beyond).all(|line| line.color.is_none()));
+        // a style the standard lacks is not taken; the style in use cannot be taken away
+        let _ = app.update(Message::Standard(StandardMessage::Set(Field::Line(Line::Cut), "wavy".into())));
+        assert!(app.standard_view.refused.is_some() && app.standard.kind("floor-plan").unwrap().lines[&Line::Cut] == "boundary");
+        assert!(super::super::standards::remove(&mut app.standard, &Setting::LineStyle("boundary".into())).is_err());
+        // no style: by the kind's pen again, whole
+        let _ = app.update(Message::Standard(StandardMessage::Set(Field::Line(Line::Cut), String::new())));
+        let d = drawing(&app);
+        assert!(app.standard_view.refused.is_none() && d.widths(Pen::Cut) == [0.5] && d.lines.iter().filter(|line| line.pen == Pen::Cut).count() == 2);
+        // a pen narrower at a smaller scale: the same view is drawn narrower where a sheet
+        // places it at that scale
+        app.standard.pens.iter_mut().find(|pen| pen.key == "0.5").unwrap().at = [(50, 0.5), (200, 0.25)].into();
+        assert_eq!((app.view_rules_at(&plan, 50.0).cut.width, app.view_rules_at(&plan, 200.0).cut.width), (0.5, 0.25));
+        // grid lines and section lines in the styles of the kind; a kind of before, without
+        // them, as drawings always drew them
+        let rules = app.view_rules(&plan);
+        assert_eq!((Some(&rules.grid), Some(&rules.section)), (app.standard.drawn("grid", 50).as_ref(), app.standard.drawn("cutting-plane", 50).as_ref()));
+        app.standard.kinds.iter_mut().for_each(|kind| kind.lines.clear());
+        let plain = Rules::default();
+        assert_eq!((app.view_rules(&plan).grid, app.view_rules(&plan).section), (plain.grid, plain.section));
+        // the kind's pane offers a line style for every line, or its pens
+        let mut pane = crate::app::test_ui_of(iced::Size::new(320.0, 1100.0), app.standard_pane(app.theme.palette(), openaec_ui::Language::English));
+        assert!(pane.find("Line style per line").is_ok() && pane.find("Grid and level").is_ok() && pane.find("Section line").is_ok());
     }
 
     #[test]

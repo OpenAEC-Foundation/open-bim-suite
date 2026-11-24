@@ -2049,6 +2049,10 @@
     "from height": "selon la hauteur",
     "Railing": "Garde-corps",
     "Square only": "Orthogonal seul",
-    "Draw only level and upright from the last point; off: any angle": "Dessiner seulement à l'horizontale et à la verticale depuis le dernier point ; désactivé : tout angle"
+    "Draw only level and upright from the last point; off: any angle": "Dessiner seulement à l'horizontale et à la verticale depuis le dernier point ; désactivé : tout angle",
+    "Line style per line": "Style de ligne par trait",
+    "by the pens above": "selon les plumes ci-dessus",
+    "Grid and level": "Trame et niveau",
+    "Section line": "Ligne de coupe"
   }
 }

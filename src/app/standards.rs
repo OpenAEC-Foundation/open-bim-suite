@@ -8,7 +8,7 @@
 use super::libraries::{tile, tile_more, Category, TILE};
 use super::{App, Message, FONT_BOLD};
 use crate::theme::Palette;
-use bim_library::drawing::{self, scale_text, Discipline, DrawingKind, LinePattern, LineStyle, Origin, Pen, Standard, TextStyle, View};
+use bim_library::drawing::{self, scale_text, Discipline, DrawingKind, Line, LinePattern, LineStyle, Origin, Pen, Standard, TextStyle, View};
 use bim_library::{Lang, LibraryError, Names};
 use iced::mouse;
 use iced::widget::canvas::{self, Frame, LineDash, Path, Stroke};
@@ -65,6 +65,8 @@ pub enum Field {
     Pattern,
     /// The colour of a line style: "#rrggbb", or nothing.
     Colour,
+    /// The line style a kind of drawing draws a line in; nothing: by the kind's pens.
+    Line(Line),
 }
 
 impl Field {
@@ -202,6 +204,13 @@ pub fn set(standard: &mut Standard, picked: &Setting, field: Field, value: &str,
                 Field::Beyond => kind.beyond = value.into(),
                 Field::Hidden => kind.hidden = value.into(),
                 Field::Text => kind.text = value.into(),
+                Field::Line(line) => {
+                    if value.is_empty() {
+                        kind.lines.remove(&line);
+                    } else {
+                        kind.lines.insert(line, value.into());
+                    }
+                }
                 Field::Width | Field::Height | Field::Dashes | Field::Scaled | Field::Pen | Field::Pattern | Field::Colour => return Err(unknown()),
             }
         }
@@ -331,6 +340,17 @@ pub fn add_kind(standard: &mut Standard) -> Option<String> {
     let names = Names::new("nieuwe tekeningsoort", "new kind of drawing", "neue Zeichnungsart", "nouveau type de dessin");
     standard.kinds.push(DrawingKind { key: key.clone(), names, code: String::new(), number: String::new(), origin: Origin::Own, ..like });
     Some(key)
+}
+
+/// What a drawing draws a line for, as the pane names it.
+fn line_name(line: Line, l: Language) -> &'static str {
+    match line {
+        Line::Cut => l.text("Doorgesneden", "Cut"),
+        Line::Beyond => l.text("Daarachter", "Beyond"),
+        Line::Hidden => l.text("Verborgen", "Hidden"),
+        Line::Grid => l.text("Stramien en peil", "Grid and level"),
+        Line::Section => l.text("Snedelijn", "Section line"),
+    }
 }
 
 fn view_name(view: View, l: Language) -> &'static str {
@@ -525,7 +545,6 @@ impl App {
         let styled = |uses: &dyn Fn(&LineStyle) -> bool| format!("{}: {}", l.text("Lijnstijlen", "Line styles"), standard.line_styles.iter().filter(|style| uses(style)).count());
         // how many kinds of drawing use a setting
         let used = |uses: &dyn Fn(&DrawingKind) -> bool| format!("{}: {}", l.text("Tekeningsoorten", "Kinds of drawing"), standard.kinds.iter().filter(|kind| uses(kind)).count());
-        let width_of = |pen: &str| standard.pen(pen).map_or(0.25, |pen| pen.width);
         let more = |label: &'static str, message: StandardMessage| tile_more(p, label, Message::Standard(message));
         match category {
             Category::Kinds => {
@@ -534,10 +553,15 @@ impl App {
                     .iter()
                     .map(|kind| {
                         let setting = Setting::Kind(kind.key.clone());
-                        let hidden = standard.line_pattern(&kind.hidden).map_or(&[][..], |style| style.dashes.as_slice());
                         // what is cut, what is seen beyond it and what is hidden, as the kind
-                        // draws them
-                        let look = column![sample(&[], width_of(&kind.cut)), sample(&[], width_of(&kind.beyond)), sample(hidden, width_of(&kind.beyond))].spacing(8);
+                        // draws them at its usual scale: in their line styles, or by its pens
+                        let shown = |line: Line| -> Element<'_, Message> {
+                            let drawn = standard.stroke(kind, line, kind.scales.first().copied().unwrap_or(100));
+                            let (width, ink) = drawn.as_ref().map_or((0.25, p.text), |d| (d.width, d.colour.map_or(p.text, |c| Color::from_rgb8(c[0], c[1], c[2]))));
+                            let dashes: Vec<f64> = drawn.map_or(Vec::new(), |d| d.dashes.iter().map(|mm| mm / d.width).collect());
+                            canvas_widget(LineSample::new(&dashes, width, ink)).width(Fill).height(14).into()
+                        };
+                        let look = column![shown(Line::Cut), shown(Line::Beyond), shown(Line::Hidden)].spacing(8);
                         let scales = kind.scales.iter().map(|scale| scale_text(*scale)).collect::<Vec<_>>().join(", ");
                         let about = format!("{} · {} · {scales}", kind.code, kind.discipline.code());
                         tile(p, look.into(), kind.names.get(lang).to_string(), about, *picked == Some(setting.clone()), pick(setting))
@@ -602,7 +626,7 @@ impl App {
                         let (pen, pattern) = (standard.pen(&style.pen), standard.line_pattern(&style.pattern));
                         let ink = style.colour.map_or(p.text, |c| Color::from_rgb8(c[0], c[1], c[2]));
                         let look: Element<'_, Message> = canvas_widget(LineSample::new(pattern.map_or(&[][..], |pattern| pattern.dashes.as_slice()), pen.map_or(0.25, |pen| pen.width), ink)).width(Fill).height(14).into();
-                        let about = format!("{} · {}", pen.map_or("", |pen| pen.names.get(lang)), pattern.map_or("", |pattern| pattern.names.get(lang)));
+                        let about = format!("{} · {} · {}", pen.map_or("", |pen| pen.names.get(lang)), pattern.map_or("", |pattern| pattern.names.get(lang)), used(&|kind| kind.lines.values().any(|line| line == &style.key)));
                         tile(p, look, style.names.get(lang).to_string(), about, *picked == Some(setting.clone()), pick(setting))
                     })
                     .collect();
@@ -681,7 +705,15 @@ impl App {
                     .push(labelled(p, l.text("Doorgesneden", "Cut"), pick(Field::Cut, pens(), &kind.cut)))
                     .push(labelled(p, l.text("Daarachter", "Beyond"), pick(Field::Beyond, pens(), &kind.beyond)))
                     .push(labelled(p, l.text("Verborgen", "Hidden"), pick(Field::Hidden, styles, &kind.hidden)))
-                    .push(labelled(p, l.text("Tekst", "Text"), pick(Field::Text, texts, &kind.text)))
+                    .push(labelled(p, l.text("Tekst", "Text"), pick(Field::Text, texts, &kind.text)));
+                // each line in a line style of its own, or left to the pens above
+                fields = fields.push(text(l.text("Lijnstijl per lijn", "Line style per line")).size(11).color(p.text_muted));
+                for line in Line::ALL {
+                    let mut styles = vec![Choice { key: String::new(), label: l.text("volgens de pennen hierboven", "by the pens above").to_string() }];
+                    styles.extend(standard.line_styles.iter().map(|s| Choice { key: s.key.clone(), label: s.names.get(lang).to_string() }));
+                    fields = fields.push(labelled(p, line_name(line, l), pick(Field::Line(line), styles, kind.lines.get(&line).map_or("", String::as_str))));
+                }
+                fields = fields
                     .push(checkbox(kind.hatched).label(l.text("Doorgesneden materiaal arceren", "Hatch what is cut")).on_toggle(StandardMessage::Hatched).size(14).text_size(12))
                     .push(labelled(p, l.text("Herkomst", "Origin"), text(origin_name(kind.origin, l)).size(12).color(p.text_secondary).into()));
             }
@@ -1009,7 +1041,7 @@ mod tests {
         let _ = app.libraries_update(LibrariesMessage::Category(Category::LineStyles));
         {
             let mut page = crate::app::test_ui_of(iced::Size::new(1300.0, 1200.0), app.libraries_page(app.theme.palette(), Language::English));
-            assert!(page.find("Line styles").is_ok() && page.find("hidden line").is_ok() && page.find("0.18 mm · dashed").is_ok() && page.find("+ Line style").is_ok());
+            assert!(page.find("Line styles").is_ok() && page.find("hidden line").is_ok() && page.find("0.18 mm · dashed · Kinds of drawing: 20").is_ok() && page.find("0.5 mm · continuous · Kinds of drawing: 0").is_ok() && page.find("+ Line style").is_ok());
         }
         let _ = app.libraries_update(LibrariesMessage::Category(Category::LinePatterns));
         {

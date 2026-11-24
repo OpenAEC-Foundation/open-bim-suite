@@ -37,7 +37,7 @@ impl App {
             for view in &views {
                 self.cut_view(view);
             }
-            return sheet_drawing_with_style(&self.document, &self.house, &sheet, &|path| self.cuts.get(path).cloned(), &|path| self.view_datums(path), &|path| self.view_rules(path));
+            return sheet_drawing_with_style(&self.document, &self.house, &sheet, &|path| self.cuts.get(path).cloned(), &|path| self.view_datums(path), &|path, scale| self.view_rules_at(path, scale));
         }
         // a sheet read from the file, with the views it places cut first
         if let Some(sheet) = self.active_sheet.and_then(|i| self.sheets().get(i).cloned()) {
@@ -49,8 +49,9 @@ impl App {
         }
         let view = self.shown_view()?.to_string();
         self.cut_view(&view);
-        let mut drawing = view_drawing(&self.document, &view, self.cuts.get(&view)?, &self.view_rules(&view))?;
-        drawing.datums(&self.view_datums(&view));
+        let rules = self.view_rules(&view);
+        let mut drawing = view_drawing(&self.document, &view, self.cuts.get(&view)?, &rules)?;
+        drawing.datums(&self.view_datums(&view), &rules.grid);
         Some(drawing)
     }
 
@@ -268,8 +269,10 @@ mod tests {
         ]);
         let d = app.drawing_to_export().unwrap();
         assert!(d.texts.iter().any(|t| t.text == "A") && d.texts.iter().any(|t| t.text == "1"), "{:?}", d.texts);
-        let dash = 0.008 / d.paper_per_unit();
-        assert!(d.lines.iter().any(|l| l.pen == crate::drawing2d::Pen::Grids && l.a == [-2.0, 2.5] && l.b == [-2.0 + dash, 2.5]), "the first dash of the horizontal grid");
+        // in the grid line style of the plan's kind of drawing: 0.18 mm wide, a chain line whose
+        // long dash is 24 line widths on paper
+        let dash = 0.18 * 24.0 / 1000.0 / d.paper_per_unit();
+        assert!(d.lines.iter().any(|l| l.pen == crate::drawing2d::Pen::Grids && l.width == 0.18 && l.a == [-2.0, 2.5] && (l.b[0] - (-2.0 + dash)).abs() < 1e-9 && l.b[1] == 2.5), "the first dash of the horizontal grid");
         // a section across: grid 1 upright where it crosses, the levels across
         let _ = app.update(Message::NewSection([0.0, 2.0], [8.0, 2.0], "Section"));
         let d = app.drawing_to_export().unwrap();
