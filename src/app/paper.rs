@@ -42,7 +42,50 @@ pub enum SheetPick {
     Note(usize, usize),
 }
 
+/// The booklet: every sheet of the document in one tab, one under the other.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct Booklet {
+    /// Its tab is open.
+    pub open: bool,
+    /// Its tab shows.
+    pub shown: bool,
+}
+
 impl App {
+    /// Shows the booklet in its tab, opening the tab the first time; the views on its sheets are
+    /// cut first where they are not yet.
+    pub(super) fn show_booklet(&mut self) {
+        let paths: Vec<String> = self.document.sheets().iter().map(|s| s.path.clone()).collect();
+        for path in &paths {
+            self.cut_placed_plans(path);
+        }
+        self.active_sheet = None; self.active_draft = None;
+        self.active_schedule = None;
+        self.active_doc_sheet = None;
+        self.ifc.shown = false;
+        self.docs.shown = false;
+        self.load_view(None);
+        self.booklet = Booklet { open: true, shown: true };
+    }
+
+    /// Closes the booklet's tab.
+    pub(super) fn close_booklet(&mut self) {
+        self.booklet = Booklet::default();
+    }
+
+    /// Every sheet of the document as drawn for export, in their order; the views on them cut
+    /// first where they are not yet.
+    pub(super) fn booklet_drawings(&mut self) -> Vec<crate::drawing2d::Drawing2d> {
+        let paths: Vec<String> = self.document.sheets().iter().map(|s| s.path.clone()).collect();
+        paths.iter().filter_map(|path| {
+            let views: Vec<String> = self.document.sheet(path)?.views.iter().map(|v| v.plan.clone()).collect();
+            for view in &views {
+                self.cut_view(view);
+            }
+            crate::drawing2d::sheet_drawing_with_style(&self.document, &self.house, path, &|p| self.cuts.get(p).cloned(), &|p| self.view_datums(p), &|p, scale| self.view_rules_at(p, scale))
+        }).collect()
+    }
+
     /// Makes a sheet and shows it in its tab.
     pub(super) fn new_sheet(&mut self, name: &str) {
         let path = self.document.add_sheet(name);
@@ -61,6 +104,7 @@ impl App {
         self.active_schedule = None;
         self.ifc.shown = false;
         self.docs.shown = false;
+        self.booklet.shown = false;
         if self.active_doc_sheet.as_deref() != Some(path) {
             self.sheet_zoom = 1.;
             self.sheet_pan = [0.; 2];
@@ -462,7 +506,11 @@ impl App {
 
     /// The sheet shown, as its canvas draws it.
     fn paper_drawing(&self, p: Palette, l: Language) -> Option<PaperDrawing> {
-        let path = self.active_doc_sheet.as_ref()?;
+        self.paper_drawing_of(self.active_doc_sheet.as_ref()?, p, l)
+    }
+
+    /// Sheet `path` as its canvas draws it, with the tools and picks of the sheet's tab.
+    fn paper_drawing_of(&self, path: &str, p: Palette, l: Language) -> Option<PaperDrawing> {
         let sheet = self.document.sheet(path)?;
         let placed = sheet
             .views
@@ -502,7 +550,7 @@ impl App {
             styles: self.document.dimension_styles().to_vec(),
             placed,
             palette: p,
-            key: Arc::from(path.as_str()),
+            key: Arc::from(path),
             tool: self.dimension_tool,
             reference_pick: match (self.sheet_pick, &self.reference_target) {
                 (Some(SheetPick::Dimension(i, k)), Some((path, index)))
@@ -515,25 +563,77 @@ impl App {
             empty: l.text("niets gesneden", "nothing cut").to_string(),
             carrying,
             noting: self.note_tool.then(|| self.note_to_place(l)),
+            booklet: false,
         })
+    }
+
+    /// Sheet `path` as a page of the booklet: whole, without the tools of a sheet's tab.
+    fn booklet_page(&self, path: &str, p: Palette, l: Language) -> Option<PaperDrawing> {
+        let mut drawing = self.paper_drawing_of(path, p, l)?;
+        drawing.zoom = 1.0;
+        drawing.pan = [0.0; 2];
+        drawing.tool = false;
+        drawing.section_tool = false;
+        drawing.reference_pick = None;
+        drawing.pick = None;
+        drawing.carrying = None;
+        drawing.noting = None;
+        drawing.booklet = true;
+        Some(drawing)
     }
 
     /// The workspace of a sheet's tab: the sheet alone. Everything of the sheet, and what a tool
     /// on waits for, is in the right pane (see [`App::sheet_properties`]) and in the ribbon.
     pub(super) fn doc_sheet_workspace(&self, p: Palette, l: Language) -> Option<Element<'_, Message>> {
+        if self.booklet.shown {
+            return Some(self.booklet_workspace(p, l));
+        }
         let path = self.active_doc_sheet.as_ref()?;
         self.document.sheet(path)?;
-        let mut drawing = self.paper_drawing(p, l)?;
+        let drawing = self.paper_drawing(p, l)?;
+        Some(paper_canvas(drawing, p, Some(l)))
+    }
+
+    /// The booklet's tab: every sheet of the document under the one before, each with its title
+    /// block to type into; the wheel scrolls through them.
+    fn booklet_workspace(&self, p: Palette, l: Language) -> Element<'_, Message> {
+        use iced::widget::{column, responsive, scrollable};
+        let paths: Vec<String> = self.document.sheets().iter().map(|s| s.path.clone()).collect();
+        if paths.is_empty() {
+            return container(text(l.text("Nog geen tekenbladen", "No sheets yet")).size(13).color(p.text_muted)).center(Fill).into();
+        }
+        responsive(move |size| {
+            let pages = paths.iter().filter_map(|path| {
+                let drawing = self.booklet_page(path, p, l)?;
+                let paper = drawing.sheet.paper;
+                let width = f64::from(size.width - 24.0).max(200.0);
+                let height = ((width - 2.0 * f64::from(MARGIN)) * paper[1] / paper[0] + 2.0 * f64::from(MARGIN)) as f32;
+                Some(container(paper_canvas(drawing, p, None)).height(height).width(Fill).into())
+            });
+            scrollable(column(pages).spacing(12).padding([12, 0])).height(Fill).width(Fill).into()
+        })
+        .into()
+    }
+}
+
+/// A sheet's canvas over the images of its views and its background; with `fit`, the button that
+/// fits the sheet in its tab.
+fn paper_canvas<'a>(mut drawing: PaperDrawing, p: Palette, fit: Option<Language>) -> Element<'a, Message> {
+    {
         let mut images: Vec<_> = drawing.placed.iter().enumerate().filter_map(|(i, placed)| {
             placed.image.as_ref()?.placed(None, |q| drawing.to_paper(i, q))
         }).collect();
         if drawing.sheet.background.is_some() {
             if let Some(background) = drawing.block.logo.take() { images.insert(0, background); }
         }
-        let fit_button = || container(button(text(l.text("Passend", "Fit sheet")).size(11)).padding([3, 7]).on_press(Message::Fit))
-            .padding(8).align_right(Fill).align_top(Fill);
+        let fit_button = || -> Element<'a, Message> {
+            match fit {
+                Some(l) => container(button(text(l.text("Passend", "Fit sheet")).size(11)).padding([3, 7]).on_press(Message::Fit)).padding(8).align_right(Fill).align_top(Fill).into(),
+                None => iced::widget::Space::new().into(),
+            }
+        };
         if images.is_empty() {
-            return Some(crate::clip::clip(iced::widget::stack![canvas_widget(drawing).width(Fill).height(Fill), fit_button()]));
+            return crate::clip::clip(iced::widget::stack![canvas_widget(drawing).width(Fill).height(Fill), fit_button()]);
         }
         let paper = drawing.sheet.paper;
         let (zoom, pan) = (drawing.zoom, drawing.pan);
@@ -546,8 +646,11 @@ impl App {
             frame.fill_rectangle(at, size, if p.dark { Color::from_rgb(0.16, 0.16, 0.18) } else { Color::WHITE });
             for image in &images { image.draw(frame, |q| Some(fit.point(q))); }
         });
-        Some(crate::clip::clip(iced::widget::stack![canvas_widget(background).width(Fill).height(Fill), canvas_widget(drawing).width(Fill).height(Fill), fit_button()]))
+        crate::clip::clip(iced::widget::stack![canvas_widget(background).width(Fill).height(Fill), canvas_widget(drawing).width(Fill).height(Fill), fit_button()])
     }
+}
+
+impl App {
 
     /// The Sheet section of the right pane while a sheet is shown: its paper, its arranging, its
     /// export and the views to place on it; or, for what is picked on it, what can be done with
@@ -763,6 +866,9 @@ struct PaperDrawing {
     carrying: Option<(Arc<str>, String, Option<([f32; 2], [f32; 2])>)>,
     /// The text tool is on, with the text a click places.
     noting: Option<String>,
+    /// A page of the booklet: the wheel scrolls the booklet, a field of the title block is typed
+    /// into, and a double click opens the sheet in its tab.
+    booklet: bool,
 }
 
 /// Paper metres to canvas pixels: the paper centred, y up.
@@ -1026,6 +1132,10 @@ impl canvas::Program<Message> for PaperDrawing {
                 _ => {}
             }
         }
+        // a page of the booklet: the wheel and the middle button scroll the booklet, not the page
+        if self.booklet && matches!(event, iced::Event::Mouse(mouse::Event::WheelScrolled { .. } | mouse::Event::ButtonPressed(mouse::Button::Middle))) {
+            return None;
+        }
         match event {
             iced::Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
                 let at = cursor.position_in(bounds)?;
@@ -1126,6 +1236,16 @@ impl canvas::Program<Message> for PaperDrawing {
                 if let Some((field, value)) = self.field_at(at) {
                     state.typing = Some((field, value.to_owned()));
                     return Some(canvas::Action::request_redraw().and_capture());
+                }
+                // a page of the booklet: a double click opens the sheet in its tab
+                if self.booklet {
+                    let last = state.last_view_click.take().filter(|(sheet, _, _)| *sheet == self.key).map(|(_, _, click)| click);
+                    let click = iced::advanced::mouse::Click::new(cursor.position_in(bounds)?, mouse::Button::Left, last);
+                    if click.kind() == iced::advanced::mouse::click::Kind::Double {
+                        return Some(canvas::Action::publish(Message::OpenDocSheet(self.key.clone())).and_capture());
+                    }
+                    state.last_view_click = Some((self.key.clone(), 0, click));
+                    return None;
                 }
                 // a crop handle of the picked view, a dimension, else a view (which a drag then
                 // moves), else nothing
@@ -2092,6 +2212,48 @@ mod tests {
     /// The canvas at 2 pixels per paper millimetre.
     fn bounds() -> Rectangle {
         Rectangle::new(Point::ORIGIN, Size::new(420.0 * 2.0 + 2.0 * MARGIN, 297.0 * 2.0 + 2.0 * MARGIN))
+    }
+
+    #[test]
+    fn the_booklet_shows_every_sheet_and_opens_one_on_a_double_click() {
+        use crate::app::DocTab;
+        use bim_library::house::Field;
+        let (mut app, _) = app_with_plan();
+        let _ = app.update(Message::NewSheet("Plattegrond"));
+        let _ = app.update(Message::NewSheet("Doorsnede"));
+        let _ = app.update(Message::ShowBooklet);
+        assert!(app.booklet.shown && app.doc_tabs().contains(&DocTab::Booklet));
+        assert_eq!(app.doc_tabs()[app.active_doc_tab()], DocTab::Booklet);
+        assert!(app.active_doc_sheet.is_none());
+        // a page per sheet, each with its own title block
+        let pages: Vec<PaperDrawing> = app.document.sheets().iter().filter_map(|s| app.booklet_page(&s.path, app.theme.palette(), Language::English)).collect();
+        assert_eq!(pages.len(), 2);
+        let title = |d: &PaperDrawing| d.block.fields.iter().find(|(f, _, _)| *f == Field::Title).map(|(_, r, v)| (*r, v.clone())).unwrap();
+        assert_eq!((title(&pages[0]).1.as_str(), title(&pages[1]).1.as_str()), ("Plattegrond", "Doorsnede"));
+        // the wheel scrolls the booklet, not the page
+        let fit = Fit::of(pages[1].sheet.paper, bounds().size());
+        let wheel = iced::Event::Mouse(mouse::Event::WheelScrolled { delta: mouse::ScrollDelta::Lines { x: 0.0, y: 1.0 } });
+        let middle = fit.point([0.1, 0.1]);
+        assert!(canvas::Program::update(&pages[1], &mut PaperState::default(), &wheel, bounds(), mouse::Cursor::Available(middle)).is_none());
+        // the title block of the second sheet is typed into there
+        let ([lo, hi], _) = title(&pages[1]);
+        let mut state = PaperState::default();
+        let _ = press_at(&pages[1], &mut state, fit.point([(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0]));
+        assert_eq!(state.typing.as_ref().map(|(f, _)| *f), Some(Field::Title));
+        // a double click elsewhere on the page opens that sheet in its tab
+        let mut state = PaperState::default();
+        assert!(press_at(&pages[1], &mut state, middle).is_none());
+        let opened = press_at(&pages[1], &mut state, middle).expect("a double click");
+        let _ = app.update(opened);
+        assert!(!app.booklet.shown && app.booklet.open, "the booklet's tab stays");
+        assert_eq!(app.active_doc_sheet.as_deref(), Some(app.document.sheets()[1].path.as_str()));
+        // the booklet as one PDF: a drawing per sheet
+        assert_eq!(app.booklet_drawings().len(), 2);
+        let _ = app.update(Message::ShowBooklet);
+        assert!(app.booklet.shown && app.active_doc_sheet.is_none());
+        let k = app.doc_tabs().iter().position(|t| *t == DocTab::Booklet).unwrap();
+        let _ = app.close_tab(k);
+        assert!(!app.booklet.open && !app.doc_tabs().contains(&DocTab::Booklet));
     }
 
     #[test]

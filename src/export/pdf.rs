@@ -168,74 +168,104 @@ pub(crate) fn utf16(text: &str) -> String {
     s
 }
 
+/// The head of an image object: its size in pixels, filter and length are filled in.
+const IMAGE_HEAD: &str = "<< /Type /XObject /Subtype /Image /Width {w} /Height {h} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /{filter} /Length {len} >>\nstream\n";
+
 /// The drawing as a PDF file.
 pub fn pdf(d: &Drawing2d) -> Vec<u8> {
-    let (lo, hi) = d.page();
-    let k = d.paper_per_unit() * 1000.0 * POINTS;
-    let (w, h) = (num_to((hi[0] - lo[0]) * k, 2), num_to((hi[1] - lo[1]) * k, 2));
-    let choices: [(&str, bool, &str, &str, fn() -> Option<&'static [u8]>); 6] = [
-        (crate::typeface::SWISS_CONDENSED, false, "F3", crate::typeface::SWISS_POSTSCRIPT, crate::typeface::swiss_condensed),
-        (crate::typeface::ARIAL_NARROW, false, "F6", "ArialNarrow", crate::typeface::arial_narrow),
-        ("Calibri", false, "F7", "Calibri", || crate::typeface::calibri(false)),
-        ("Calibri", true, "F8", "Calibri-Bold", || crate::typeface::calibri(true)),
-        ("Segoe UI", false, "F4", "SegoeUI", || crate::typeface::segoe_ui(false)),
-        ("Segoe UI", true, "F5", "SegoeUI-Bold", || crate::typeface::segoe_ui(true)),
-    ];
-    let embedded: Vec<_> = choices.into_iter().filter_map(|(family, bold, resource, name, load)| {
-        if !d.texts.iter().any(|t| t.family.as_deref() == Some(family) && t.bold == bold)
-            && (bold || !d.dimensions.iter().any(|dim| dim.style.label_family().as_deref() == Some(family))) { return None; }
-        let bytes = load()?;
-        use ttf_parser::Permissions::{Editable, Installable, PreviewAndPrint};
-        let face = ttf_parser::Face::parse(bytes, 0).ok()?;
-        (face.is_outline_embedding_allowed() && matches!(face.permissions(), Some(Editable | Installable | PreviewAndPrint)))
-            .then(|| DrawingFont { family, bold, resource, name, font: super::pdf_font::font(bytes) })
-    }).collect();
-    let stream = content(d, &embedded);
-    let fonts = embedded.iter().enumerate().map(|(i,f)| format!("/{} {} 0 R", f.resource, 8 + d.images.len() + 3*i)).collect::<Vec<_>>().join(" ");
-    let references = (0..d.images.len()).map(|i| format!("/Im{i} {} 0 R", i+8)).collect::<Vec<_>>().join(" ");
-    let objects = [
-        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
-        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
-        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {w} {h}] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 7 0 R {fonts} >> /XObject << {references} >> >> >>"),
-        format!("<< /Length {} >>\nstream\n{stream}endstream", stream.len()),
-        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_string(),
-        format!("<< /Title {} /Producer (Open BIM Suite) >>", utf16(&d.name)),
-        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>".to_string(),
-    ];
-    let mut objects = objects.into_iter().map(String::into_bytes).collect::<Vec<_>>();
-    for image in &d.images {
-        use std::io::Write as _;
-        let (filter, stream) = if image.format == image::ImageFormat::Jpeg {
-            ("DCTDecode", image.bytes.to_vec())
-        } else {
-            let rgba = image::load_from_memory_with_format(&image.bytes, image.format).expect("validated drawing image").into_rgba8();
-            let mut encoded = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
-            for px in rgba.pixels() {
-                let a = u32::from(px[3]);
-                let rgb = [0, 1, 2].map(|k| ((u32::from(px[k])*a + 255*(255-a) + 127)/255) as u8);
-                encoded.write_all(&rgb).expect("in-memory stream");
-            }
-            ("FlateDecode", encoded.finish().expect("in-memory stream"))
-        };
-        let mut object = format!("<< /Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /{filter} /Length {} >>\nstream\n", image.pixels[0], image.pixels[1], stream.len()).into_bytes();
-        object.extend(stream);
-        object.extend_from_slice(b"\nendstream");
-        objects.push(object);
+    book(std::slice::from_ref(d), &d.name)
+}
+
+/// Drawings as the pages of one PDF file, in their order (a booklet of sheets), called `title`.
+/// Each page is as large as its drawing's paper and embeds the typefaces its texts use.
+pub fn book(pages: &[Drawing2d], title: &str) -> Vec<u8> {
+    // 1 the catalog, 2 the pages, 3 the information, 4 and 5 Helvetica; then per page its page,
+    // its content, its images and its typefaces
+    let mut objects: Vec<Vec<u8>> = vec![Vec::new(); 5];
+    let mut kids = Vec::new();
+    for d in pages {
+        let (lo, hi) = d.page();
+        let k = d.paper_per_unit() * 1000.0 * POINTS;
+        let (w, h) = (num_to((hi[0] - lo[0]) * k, 2), num_to((hi[1] - lo[1]) * k, 2));
+        let choices: [(&str, bool, &str, &str, fn() -> Option<&'static [u8]>); 6] = [
+            (crate::typeface::SWISS_CONDENSED, false, "F3", crate::typeface::SWISS_POSTSCRIPT, crate::typeface::swiss_condensed),
+            (crate::typeface::ARIAL_NARROW, false, "F6", "ArialNarrow", crate::typeface::arial_narrow),
+            ("Calibri", false, "F7", "Calibri", || crate::typeface::calibri(false)),
+            ("Calibri", true, "F8", "Calibri-Bold", || crate::typeface::calibri(true)),
+            ("Segoe UI", false, "F4", "SegoeUI", || crate::typeface::segoe_ui(false)),
+            ("Segoe UI", true, "F5", "SegoeUI-Bold", || crate::typeface::segoe_ui(true)),
+        ];
+        let embedded: Vec<_> = choices.into_iter().filter_map(|(family, bold, resource, name, load)| {
+            if !d.texts.iter().any(|t| t.family.as_deref() == Some(family) && t.bold == bold)
+                && (bold || !d.dimensions.iter().any(|dim| dim.style.label_family().as_deref() == Some(family))) { return None; }
+            let bytes = load()?;
+            use ttf_parser::Permissions::{Editable, Installable, PreviewAndPrint};
+            let face = ttf_parser::Face::parse(bytes, 0).ok()?;
+            (face.is_outline_embedding_allowed() && matches!(face.permissions(), Some(Editable | Installable | PreviewAndPrint)))
+                .then(|| DrawingFont { family, bold, resource, name, font: super::pdf_font::font(bytes) })
+        }).collect();
+        let stream = content(d, &embedded);
+        let page = objects.len() + 1;
+        let first_image = page + 2;
+        let first_font = first_image + d.images.len();
+        let fonts = embedded.iter().enumerate().map(|(i,f)| format!("/{} {} 0 R", f.resource, first_font + 3*i)).collect::<Vec<_>>().join(" ");
+        let references = (0..d.images.len()).map(|i| format!("/Im{i} {} 0 R", first_image + i)).collect::<Vec<_>>().join(" ");
+        objects.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {w} {h}] /Contents {} 0 R /Resources << /Font << /F1 4 0 R /F2 5 0 R {fonts} >> /XObject << {references} >> >> >>", page + 1).into_bytes());
+        objects.push(format!("<< /Length {} >>
+stream
+{stream}endstream", stream.len()).into_bytes());
+        kids.push(format!("{page} 0 R"));
+        for image in &d.images {
+            use std::io::Write as _;
+            let (filter, stream) = if image.format == image::ImageFormat::Jpeg {
+                ("DCTDecode", image.bytes.to_vec())
+            } else {
+                let rgba = image::load_from_memory_with_format(&image.bytes, image.format).expect("validated drawing image").into_rgba8();
+                let mut encoded = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+                for px in rgba.pixels() {
+                    let a = u32::from(px[3]);
+                    let rgb = [0, 1, 2].map(|k| ((u32::from(px[k])*a + 255*(255-a) + 127)/255) as u8);
+                    encoded.write_all(&rgb).expect("in-memory stream");
+                }
+                ("FlateDecode", encoded.finish().expect("in-memory stream"))
+            };
+            let mut object = IMAGE_HEAD.replace("{w}", &image.pixels[0].to_string()).replace("{h}", &image.pixels[1].to_string()).replace("{filter}", filter).replace("{len}", &stream.len().to_string()).into_bytes();
+            object.extend(stream);
+            object.extend_from_slice(b"
+endstream");
+            objects.push(object);
+        }
+        for f in &embedded { super::pdf_font::push_font(&mut objects, &f.font, f.name, if f.bold {120} else {80}); }
     }
-    for f in &embedded { super::pdf_font::push_font(&mut objects, &f.font, f.name, if f.bold {120} else {80}); }
+    objects[0] = b"<< /Type /Catalog /Pages 2 0 R >>".to_vec();
+    objects[1] = format!("<< /Type /Pages /Kids [{}] /Count {} >>", kids.join(" "), kids.len()).into_bytes();
+    objects[2] = format!("<< /Title {} /Producer (Open BIM Suite) >>", utf16(title)).into_bytes();
+    objects[3] = b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_vec();
+    objects[4] = b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>".to_vec();
     use std::io::Write as _;
-    let mut out = b"%PDF-1.4\n".to_vec();
+    let mut out = b"%PDF-1.4
+".to_vec();
     let mut offsets = Vec::new();
     for (i, object) in objects.iter().enumerate() {
         offsets.push(out.len());
         let _ = writeln!(out, "{} 0 obj", i+1);
         out.extend(object);
-        out.extend_from_slice(b"\nendobj\n");
+        out.extend_from_slice(b"
+endobj
+");
     }
     let xref = out.len();
-    let _ = write!(out, "xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1);
+    let _ = write!(out, "xref
+0 {}
+0000000000 65535 f 
+", objects.len() + 1);
     for offset in offsets { let _ = writeln!(out, "{offset:010} 00000 n "); }
-    let _ = write!(out, "trailer\n<< /Size {} /Root 1 0 R /Info 6 0 R >>\nstartxref\n{xref}\n%%EOF\n", objects.len() + 1);
+    let _ = write!(out, "trailer
+<< /Size {} /Root 1 0 R /Info 3 0 R >>
+startxref
+{xref}
+%%EOF
+", objects.len() + 1);
     out
 }
 
@@ -244,6 +274,27 @@ mod tests {
     use super::*;
     use crate::document::A3_LANDSCAPE;
     use crate::drawing2d::{Align, Line2d, Pen, Space, Text2d};
+
+    #[test]
+    fn a_booklet_is_one_file_with_a_page_per_sheet() {
+        let mut second = sheet();
+        second.name = "A02 Doorsneden".into();
+        let bytes = book(&[sheet(), second], "Werk 3336");
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("/Type /Pages /Kids [6 0 R 8 0 R] /Count 2"), "two pages in order");
+        assert_eq!(text.matches("/Type /Page ").count(), 2);
+        assert!(text.contains("/Title <FEFF"), "the booklet is named");
+        // every object the cross reference names starts where it says
+        let xref = text.rfind("xref
+").unwrap();
+        let count: usize = text[xref + 7..].split_whitespace().next().unwrap().parse().unwrap();
+        for (k, line) in text[xref..].lines().skip(3).take(count - 1).enumerate() {
+            let at: usize = line[..10].parse().unwrap();
+            assert!(bytes[at..].starts_with(format!("{} 0 obj", k + 1).as_bytes()), "object {}", k + 1);
+        }
+        // one page is what a single drawing gives
+        assert!(String::from_utf8_lossy(&pdf(&sheet())).contains("/Kids [6 0 R] /Count 1"));
+    }
 
     fn sheet() -> Drawing2d {
         Drawing2d {

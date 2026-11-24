@@ -86,6 +86,17 @@ impl App {
         }
     }
 
+    /// Writes every sheet of the document as one PDF, a page per sheet in their order.
+    pub(super) fn export_booklet(&mut self) -> Task<Message> {
+        let drawings = self.booklet_drawings();
+        if drawings.is_empty() {
+            self.status = super::Status::Error("The document has no sheets".to_string());
+            return Task::none();
+        }
+        let title = self.model.as_ref().and_then(|m| m.path.file_stem()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Booklet".to_string());
+        booklet_task(drawings, title, self.document_folder())
+    }
+
     /// The grid lines and levels a view's tab shows (none while the grid lines are off), on the
     /// view's drawing: a floor plan's in plan, a section's along its line and up.
     pub(super) fn view_datums(&self, view: &str) -> Vec<Datum2> {
@@ -165,6 +176,46 @@ fn export_task(drawing: Drawing2d, format: DrawingFormat, folder: Option<PathBuf
                 let _ = tx.send(written.map(|()| (path, start.elapsed().as_secs_f32())));
             });
             Some(rx.await.unwrap_or_else(|_| Err("export thread stopped".to_string())))
+        },
+        Message::Exported,
+    )
+}
+
+/// The booklet as one PDF, a page per sheet, where the save dialog says.
+#[cfg(not(target_arch = "wasm32"))]
+fn booklet_task(drawings: Vec<Drawing2d>, title: String, folder: Option<PathBuf>) -> Task<Message> {
+    let mut dialog = rfd::AsyncFileDialog::new().set_title("Export").set_file_name(format!("{title}.pdf")).add_filter("PDF", &["pdf"]);
+    if let Some(folder) = folder {
+        dialog = dialog.set_directory(folder);
+    }
+    Task::perform(
+        async move {
+            let path = dialog.save_file().await?.path().to_path_buf();
+            let (tx, rx) = iced::futures::channel::oneshot::channel();
+            std::thread::spawn(move || {
+                let start = Instant::now();
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let bytes = crate::export::pdf::book(&drawings, &title);
+                // the dialog asked before replacing a file
+                let written = crate::export::write_file(&path, true, |out| out.write_all(&bytes)).map_err(|e| format!("Cannot export {name}: {e}"));
+                let _ = tx.send(written.map(|()| (path, start.elapsed().as_secs_f32())));
+            });
+            Some(rx.await.unwrap_or_else(|_| Err("export thread stopped".to_string())))
+        },
+        Message::Exported,
+    )
+}
+
+/// The browser has no save dialog: the booklet goes to the downloads.
+#[cfg(target_arch = "wasm32")]
+fn booklet_task(drawings: Vec<Drawing2d>, title: String, _folder: Option<PathBuf>) -> Task<Message> {
+    Task::perform(
+        async move {
+            crate::web::next_frame().await;
+            let start = Instant::now();
+            let name = format!("{title}.pdf");
+            let done = crate::web::download(&name, &crate::export::pdf::book(&drawings, &title), "application/pdf");
+            Some(done.map(|()| (PathBuf::from(name), start.elapsed().as_secs_f32())))
         },
         Message::Exported,
     )

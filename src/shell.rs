@@ -1600,6 +1600,20 @@ impl Studio {
         list.push(plan("project.structural-plan", l.text("Constructieplan", "Structural plan"), PlanKind::Structural));
         list.push(plan("project.ceiling-plan", l.text("Plafondplan", "Ceiling plan"), PlanKind::Ceiling));
         list.push(Command::new("project.sheet", l.text("Tekenblad", "Sheet"), go(Message::NewSheet(l.text("Tekenblad", "Sheet")))).icon(small("drawing.sheet-new"), large("drawing.sheet-new")).enabled(loaded));
+        let sheets = !app.document.sheets().is_empty();
+        list.push(
+            Command::new("project.booklet", l.text("Boekje", "Booklet"), go(Message::ShowBooklet))
+                .icon(small("drawing.plan"), large("drawing.plan"))
+                .detail(l.text("Alle tekenbladen onder elkaar in één tab, met hun titelblokken om in te vullen.", "Every sheet one under the other in one tab, with their title blocks to fill in."))
+                .enabled(sheets),
+        );
+        list.push(
+            Command::new("project.booklet-pdf", l.text("Boekje als PDF", "Booklet as PDF"), go(Message::ExportBooklet))
+                .icon(small("file.save-as"), large("file.save-as"))
+                .detail(l.text("Alle tekenbladen als één PDF, een pagina per blad.", "Every sheet as one PDF, a page per sheet."))
+                .dialog()
+                .enabled(sheets),
+        );
         list.push(
             Command::new("project.library", l.text("Bibliotheek", "Library"), go(Message::ExplorerTab(crate::app::ExplorerTab::Library)))
                 .icon(small("construction.library"), large("construction.library"))
@@ -2788,7 +2802,7 @@ impl Studio {
                 (l.text("Niveaus", "Levels"), vec![large("project.level")]),
                 (l.text("Stramien", "Grid"), vec![large("project.grid")]),
                 (l.text("Weergaven", "Views"), vec![large("project.floor-plan"), smalls(&["project.structural-plan", "project.ceiling-plan", "annotate.section"])]),
-                (l.text("Tekenbladen", "Sheets"), vec![large("project.sheet")]),
+                (l.text("Tekenbladen", "Sheets"), vec![large("project.sheet"), smalls(&["project.booklet", "project.booklet-pdf"])]),
                 (l.text("Bibliotheek", "Library"), vec![large("project.library")]),
             ],
             // drawing in the floor plan, section or sheet shown, in the order of a drawing program's
@@ -3122,7 +3136,11 @@ impl Studio {
         if (app.model.is_some() || (app.docs.open && !app.docs.in_product)) && doc_tabs.len() > 1 && !library {
             let tabs: Vec<DocumentTab<'_>> = doc_tabs
                 .iter()
-                .map(|&t| if t == DocTab::Model { DocumentTab::pinned(model_name) } else { DocumentTab::new(app.tab_title(t), false) })
+                .map(|&t| match t {
+                    DocTab::Model => DocumentTab::pinned(model_name),
+                    DocTab::Booklet => DocumentTab::new(l.text("Boekje", "Booklet"), false),
+                    _ => DocumentTab::new(app.tab_title(t), false),
+                })
                 .collect();
             middle = middle.push(w::document_tabs(look, &tabs, app.active_doc_tab(), small("window.close"), Msg::SelectTab, Msg::CloseTab, Msg::SelectTab));
         }

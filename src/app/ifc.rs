@@ -172,7 +172,7 @@ impl App {
     pub(super) fn show_ifc(&mut self) {
         self.active_schedule = None;
         self.active_sheet = None; self.active_draft = None;
-        self.active_doc_sheet = None;
+        self.active_doc_sheet = None; self.booklet.shown = false;
         self.docs.shown = false;
         self.load_view(None);
         self.ifc.shown = true;

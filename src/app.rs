@@ -413,6 +413,8 @@ pub struct App {
     pub schedule_scroll: (f32, f32),
     /// The IFC tab: how the model's IFCX file is built up.
     pub ifc: IfcTab,
+    /// The booklet: every sheet of the document in one tab.
+    pub booklet: paper::Booklet,
     /// Docs: the documents of the project folder.
     pub docs: DocsTab,
     /// Library, the product: the source and the country its page shows.
@@ -699,6 +701,10 @@ pub enum Message {
     FillSheets([&'static str; 2]),
     /// Show a sheet of the document (its path) in its tab.
     OpenDocSheet(Arc<str>),
+    /// Shows every sheet of the document in one tab, one under the other.
+    ShowBooklet,
+    /// Writes every sheet of the document as one PDF, a page per sheet.
+    ExportBooklet,
     RemoveSheet(Arc<str>),
     /// Place a floor plan on a sheet: sheet, plan.
     PlaceOnSheet(Arc<str>, Arc<str>),
@@ -1233,6 +1239,7 @@ impl Default for App {
             active_schedule: None,
             schedule_scroll: (0.0, 0.0),
             ifc: IfcTab::default(),
+            booklet: paper::Booklet::default(),
             docs: DocsTab::default(),
             libraries: libraries::LibrariesView::default(),
             standard: bim_library::drawing::Standard::netherlands(),
@@ -2058,6 +2065,7 @@ impl App {
         self.model_view = None;
         self.open_doc_sheets.clear();
         self.active_doc_sheet = None;
+        self.booklet = paper::Booklet::default();
         self.cuts.clear();
         self.cut_epoch += 1;
         self.sheet_pick = None;
@@ -2805,6 +2813,8 @@ impl App {
             Message::ArrangeSheet(sheet) => self.arrange_sheet(&sheet),
             Message::FillSheets(names) => self.fill_sheets(names),
             Message::OpenDocSheet(sheet) => self.open_doc_sheet(&sheet),
+            Message::ShowBooklet => self.show_booklet(),
+            Message::ExportBooklet => return self.export_booklet(),
             Message::RemoveSheet(sheet) => {
                 self.close_doc_sheet(&sheet);
                 self.document.remove_sheet(&sheet);
