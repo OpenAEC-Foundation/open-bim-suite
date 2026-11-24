@@ -9,6 +9,16 @@ pub(crate) struct TitleBlock {
     pub texts: Vec<Text2d>,
     pub logo: Option<crate::raster::PlacedImage>,
     pub polygons: Vec<crate::drawing2d::Polygon2d>,
+    /// The fields a person fills in, where each lies on the paper (lower left, upper right) and
+    /// what it says now: a click there types into it.
+    pub fields: Vec<(bim_library::house::Field, [[f64; 2]; 2], String)>,
+}
+
+/// Whether a person fills field `field` in on the sheet; the others come from the house style, the
+/// paper or the views on it.
+fn typed(field: bim_library::house::Field) -> bool {
+    use bim_library::house::Field;
+    !matches!(field, Field::Logo | Field::Company | Field::Address | Field::Scale | Field::Format)
 }
 
 pub(crate) fn title_block(doc: &Document, sheet: &crate::document::Sheet, style: &bim_library::house::HouseStyle) -> TitleBlock {
@@ -24,6 +34,7 @@ pub(crate) fn title_block(doc: &Document, sheet: &crate::document::Sheet, style:
         texts: Vec::new(),
         logo: None,
         polygons: Vec::new(),
+        fields: Vec::new(),
     };
     if let Some(background) = &sheet.background {
         out.owns_frame = true;
@@ -60,6 +71,9 @@ pub(crate) fn title_block(doc: &Document, sheet: &crate::document::Sheet, style:
         let corners = [[x, y], [x + w, y], [x + w, y + h], [x, y + h]];
         for i in 0..4 {
             out.lines.push(Line2d::new(Pen::Frame, corners[i], corners[(i + 1) % 4]));
+        }
+        if typed(field) {
+            out.fields.push((field, [[x, y], [x + w, y + h]], doc.title_value(sheet, field).to_owned()));
         }
         let pad = 0.0015_f64.min(w / 6.0).min(h / 6.0);
         let width = w - 2.0 * pad;
@@ -125,6 +139,23 @@ fn edited_office_fields(out: &mut TitleBlock, doc: &Document, sheet: &crate::doc
     let unit = office_unit(sheet.paper, style);
     let at = |x: f64, y: f64| [sheet.paper[0] + x*unit, y*unit];
     let purple = style.colour("primary").unwrap_or([53,19,54]);
+    let place = |field: Field| match field {
+        Field::Title => Some((-190.78,87.63,126.,7.23)),
+        Field::Project => Some((-190.78,72.68,127.,4.94)),
+        Field::Client => Some((-164.32,54.35,100.,3.53)),
+        Field::ProjectNumber => Some((-170.78,41.77,50.,3.53)),
+        Field::Phase => Some((-170.78,37.74,50.,3.53)),
+        Field::DrawnBy => Some((-170.78,33.45,50.,3.53)),
+        Field::Date => Some((-91.52,33.53,35.,3.53)),
+        Field::Status => Some((-91.52,29.27,35.,3.53)),
+        Field::Number => Some((-91.52,25.06,35.,3.53)),
+        _ => None,
+    };
+    for field in Field::ALL {
+        if let Some((x, y, width, height)) = place(field) {
+            out.fields.push((field, [at(x - 0.4, y - height * 0.25), at(x + width, y + height * 0.87)], doc.title_value(sheet, field).to_owned()));
+        }
+    }
     for field in sheet.edited_stamp_fields() {
         let (x,y,width,height) = match field {
             Field::Title => (-190.78,87.63,126.,7.23),
@@ -235,6 +266,21 @@ fn office_stamp(out: &mut TitleBlock, doc: &Document, sheet: &crate::document::S
             angle: 0.,
         });
     };
+    for (field, x, y, width, height) in [
+        (Field::Title, -190.75, 87.63, 125., 7.23),
+        (Field::Project, -190.75, 72.68, 127., 4.94),
+        (Field::Client, -164.29, 54.35, 99., 3.53),
+        (Field::ProjectNumber, -170.75, 41.77, 52., 3.53),
+        (Field::Phase, -170.75, 37.74, 52., 3.53),
+        (Field::DrawnBy, -170.75, 33.45, 52., 3.53),
+        (Field::CheckedBy, -170.75, 29.27, 52., 3.53),
+        (Field::Revision, -170.75, 25.06, 52., 3.53),
+        (Field::Date, -91.49, 33.53, 38., 3.53),
+        (Field::Status, -91.49, 29.27, 38., 3.53),
+        (Field::Number, -91.49, 25.06, 38., 3.53),
+    ] {
+        out.fields.push((field, [at(x - 0.4, y - height * 0.25), at(x + width, y + height * 0.87)], doc.title_value(sheet, field).to_owned()));
+    }
     let l = Align::Left;
     text(&sheet.name, -190.75, 87.63, 7.23, 125., [255; 3], l);
     text(doc.title_value(sheet, Field::Project), -190.75, 72.68, 4.94, 127., purple, l);
