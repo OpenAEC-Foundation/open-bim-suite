@@ -24,13 +24,14 @@ pub mod mesh;
 pub mod model;
 pub mod predicates;
 pub mod profile;
+pub mod reinforcement;
 pub mod solid;
 pub mod system;
 pub mod tile;
 
 pub use boolean::{boolean, BooleanOp};
 pub use datum::GridDef;
-pub use element::{Fixity, BaseKind, BayPanel, LinearRole, OwnGrid, PointRole, Service, StairShape, OpeningKind, SlabRole, Slope, Top, BuildUpDef, ConnectionDef, ConnectionKind, Element, ElementId, LayerDef, LinearDef, Opening, OpeningFraming, PlanarDef, PointDef, Shape, SystemDef};
+pub use element::{Fixity, BaseKind, BayPanel, LinearRole, OwnGrid, PointRole, Service, StairShape, OpeningKind, SlabRole, Slope, Top, BuildUpDef, ConnectionDef, ConnectionKind, Element, ElementId, LayerDef, LinearDef, Opening, OpeningFraming, PlanarDef, PointDef, Shape, SystemDef, Division};
 pub use mesh::Mesh;
 pub use model::{Model, Part};
 pub use profile::{Profile, ProfileDef};
@@ -88,20 +89,26 @@ pub enum Refusal {
     TwoMembers,
     /// An end plate's bolts do not fit beside the member's profile or along it.
     BoltsDoNotFit,
+    /// A splice takes two members in one line, end to end.
+    NotInLine,
+    /// Reinforcement is given to a member with a rectangular section.
+    NotRectangular,
+    /// The bars do not fit beside each other in the section, inside its cover.
+    BarsDoNotFit,
     /// A build-up has no layer that is not a cavity.
     NoLayers,
     /// A system would be generated as more parts than [`system::MAX_PARTS`].
     TooManyParts,
-    /// A system that is not framed has an opening.
+    /// A system that is not framed has an opening. (No longer refused: a system on a grid is cut
+    /// where an opening lies. Kept so that what names it still reads.)
     OpeningNotFramed,
     /// A frame cannot be split into prefab units short enough, with their joints clear of its
     /// openings.
     NoUnitJoint,
     /// Two building systems are joined only butt or apart, and only when both are framed.
     SystemJoin,
-    /// A run is too short to stop clear of the fitting at its end.
+    /// A service run is shorter than its fitting.
     TooShortForFitting,
-    NotInLine,
     /// A sloped roof over an outline that turns inwards.
     NotConvex,
 }
@@ -133,13 +140,15 @@ impl Refusal {
             Refusal::NoBody => "A connection has no body to cut with.",
             Refusal::TwoMembers => "This join takes two members.",
             Refusal::BoltsDoNotFit => "The bolts do not fit on the plate.",
+            Refusal::NotInLine => "The members do not lie in one line.",
+            Refusal::NotRectangular => "Only a rectangular section takes this reinforcement.",
+            Refusal::BarsDoNotFit => "The bars do not fit in the section.",
             Refusal::NoLayers => "A build-up needs a layer that is not a cavity.",
             Refusal::TooManyParts => "A system would have more than 50000 parts.",
             Refusal::OpeningNotFramed => "Only a framed system, such as a timber frame, can have openings.",
             Refusal::NoUnitJoint => "The frame cannot be split into prefab units clear of its openings.",
             Refusal::SystemJoin => "Two framed systems are joined butt or kept apart.",
             Refusal::TooShortForFitting => "A run is too short for the fitting at its end.",
-            Refusal::NotInLine => "The two runs do not lie in one line.",
             Refusal::NotConvex => "A sloped roof needs an outline without inward corners: draw each wing as a roof of its own.",
         }
     }

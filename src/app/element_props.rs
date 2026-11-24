@@ -22,6 +22,7 @@ use openaec_ui::Language;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElementField {
     Name,
+    PileMark,
     /// A member's strength class (S235, C30/37), as text; empty: not given.
     Grade,
     /// A wall's, curtain wall's or object's height.
@@ -68,6 +69,18 @@ pub enum ElementField {
     Bolt,
     Hole,
     BoltRows,
+    /// A concrete member's reinforcement: its cover, the number and diameter of its top and
+    /// bottom bars, and its stirrups' diameter and spacing.
+    Cover,
+    TopBars,
+    TopBar,
+    BottomBars,
+    BottomBar,
+    Stirrup,
+    StirrupSpacing,
+    /// A base plate's bed of grout, and how deep its anchors reach.
+    Grout,
+    AnchorLength,
     /// How a slab rises from its eave (degrees), and which edge of its outline the eave is
     /// (counted from 1).
     Slope,
@@ -81,6 +94,52 @@ pub(super) const WINDOW: (f64, f64, f64) = (1.2, 1.2, 0.9);
 /// A number typed: metres (a comma or a point, `m` after it allowed), or degrees (`°` allowed).
 fn number(typed: &str) -> Option<f64> {
     parse_elevation(typed.trim().trim_end_matches('°'))
+}
+
+/// The value of a reinforcement field.
+fn rebar_value(r: &bim_core::reinforcement::Reinforcement, field: ElementField) -> Option<f64> {
+    use ElementField as F;
+    Some(match field {
+        F::Cover => r.cover,
+        F::TopBars => f64::from(r.top.count),
+        F::TopBar => r.top.diameter,
+        F::BottomBars => f64::from(r.bottom.count),
+        F::BottomBar => r.bottom.diameter,
+        F::Stirrup => r.stirrup,
+        F::StirrupSpacing => r.spacing,
+        _ => return None,
+    })
+}
+
+/// The reinforcement with `field` set to `v`, when `field` is one of its own and `v` can be it.
+fn rebar_with(mut r: bim_core::reinforcement::Reinforcement, field: ElementField, v: f64) -> Option<bim_core::reinforcement::Reinforcement> {
+    use ElementField as F;
+    let whole = v >= 0.0 && v.fract() == 0.0 && v <= 64.0;
+    match field {
+        F::Cover if v > 0.0 => r.cover = v,
+        F::TopBars if whole => r.top.count = v as u32,
+        F::TopBar if v > 0.0 => r.top.diameter = v,
+        F::BottomBars if whole => r.bottom.count = v as u32,
+        F::BottomBar if v > 0.0 => r.bottom.diameter = v,
+        F::Stirrup if v > 0.0 => r.stirrup = v,
+        F::StirrupSpacing if v > 0.0 => r.spacing = v,
+        _ => return None,
+    }
+    Some(r)
+}
+
+/// The bars a member's reinforcement makes in it: `None` when it has none.
+pub(super) fn bars_of(e: &Element) -> Option<Result<Vec<bim_core::reinforcement::BarRow>, bim_core::Refusal>> {
+    let (Some(r), Shape::Linear(l)) = (&e.reinforcement, &e.shape) else { return None };
+    Some(l.profile.profile().and_then(|profile| r.bars(&profile, (l.end - l.start).length())))
+}
+
+/// A member's reinforcement in a line: "2Ø12 + 3Ø16, Ø8-150".
+pub(super) fn bars_text(r: &bim_core::reinforcement::Reinforcement) -> String {
+    let mm = |v: f64| (v * 1000.0).round() as i64;
+    let row = |b: bim_core::reinforcement::Bars| format!("{}Ø{}", b.count, mm(b.diameter));
+    let along: Vec<String> = [r.top, r.bottom].into_iter().filter(|b| b.count > 0).map(row).collect();
+    format!("{}, Ø{}-{}", along.join(" + "), mm(r.stirrup), mm(r.spacing))
 }
 
 /// The value of `field` in `shape` (scene coordinates), if the shape has it.
@@ -149,7 +208,16 @@ fn value(shape: &Shape, field: ElementField) -> Option<f64> {
             F::BoltRows => Some(f64::from(e.rows)),
             _ => None,
         },
-        (Shape::Connection(ConnectionDef { kind: ConnectionKind::EndPlate(e), .. }), f) => match f {
+        (Shape::Connection(ConnectionDef { kind: ConnectionKind::BasePlate(e), .. }), f) => match f {
+            F::PlateThickness => Some(e.thickness),
+            F::PlateMargin => Some(e.margin),
+            F::Bolt => Some(e.bolt),
+            F::Hole => Some(e.hole),
+            F::Grout => Some(e.grout),
+            F::AnchorLength => Some(e.length),
+            _ => None,
+        },
+        (Shape::Connection(ConnectionDef { kind: ConnectionKind::EndPlate(e) | ConnectionKind::Splice(e), .. }), f) => match f {
             F::PlateThickness => Some(e.thickness),
             F::PlateMargin => Some(e.margin),
             F::Bolt => Some(e.bolt),
@@ -250,7 +318,16 @@ fn with_value(shape: &Shape, field: ElementField, v: f64) -> Option<Shape> {
             F::BoltRows if v >= 1.0 && v.fract() == 0.0 && v <= 64.0 => e.rows = v as u32,
             _ => return None,
         },
-        (Shape::Connection(ConnectionDef { kind: ConnectionKind::EndPlate(e), .. }), f) => match f {
+        (Shape::Connection(ConnectionDef { kind: ConnectionKind::BasePlate(e), .. }), f) => match f {
+            F::PlateThickness => set(&mut e.thickness),
+            F::PlateMargin => set(&mut e.margin),
+            F::Bolt => set(&mut e.bolt),
+            F::Hole => set(&mut e.hole),
+            F::Grout => set(&mut e.grout),
+            F::AnchorLength => set(&mut e.length),
+            _ => return None,
+        },
+        (Shape::Connection(ConnectionDef { kind: ConnectionKind::EndPlate(e) | ConnectionKind::Splice(e), .. }), f) => match f {
             F::PlateThickness => set(&mut e.thickness),
             F::PlateMargin => set(&mut e.margin),
             F::Bolt => set(&mut e.bolt),
@@ -281,14 +358,18 @@ impl App {
         if field == ElementField::Name {
             return e.name.clone();
         }
+        if field == ElementField::PileMark { return e.pile_mark.clone().unwrap_or_default(); }
         if field == ElementField::Grade {
             return e.grade.clone().unwrap_or_default();
         }
         let digits = match field {
             ElementField::Turn | ElementField::Slope => 1,
-            ElementField::BoltRows | ElementField::Eave => 0,
+            ElementField::BoltRows | ElementField::Eave | ElementField::TopBars | ElementField::BottomBars => 0,
             _ => 3,
         };
+        if let Some(v) = e.reinforcement.as_ref().and_then(|r| rebar_value(r, field)) {
+            return format!("{v:.digits$}");
+        }
         value(&e.shape_in_project(&self.modeller.model.grid), field).map_or(String::new(), |v| format!("{v:.digits$}"))
     }
 
@@ -304,12 +385,30 @@ impl App {
                 renamed.name = name.to_string();
                 self.change_element(renamed);
             }
+        } else if field == ElementField::PileMark && e.pile_number.is_some() {
+            let mark = typed.trim();
+            let value = (!mark.is_empty()).then(|| mark.to_string());
+            if value != e.pile_mark {
+                let mut changed = e.clone();
+                changed.pile_mark = value;
+                self.change_element(changed);
+            }
         } else if field == ElementField::Grade {
             let grade = Some(typed.trim().to_string()).filter(|g| !g.is_empty());
             if grade != e.grade {
                 let mut graded = e.clone();
                 graded.grade = grade;
                 self.change_element(graded);
+            }
+        } else if let Some(r) = e.reinforcement.filter(|r| rebar_value(r, field).is_some()) {
+            // used when the bars still fit in the section
+            if let Some(changed) = number(&typed).and_then(|v| rebar_with(r, field, v)).filter(|c| *c != r) {
+                let mut reinforced = e.clone();
+                reinforced.reinforcement = Some(changed);
+                match bars_of(&reinforced) {
+                    Some(Err(refusal)) => self.modeller.refusal = Some(refusal),
+                    _ => self.change_element(reinforced),
+                }
             }
         } else if let Some(shape) = number(&typed).and_then(|v| with_value(&e.shape_in_project(&self.modeller.model.grid), field, v)) {
             if field == ElementField::Height && e.top.is_some() {
@@ -322,6 +421,20 @@ impl App {
             }
         }
         self.modeller.typing = Some((e.id, field, typed));
+    }
+
+    /// Gives the selected member the usual reinforcement, or takes its reinforcement away. Refused
+    /// when its section is no rectangle or the bars do not fit in it.
+    pub(super) fn reinforce(&mut self, on: bool) {
+        let Some(e) = self.defined().cloned() else { return };
+        self.modeller.refusal = None;
+        let mut changed = e.clone();
+        changed.reinforcement = on.then(Default::default);
+        match bars_of(&changed) {
+            Some(Err(refusal)) => self.modeller.refusal = Some(refusal),
+            _ if changed != e => self.change_element(changed),
+            _ => {}
+        }
     }
 
     /// Adds a door (with no sill) or a window in the middle of the selected wall or timber frame,
@@ -340,6 +453,16 @@ impl App {
 
     /// Adds an opening to the selected floor (a lying system), in its middle: a rectangular one
     /// 600 square, or a round one of 200.
+    /// Divides the bays of the selected system as `division` says.
+    pub(super) fn set_division(&mut self, division: bim_core::Division) {
+        let Some(e) = self.defined().cloned() else { return };
+        let mut shape = e.shape_in_project(&self.modeller.model.grid);
+        let Shape::System(s) = &mut shape else { return };
+        s.division = Some(division);
+        self.modeller.refusal = None;
+        self.change_shape(&e, shape);
+    }
+
     pub(super) fn add_recess(&mut self, round: bool) {
         let Some(e) = self.defined().cloned() else { return };
         let mut shape = e.shape_in_project(&self.modeller.model.grid);
@@ -365,6 +488,20 @@ impl App {
         let Some(e) = self.defined().cloned() else { return };
         let Shape::Connection(c) = &e.shape else { return };
         if c.kind == ConnectionKind::Cut || std::mem::discriminant(&c.kind) == std::mem::discriminant(&kind) {
+            return;
+        }
+        let mut changed = e.clone();
+        changed.shape = Shape::Connection(ConnectionDef { kind, ..c.clone() });
+        self.modeller.refusal = None;
+        self.change_element(changed);
+    }
+
+    /// Gives the selected join the recipe of a type of the library, sizes and all (a cut stays a
+    /// cut, and a join of members takes no cut).
+    pub(super) fn set_join_recipe(&mut self, kind: ConnectionKind) {
+        let Some(e) = self.defined().cloned() else { return };
+        let Shape::Connection(c) = &e.shape else { return };
+        if c.kind == ConnectionKind::Cut || kind == ConnectionKind::Cut || c.kind == kind {
             return;
         }
         let mut changed = e.clone();
@@ -484,6 +621,7 @@ impl App {
     /// The Definition section: the selected modelled element's values to type in, and the openings
     /// of a wall or a timber frame.
     pub(super) fn element_properties(&self, p: Palette, l: Language) -> Option<Widget<'_, Message>> {
+        if !self.annotates { return None; }
         let e = self.defined()?;
         let shape = e.shape_in_project(&self.modeller.model.grid);
         let field = |label: &str, f: ElementField| field_row(p, label, self.element_field_text(e, f), f);
@@ -492,6 +630,16 @@ impl App {
         // a drawing of this element alone, on a sheet of its own
         if super::element_drawing::frame(&shape).is_some() {
             rows = rows.push(button(text(l.text("Elementtekening", "Element drawing")).size(12)).padding([3, 10]).style(move |_, s| p.row_button(s)).on_press(Message::ElementDrawing(l)));
+        }
+        if let Some(number) = e.pile_number {
+            rows = rows.push(text(format!("{} {number:02}", l.text("Paalnummer", "Pile number"))).size(12))
+                .push(field(l.text("Paalmerk", "Pile mark"), F::PileMark));
+        }
+        if e.class() == "IfcColumn" && e.pile_number.is_none() {
+            rows = rows.push(button(text(l.text("Opnemen in paalstaat", "Register as pile")).size(12)).on_press(Message::DesignatePiles));
+        }
+        if matches!(shape, Shape::Linear(_)) && e.pile_number.is_none() && !e.reinforcing_bar {
+            rows = rows.push(button(text(l.text("Markeren als wapeningsstaaf", "Mark as reinforcing bar")).size(12)).on_press(Message::DesignateReinforcement));
         }
         let has = |f: F| value(&shape, f).is_some();
         let fields: [(F, &str); 12] = [
@@ -563,6 +711,23 @@ impl App {
         if matches!(shape, Shape::Linear(_)) {
             rows = rows.push(field(l.text("Sterkteklasse", "Grade"), F::Grade));
         }
+        // a member's reinforcement: given and taken away, its sizes, and what it weighs
+        if matches!(&shape, Shape::Linear(_)) {
+            let label = if e.reinforcement.is_some() { l.text("Wapening verwijderen", "Remove reinforcement") } else { l.text("Wapening", "Reinforcement") };
+            rows = rows.push(a11y::named(button(text(label).size(12)).padding([3, 10]).style(move |_, s| p.row_button(s)).on_press(Message::Reinforce(e.reinforcement.is_none())), a11y::Role::Button, label));
+            if let (Some(r), Some(Ok(bars))) = (&e.reinforcement, bars_of(e)) {
+                let weight: f64 = bars.iter().map(|b| b.weight()).sum();
+                rows = rows
+                    .push(prop_row(p, l.text("Wapening", "Reinforcement").to_string(), format!("{} · {weight:.0} kg", bars_text(r))))
+                    .push(field(l.text("Dekking (m)", "Cover (m)"), F::Cover))
+                    .push(field(l.text("Staven boven", "Top bars"), F::TopBars))
+                    .push(field(l.text("Diameter boven (m)", "Top diameter (m)"), F::TopBar))
+                    .push(field(l.text("Staven onder", "Bottom bars"), F::BottomBars))
+                    .push(field(l.text("Diameter onder (m)", "Bottom diameter (m)"), F::BottomBar))
+                    .push(field(l.text("Beugel (m)", "Stirrup (m)"), F::Stirrup))
+                    .push(field(l.text("Beugelafstand (m)", "Stirrup spacing (m)"), F::StirrupSpacing));
+            }
+        }
         for (label, value) in self.member_rows(e, l) {
             rows = rows.push(prop_row(p, label, value));
         }
@@ -599,6 +764,15 @@ impl App {
                         ]
                         .spacing(6),
                     )
+                    // its type from the project's library: the recipe with its sizes
+                    .push(self.join_type_picker(p, l, &c.kind))
+                    .push(
+                        row![
+                            choice(l.text("Stuik", "Splice"), ConnectionKind::Splice(bim_core::join::EndPlate::default())),
+                            choice(l.text("Voetplaat", "Base plate"), ConnectionKind::BasePlate(bim_core::join::BasePlate::default())),
+                        ]
+                        .spacing(6),
+                    )
                 };
             }
             // what it is to the analysis model
@@ -617,13 +791,38 @@ impl App {
                     .push(field(l.text("Gat (m)", "Hole (m)"), F::Hole))
                     .push(field(l.text("Aantal bouten", "Number of bolts"), F::BoltRows));
             }
-            if matches!(c.kind, ConnectionKind::EndPlate(_)) {
+            if matches!(c.kind, ConnectionKind::BasePlate(_)) {
+                rows = rows
+                    .push(field(l.text("Plaatdikte (m)", "Plate thickness (m)"), F::PlateThickness))
+                    .push(field(l.text("Plaat voorbij profiel (m)", "Plate past profile (m)"), F::PlateMargin))
+                    .push(field(l.text("Ondersabeling (m)", "Grout (m)"), F::Grout))
+                    .push(field(l.text("Anker (m)", "Anchor (m)"), F::Bolt))
+                    .push(field(l.text("Gat (m)", "Hole (m)"), F::Hole))
+                    .push(field(l.text("Ankerlengte (m)", "Anchor length (m)"), F::AnchorLength));
+            }
+            if matches!(c.kind, ConnectionKind::EndPlate(_) | ConnectionKind::Splice(_)) {
                 rows = rows
                     .push(field(l.text("Plaatdikte (m)", "Plate thickness (m)"), F::PlateThickness))
                     .push(field(l.text("Plaat voorbij profiel (m)", "Plate past profile (m)"), F::PlateMargin))
                     .push(field(l.text("Bout (m)", "Bolt (m)"), F::Bolt))
                     .push(field(l.text("Gat (m)", "Hole (m)"), F::Hole))
                     .push(field(l.text("Bouten per rij", "Bolts per row"), F::BoltRows));
+            }
+        }
+        // a system with a grid of its own: how its bays are divided along its line
+        if let Shape::System(s) = &shape {
+            let t = s.system_type.as_ref();
+            if t.is_none_or(|t| t.framing.is_none() && t.pattern == bim_library::Pattern::Stack) {
+                let now = s.divided();
+                let name = |d: bim_core::Division| match d {
+                    bim_core::Division::Equal => l.text("Gelijk verdeeld", "Equal bays"),
+                    bim_core::Division::FromStart => l.text("Heel vanaf begin", "Whole from the start"),
+                    bim_core::Division::FromEnd => l.text("Heel vanaf eind", "Whole from the end"),
+                    bim_core::Division::Centred => l.text("Gecentreerd", "Centred"),
+                };
+                rows = rows.push(text(format!("{}: {}", l.text("Verdeling", "Division"), name(now))).size(12));
+                let pick = |d: bim_core::Division| a11y::named(button(text(name(d)).size(11)).padding([2, 8]).style(move |_, s| p.row_button(s)).on_press(Message::SetDivision(d)), a11y::Role::Button, name(d));
+                rows = rows.push(row![pick(bim_core::Division::Equal), pick(bim_core::Division::FromStart)].spacing(6)).push(row![pick(bim_core::Division::FromEnd), pick(bim_core::Division::Centred)].spacing(6));
             }
         }
         // a floor made as a system: its openings, across it where a wall's are up it
@@ -870,7 +1069,7 @@ mod tests {
         use bim_core::SystemDef;
         let mut app = App::default();
         app.new_model("Level 0");
-        let s = SystemDef { start: DVec2::ZERO, end: DVec2::new(5.0, 0.0), base: 0.0, height: 2.7, spacing: DVec2::splat(1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), grid: None };
+        let s = SystemDef { start: DVec2::ZERO, end: DVec2::new(5.0, 0.0), base: 0.0, height: 2.7, spacing: DVec2::splat(1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), grid: None, division: None };
         let id = app.add_element("Curtain wall", None, Shape::System(s)).unwrap();
         app.select_modelled(id);
         let system = |app: &App| match app.modeller.model.get(id).unwrap().shape_in_project(&app.modeller.model.grid) {
@@ -914,7 +1113,7 @@ mod tests {
         let mut app = App::default();
         app.new_model("Level 0");
         let frame = |app: &App, start: DVec2, end: DVec2, id: &str| {
-            let s = SystemDef { start, end, base: 0.0, height: 2.7, spacing: DVec2::splat(1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), grid: None };
+            let s = SystemDef { start, end, base: 0.0, height: 2.7, spacing: DVec2::splat(1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), grid: None, division: None };
             Shape::System(s.typed_from(&app.library, id).unwrap())
         };
         let outer = frame(&app, DVec2::ZERO, DVec2::new(4.8, 0.0), "system.timber-frame-140");
@@ -963,7 +1162,7 @@ mod tests {
         let mut app = App::default();
         app.new_model("Level 0");
         let frame = |app: &App, start: DVec2, end: DVec2| {
-            let s = SystemDef { start, end, base: 0.0, height: 2.7, spacing: DVec2::splat(1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), grid: None };
+            let s = SystemDef { start, end, base: 0.0, height: 2.7, spacing: DVec2::splat(1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), grid: None, division: None };
             Shape::System(s.typed_from(&app.library, "system.timber-frame-140").unwrap())
         };
         let (long, short) = (frame(&app, DVec2::ZERO, DVec2::new(4.8, 0.0)), frame(&app, DVec2::new(4.8, 0.0), DVec2::new(4.8, 3.0)));
@@ -1047,7 +1246,7 @@ mod tests {
         let mut app = App::default();
         app.new_model("Level 0");
         let window = Opening { along: 1.2, sill: 0.9, width: 1.2, height: 1.2, framing: None };
-        let generic = bim_core::SystemDef { start: DVec2::ZERO, end: DVec2::new(7.2, 0.0), base: 0.0, height: 2.7, spacing: DVec2::new(1.5, 1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: vec![window], breaks: Vec::new(), outline: Vec::new(), grid: None };
+        let generic = bim_core::SystemDef { start: DVec2::ZERO, end: DVec2::new(7.2, 0.0), base: 0.0, height: 2.7, spacing: DVec2::new(1.5, 1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: vec![window], breaks: Vec::new(), outline: Vec::new(), grid: None, division: None };
         let frame = generic.typed_from(&bim_library::Library::starter(), "system.timber-frame-140").unwrap();
         app.add_element("Frame", None, Shape::System(frame)).unwrap();
         app.select_modelled(ElementId(1));
@@ -1104,11 +1303,50 @@ mod tests {
         assert_eq!(units(&app), before);
     }
     #[test]
+    fn a_rectangle_sketched_in_a_floor_of_slabs_is_an_opening_trimmed_as_its_type_says() {
+        use crate::app::modeller::sketch::{Segment, SketchError};
+        for (of, trimmed) in [("system.hollow-core-200", true), ("system.wide-slab-200", false)] {
+            let mut app = App::default();
+            app.new_model("Level 0");
+            let generic = bim_core::SystemDef { start: DVec2::ZERO, end: DVec2::new(4.8, 0.0), base: 3.0, height: 6.0, spacing: DVec2::splat(1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), division: None };
+            let floor = generic.laid(app.library.system_type(of).unwrap()).unwrap();
+            let id = app.add_element("Floor", None, Shape::System(floor)).unwrap();
+            let volume = |app: &App| app.modeller.model.evaluate(id).unwrap().iter().map(|p| p.solid.volume()).sum::<f64>();
+            let whole = volume(&app);
+            // a stair hole of 1.0 by 2.4 drawn in its sketch
+            app.open_sketch(id);
+            let p = DVec2::new;
+            let rectangle = |a: DVec2, b: DVec2| [Segment::line(a, p(b.x, a.y)), Segment::line(p(b.x, a.y), b), Segment::line(b, p(a.x, b.y)), Segment::line(p(a.x, b.y), a)];
+            app.modeller.sketch.as_mut().unwrap().segments.extend(rectangle(p(1.5, 2.0), p(2.5, 4.4)));
+            app.finish_sketch();
+            assert!(app.modeller.sketch.is_none() && app.modeller.refusal.is_none(), "{of}: {:?}", app.modeller.refusal);
+            let Shape::System(s) = app.modeller.model.get(id).unwrap().shape_in_project(&app.modeller.model.grid) else { panic!("a system") };
+            assert_eq!(s.openings.len(), 1, "{of}");
+            let o = s.openings[0];
+            assert!((o.along - 1.5).abs() < 1e-6 && (o.sill - 2.0).abs() < 1e-6 && (o.width - 1.0).abs() < 1e-6 && (o.height - 2.4).abs() < 1e-6, "{of}: {o:?}");
+            assert!(volume(&app) < whole - 0.5 * 1.0 * 2.4 * 0.05, "{of}");
+            // hollow-core slabs hang in steel trimmers beside it; a wide-slab floor is cut
+            assert_eq!(app.modeller.model.evaluate(id).unwrap().iter().any(|p| p.material.as_deref() == Some("steel")), trimmed, "{of}");
+            // opened again it is there as four lines more, and removed it is gone
+            app.open_sketch(id);
+            assert_eq!(app.modeller.sketch.as_ref().unwrap().segments.len(), 8, "{of}");
+            app.modeller.sketch.as_mut().unwrap().segments.truncate(4);
+            app.finish_sketch();
+            assert!((volume(&app) - whole).abs() < 1e-6, "{of}");
+            // a loop askew is told
+            app.open_sketch(id);
+            app.modeller.sketch.as_mut().unwrap().segments.extend([Segment::line(p(1.0, 1.0), p(2.0, 1.0)), Segment::line(p(2.0, 1.0), p(1.5, 2.0)), Segment::line(p(1.5, 2.0), p(1.0, 1.0))]);
+            app.finish_sketch();
+            assert_eq!(app.modeller.sketch.as_ref().unwrap().error, Some(SketchError::OpeningNotAlong), "{of}");
+        }
+    }
+
+    #[test]
     fn a_floor_system_is_sketched_gets_openings_and_keeps_its_place_mirrored() {
         use crate::app::transform::{transformed, Map};
         let mut app = App::default();
         app.new_model("Level 0");
-        let generic = bim_core::SystemDef { start: DVec2::ZERO, end: DVec2::new(4.8, 0.0), base: 3.0, height: 6.0, spacing: DVec2::splat(1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), grid: None };
+        let generic = bim_core::SystemDef { start: DVec2::ZERO, end: DVec2::new(4.8, 0.0), base: 3.0, height: 6.0, spacing: DVec2::splat(1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), grid: None, division: None };
         let floor = generic.laid(app.library.system_type("system.hollow-core-200").unwrap()).unwrap();
         let id = app.add_element("Floor", None, Shape::System(floor)).unwrap();
         app.select_modelled(id);
@@ -1126,6 +1364,8 @@ mod tests {
         assert!(app.modeller.sketch.is_none() && app.modeller.refusal.is_none());
         assert_eq!(system(&app).outline.len(), 4);
         // an opening and a round one, in its middle
+        let _ = app.update(Message::SetDivision(bim_core::Division::Centred));
+        assert!(matches!(&app.modeller.model.get(id).unwrap().shape, Shape::System(s) if s.division == Some(bim_core::Division::Centred)));
         let _ = app.update(Message::AddRecess(false));
         let _ = app.update(Message::AddRecess(true));
         let s = system(&app);

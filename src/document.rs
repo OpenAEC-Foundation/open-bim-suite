@@ -5,7 +5,12 @@
 //!
 //! Headless: no GUI or GPU, so the MCP server and a later BIM kernel crate can use it as it is.
 
+mod soundings;
+
 use crate::model::Model;
+use bim_library::house::Field;
+use std::collections::HashMap;
+type TitleFields = HashMap<Field, String>;
 use crate::units::UnitKeySet;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -151,6 +156,7 @@ impl Shape {
 /// [`PlanView::cut`] above its level.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlanView {
+    pub orthophoto: Option<crate::raster::OrthoPhoto>,
     /// The IfcX path, a UUID.
     pub path: String,
     pub name: String,
@@ -167,6 +173,8 @@ pub struct PlanView {
     /// The kind of drawing it is, by the key the project's drawing standard has it under: it is
     /// drawn by that kind's rules. `None`: the kind usual for what it is.
     pub drawing: Option<String>,
+    /// Authored line pens, grid visibility and view placement.
+    pub presentation: Value,
     /// Its dimensions, shown wherever it is placed.
     pub dimensions: Vec<Dimension>,
     /// Its texts, shown wherever it is placed.
@@ -178,6 +186,16 @@ pub struct PlanView {
     /// What the modelled project says on it by itself, made again after every change of the
     /// model and not kept in the file: the names and areas of its spaces.
     pub tags: Vec<Note>,
+    /// Generate plan symbols from the actual piles. Existing authored plans opt in explicitly.
+    pub pile_symbols: bool,
+    pub pile_tag_marks: bool,
+    /// Per-element tag offset in model metres, relative to the pile head.
+    pub pile_offsets: std::collections::BTreeMap<u64, [f64; 2]>,
+    /// Regenerated tag index, element identity, and head used by drag editing.
+    pub pile_tags: Vec<(usize, u64, [f64; 2])>,
+    pub corner_labels: bool,
+    pub office_symbol_lines: usize,
+    pub symbol_fills: Vec<Fill>,
     /// And the lines it draws by itself: the swings of its doors.
     pub symbols: Vec<[[f64; 2]; 2]>,
     /// The regions drawn on it in one colour that are no model, under its lines.
@@ -195,12 +213,27 @@ impl SectionView {
     /// What its mark on a floor plan says: a section its letter (the last word of "Section A"),
     /// an elevation the side it looks at (the first word of "North elevation").
     pub fn mark(&self) -> String {
+        if let Some(mark) = self.presentation["mark"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+            return mark.to_owned();
+        }
         let word = match self.kind {
             SectionKind::Section => self.name.rsplit(' ').next(),
             SectionKind::Elevation => self.name.split(' ').next(),
         };
         word.unwrap_or(&self.name).to_string()
     }
+}
+
+/// Authored information on a pile legend; shaft, length and end levels follow its members.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PileLegendField {
+    Report,
+    Advice,
+    Execution,
+    Datum,
+    Foot(String),
+    Uncut(String),
+    Cutoff(String),
 }
 
 /// The kinds of view along a line.
@@ -247,6 +280,8 @@ pub struct SectionView {
     /// The kind of drawing it is, by the key the project's drawing standard has it under: it is
     /// drawn by that kind's rules. `None`: the kind usual for what it is.
     pub drawing: Option<String>,
+    /// Authored line pens, grid visibility and view placement.
+    pub presentation: Value,
     /// Its dimensions, in its drawing's (u, v).
     pub dimensions: Vec<Dimension>,
     /// Its texts, in its drawing's (u, v).
@@ -375,6 +410,13 @@ pub struct DimensionStyle {
     pub name: String,
     /// The height of the figure's letters.
     pub size: f64,
+    /// Explicit typeface and nominal em size in typographic points on paper.
+    pub font_family: Option<Arc<str>>,
+    pub font_size_pt: Option<f64>,
+    /// Read the figure along its measurement line from the foot or right side of the page.
+    pub aligned_text: bool,
+    /// Give a chain intervals that add up to its rounded reference stations.
+    pub round_stations: bool,
     pub tick: Tick,
     /// Half the length of a slash, the length of an arrow, the diameter of a dot.
     pub tick_size: f64,
@@ -393,8 +435,29 @@ impl DimensionStyle {
 
     /// The style of a dimension that names none.
     pub fn standard() -> Self {
-        Self { name: Self::STANDARD.to_string(), size: NOTE_HEIGHT, tick: Tick::Slash, tick_size: 0.0012, extension: 0.0015, gap: 0.0015, unit: DimensionUnit::Millimetres, decimals: 0 }
+        Self { name: Self::STANDARD.to_string(), size: NOTE_HEIGHT, font_family: None, font_size_pt: None, aligned_text: false, round_stations: false, tick: Tick::Slash, tick_size: 0.0012, extension: 0.0015, gap: 0.0015, unit: DimensionUnit::Millimetres, decimals: 0 }
     }
+
+    pub fn paper_font_size(&self) -> f64 {
+        self.font_size_pt.map_or(self.size, |pt| pt * 0.0254 / 72.0)
+    }
+
+    pub fn label_family(&self) -> Option<Arc<str>> {
+        self.font_family.clone().or_else(|| self.font_size_pt.map(|_| Arc::from("Inter")))
+    }
+
+    /// A readable baseline in the drawing's y-up coordinate system.
+    pub fn label_angle(&self, dx: f64, dy: f64) -> f64 {
+        if !self.aligned_text { return 0.0; }
+        if dx < 0.0 || (dx == 0.0 && dy < 0.0) {
+            (-dy).atan2(-dx)
+        } else {
+            dy.atan2(dx)
+        }
+    }
+
+    /// Paper distance of a baseline above an aligned dimension line.
+    pub const ALIGNED_LABEL_GAP: f64 = 0.0008;
 
     /// The figure of a length (metres) in this style.
     pub fn figure(&self, length: f64) -> String {
@@ -406,7 +469,12 @@ impl DimensionStyle {
     }
 
     fn to_ifcx(&self) -> Value {
-        json!({"name": self.name, "size": self.size, "tick": self.tick.key(), "tick_size": self.tick_size, "extension": self.extension, "gap": self.gap, "unit": self.unit.key(), "decimals": self.decimals})
+        let mut value = json!({"name": self.name, "size": self.size, "tick": self.tick.key(), "tick_size": self.tick_size, "extension": self.extension, "gap": self.gap, "unit": self.unit.key(), "decimals": self.decimals});
+        if let Some(family) = &self.font_family { value["font_family"] = family.as_ref().into(); }
+        if let Some(pt) = self.font_size_pt { value["font_size_pt"] = pt.into(); }
+        if self.round_stations || self.name == "3BM ronde stip" { value["round_stations"] = self.round_stations.into(); }
+        if self.aligned_text || self.name == "3BM ronde stip" { value["aligned_text"] = self.aligned_text.into(); }
+        value
     }
 
     /// A style of an IFCX file; a missing or senseless value is the standard style's.
@@ -414,9 +482,17 @@ impl DimensionStyle {
         let standard = Self::standard();
         let name = v.get("name")?.as_str()?.trim();
         let size = |key: &str, or: f64| v.get(key).and_then(Value::as_f64).filter(|s| s.is_finite() && (0.0..=0.1).contains(s)).unwrap_or(or);
+        let office = name == "3BM ronde stip";
+        let legacy_size = Some(size("size", standard.size)).filter(|s| *s > 0.0).unwrap_or(standard.size);
+        let font_family = v.get("font_family").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())
+            .or_else(|| office.then_some(crate::typeface::ARIAL_NARROW)).map(Arc::from);
+        let font_size_pt = v.get("font_size_pt").and_then(Value::as_f64).filter(|s| s.is_finite() && *s > 0.0 && *s <= 288.0)
+            .or_else(|| (office && (legacy_size-standard.size).abs()<1e-12).then_some(6.8));
         (!name.is_empty()).then(|| Self {
             name: name.to_string(),
-            size: Some(size("size", standard.size)).filter(|s| *s > 0.0).unwrap_or(standard.size),
+            size: legacy_size,
+            font_family, font_size_pt, aligned_text: v["aligned_text"].as_bool().unwrap_or(office),
+            round_stations: v["round_stations"].as_bool().unwrap_or(office),
             tick: v.get("tick").and_then(Value::as_str).and_then(Tick::from_key).unwrap_or_default(),
             tick_size: size("tick_size", standard.tick_size),
             extension: size("extension", standard.extension),
@@ -492,14 +568,25 @@ impl Fill {
 
 /// A dimension on a drawing: the distance between two of its points (a floor plan's x, y in the
 /// model's frame, a section's u, v; metres).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Dimension {
+    pub chain: Option<DimensionChain>,
     pub from: [f64; 2],
     pub to: [f64; 2],
     /// Which of the document's dimension styles it has (0: the standard one).
     pub style: usize,
     /// What its ends hold on to, `from` then `to`: an end with an anchor follows its element.
     pub anchors: [Option<Anchor>; 2],
+}
+
+/// Direction of a continuous dimension and its model references between the ends.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DimensionChain {
+    /// A point on a dimension line placed explicitly in model coordinates.
+    baseline: Option<[f64; 2]>,
+    offset: f64,
+    axis: [f64; 2],
+    inner: Vec<([f64; 2], Option<Anchor>)>,
 }
 
 /// What an end of a dimension holds on to: a point of a modelled element (a wall's start or end,
@@ -527,10 +614,188 @@ impl Anchor {
 }
 
 impl Dimension {
+    pub fn references(&self) -> impl Iterator<Item = ([f64; 2], Option<Anchor>)> + '_ {
+        std::iter::once((self.from, self.anchors[0]))
+            .chain(self.chain.iter().flat_map(|c| c.inner.iter().copied()))
+            .chain(std::iter::once((self.to, self.anchors[1])))
+    }
+
+    pub(crate) fn interval_value(&self, from: [f64; 2], to: [f64; 2], style: &DimensionStyle) -> f64 {
+        let Some(chain) = self.chain.as_ref().filter(|_| style.round_stations) else {
+            return (to[0]-from[0]).hypot(to[1]-from[1]);
+        };
+        let units = match style.unit { DimensionUnit::Millimetres => 1000., DimensionUnit::Metres => 1. };
+        let precision = units * 10.0_f64.powi(i32::from(style.decimals.min(6)));
+        let station = |q: [f64; 2]| ((q[0]*chain.axis[0] + q[1]*chain.axis[1]) * precision).round_ties_even();
+        (station(to)-station(from)).abs() / precision
+    }
+
+    pub fn paper_offset(&self) -> f64 { self.chain.as_ref().map_or(0.006, |c| c.offset) }
+
+    pub fn measured_ends(&self) -> [[f64; 2]; 2] {
+        [self.project(self.from), self.project(self.to)]
+    }
+
+    fn project(&self, q: [f64; 2]) -> [f64; 2] {
+        let Some(c) = &self.chain else { return q };
+        let origin = c.baseline.unwrap_or(self.from);
+        // Preserve exact stations when projecting onto horizontal or vertical measurement lines.
+        if c.axis[1] == 0.0 { return [q[0], origin[1]]; }
+        if c.axis[0] == 0.0 { return [origin[0], q[1]]; }
+        let t = (q[0]-origin[0])*c.axis[0] + (q[1]-origin[1])*c.axis[1];
+        [origin[0]+t*c.axis[0], origin[1]+t*c.axis[1]]
+    }
+
+    fn axis(&self) -> [f64; 2] {
+        self.chain.as_ref().map_or_else(|| {
+            let length = self.length();
+            [(self.to[0] - self.from[0]) / length, (self.to[1] - self.from[1]) / length]
+        }, |c| c.axis)
+    }
+
+    fn station(&self, q: [f64; 2]) -> f64 {
+        let u = self.axis();
+        (q[0] - self.from[0]) * u[0] + (q[1] - self.from[1]) * u[1]
+    }
+
+    /// Actual references and their perpendicular projections onto the measurement axis.
+    pub fn intervals(&self) -> impl Iterator<Item = ([[f64; 2]; 2], [[f64; 2]; 2])> + '_ {
+        self.references().zip(self.references().skip(1)).map(|((a, _), (b, _))| {
+            let actual = [a, b];
+            let projected = actual.map(|q| self.project(q));
+            (actual, projected)
+        })
+    }
+
+    pub(crate) fn reference_mut(&mut self, index: usize) -> Option<(&mut [f64; 2], &mut Option<Anchor>)> {
+        let count = self.chain.as_ref().map_or(0, |c| c.inner.len());
+        if index == 0 { return Some((&mut self.from, &mut self.anchors[0])); }
+        if index == count + 1 { return Some((&mut self.to, &mut self.anchors[1])); }
+        let (at, anchor) = self.chain.as_mut()?.inner.get_mut(index - 1)?;
+        Some((at, anchor))
+    }
+
+    pub(crate) fn order_references(&mut self) {
+        let Some(chain) = &self.chain else { return };
+        let axis = chain.axis;
+        let mut refs = self.references().collect::<Vec<_>>();
+        refs.sort_by(|a,b| self.station(a.0).total_cmp(&self.station(b.0)));
+        self.set_references(&refs, axis);
+    }
+
+    fn set_references(&mut self, refs: &[([f64; 2], Option<Anchor>)], axis: [f64; 2]) {
+        let baseline = self.chain.as_ref().and_then(|c| c.baseline)
+            .or_else(|| (refs.len() > 2).then_some(self.from));
+        (self.from, self.anchors[0]) = refs[0];
+        (self.to, self.anchors[1]) = refs[refs.len() - 1];
+        let offset = self.paper_offset();
+        let end = self.to;
+        let off_axis = ((end[0]-self.from[0])*axis[1] - (end[1]-self.from[1])*axis[0]).abs() > 1e-9;
+        self.chain = (refs.len() > 2 || offset != 0.006 || off_axis || baseline.is_some()).then(|| DimensionChain { axis, offset, baseline, inner: refs[1..refs.len() - 1].to_vec() });
+    }
+
     /// Its length (metres).
     pub fn length(&self) -> f64 {
-        (self.to[0] - self.from[0]).hypot(self.to[1] - self.from[1])
+        if self.chain.is_some() { self.station(self.to).abs() }
+        else { (self.to[0] - self.from[0]).hypot(self.to[1] - self.from[1]) }
     }
+}
+
+impl PlanView {
+    /// Recover explicit reference points and measurement-line positions from a view that
+    /// also supplies ordinary two-point dimensions for readers without continuous dimensions.
+    fn adopt_dimension_chains(&mut self) {
+        let Some(records) = self.presentation["dimensionChains"].as_array() else { return };
+        let mut replacements = std::collections::BTreeMap::new();
+        let mut witnesses = Vec::new();
+        for record in records {
+            let Some(first) = record["firstDimension"].as_u64().and_then(|v| usize::try_from(v).ok()) else { continue };
+            let Some(count) = record["segments"].as_u64().and_then(|v| usize::try_from(v).ok()) else { continue };
+            let Some(end) = first.checked_add(count) else { continue };
+            let Some(segments) = self.dimensions.get(first..end).filter(|s| !s.is_empty()) else { continue };
+            let Some(axis @ 0..=1) = record["axis"].as_u64().map(|v| v as usize) else { continue };
+            let Some(offset) = record["offset"].as_f64().filter(|v| v.is_finite()) else { continue };
+            let Some(points) = record["references"].as_array().and_then(|rs| {
+                rs.iter().map(|r| serde_json::from_value::<[f64; 2]>(r.clone()).ok()).collect::<Option<Vec<_>>>()
+            }).filter(|p| p.len() == count + 1) else { continue };
+            let cross = 1-axis;
+            let mut u = [0.,0.];
+            u[axis] = (points[count][axis]-points[0][axis]).signum();
+            let station_matches = |a: f64,b: f64| (a-b).abs() < 1e-7;
+            if !segments.iter().zip(points.windows(2)).all(|(d,w)| {
+                d.chain.is_none() && d.style == segments[0].style && (w[1][axis]-w[0][axis])*u[axis] >= 0.001
+                    && station_matches(d.from[axis],w[0][axis]) && station_matches(d.to[axis],w[1][axis])
+                    && station_matches(d.from[cross],offset) && station_matches(d.to[cross],offset)
+            }) { continue; }
+            if replacements.range(..end).next_back().is_some_and(|(_, (prev_end,_))| *prev_end > first) { continue; }
+            let mut baseline = points[0];
+            baseline[cross] = offset;
+            let mut refs = Vec::new();
+            for (i,q) in points.iter().copied().enumerate() {
+                let mut anchor = if i == count { segments[count-1].anchors[1] } else { segments[i].anchors[0] };
+                // A fallback anchor belongs to the stored endpoint; an actual reference can
+                // reuse it only when it names that same physical point.
+                if !station_matches(q[cross], offset) { anchor = None; }
+                refs.push((q,anchor));
+            }
+            let mut d = segments[0].clone();
+            d.chain = Some(DimensionChain { axis: u, baseline: Some(baseline), offset: 0., inner: Vec::new() });
+            d.set_references(&refs,u);
+            witnesses.extend(points.iter().map(|q| (axis,*q,offset)));
+            replacements.insert(first,(end,d));
+        }
+        if replacements.is_empty() { return; }
+        let raw = std::mem::take(&mut self.dimensions);
+        let mut skip = 0;
+        for (i,d) in raw.into_iter().enumerate() {
+            if i < skip { continue; }
+            if let Some((end,chain)) = replacements.remove(&i) {
+                self.dimensions.push(chain);
+                skip = end;
+            } else { self.dimensions.push(d); }
+        }
+        // An ungrouped, unstyled perpendicular crossing the very same tick on the
+        // reference's side is fallback witness ink. Leave shape and pen index ranges intact.
+        if self.shapes.is_empty() && self.presentation["pens"].is_null() {
+            self.lines.retain(|[a,b]| {
+                // A centreline through a measured point (e.g. the head of a nearby
+                // pile) belongs to the drawing, even when another row crosses it.
+                let middle = [(a[0]+b[0])/2., (a[1]+b[1])/2.];
+                if witnesses.iter().any(|(_,q,_)| (middle[0]-q[0]).hypot(middle[1]-q[1]) < 1e-7) { return true; }
+                !witnesses.iter().any(|&(axis,q,offset)| {
+                let cross = 1-axis;
+                let side = (q[cross]-offset).signum();
+                let along = |p: [f64;2]| (p[cross]-offset)*side;
+                (a[axis]-q[axis]).abs() < 1e-7 && (b[axis]-q[axis]).abs() < 1e-7
+                    && along(*a).min(along(*b)) < 0. && along(*a).max(along(*b)) > 0.
+                    && along(*a).max(along(*b)) < (q[cross]-offset).abs()
+                })
+            });
+        }
+        if let Some(obj) = self.presentation.as_object_mut() { obj.remove("dimensionChains"); }
+    }
+}
+
+/// Adjacent legacy segments form one axis only when they touch, point in the same
+/// direction and use the same style and shared object reference.
+fn join_legacy_dimensions(dimensions: Vec<Dimension>) -> Vec<Dimension> {
+    let mut out: Vec<Dimension> = Vec::new();
+    for next in dimensions {
+        let prev = out.last_mut();
+        if let Some(d) = prev.filter(|d| d.to == next.from && d.style == next.style
+                && d.anchors[1] == next.anchors[0] && next.chain.is_none()) {
+            let axis = d.axis();
+            let u = next.axis();
+            if axis[0] * u[0] + axis[1] * u[1] > 0.999999999999 {
+                let mut refs = d.references().collect::<Vec<_>>();
+                refs.push((next.to, next.anchors[1]));
+                d.set_references(&refs, axis);
+                continue;
+            }
+        }
+        out.push(next);
+    }
+    out
 }
 
 /// A text on a drawing, standing on a point of it (see [`Align`]; a floor plan's x, y, a
@@ -550,6 +815,15 @@ pub struct Note {
     /// A level mark of a section or an elevation: its text is the height it stands at
     /// ([`level_text`]), kept so when it moves, and it is drawn with a triangle on that height.
     pub level: bool,
+}
+
+impl Note {
+    /// Native paper text uses the authored em height, including notes without a named family.
+    pub(crate) fn paper_face(&self) -> crate::typeface::Face {
+        let mut face = self.face.clone();
+        if face.family.is_empty() { face.family = "Segoe UI".into(); }
+        face
+    }
 }
 
 /// What a level mark says of height `z` (metres): "+2.700", and "+0.000" at zero.
@@ -585,12 +859,42 @@ pub struct Sheet {
     /// The IfcX path, a UUID.
     pub path: String,
     pub number: String,
+    fields: TitleFields,
+    pub revisions: [SheetRevision; 6],
     pub name: String,
     /// Number and name, as a tab shows them.
     pub title: String,
     /// Width and height (metres).
     pub paper: [f64; 2],
+    pub(crate) background: Option<crate::raster::PlacedImage>,
+    presentation: Option<Arc<Value>>,
     pub views: Vec<PlacedView>,
+}
+
+impl Sheet {
+    fn mark_stamp_field(&mut self, field: Field) {
+        if self.background.is_none() { return; }
+        let Some(presentation) = self.presentation.as_mut() else { return };
+        let fields = &mut Arc::make_mut(presentation)["edited_stamp_fields"];
+        if !fields.is_array() { *fields = json!([]); }
+        if let Some(list) = fields.as_array_mut() {
+            let key = json!(field);
+            if !list.contains(&key) { list.push(key); }
+        }
+    }
+
+    pub(crate) fn edited_stamp_fields(&self) -> impl Iterator<Item=Field> + '_ {
+        self.presentation.as_ref().and_then(|p| p["edited_stamp_fields"].as_array()).into_iter().flatten()
+            .filter_map(|v| serde_json::from_value(v.clone()).ok())
+    }
+}
+
+/// One dated change in the sheet revision column.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct SheetRevision {
+    pub date: String,
+    pub description: String,
 }
 
 /// A view on a sheet.
@@ -602,6 +906,18 @@ pub struct PlacedView {
     pub at: [f64; 2],
     /// 1 : `scale`.
     pub scale: f64,
+    /// Overrides the view's default name and scale caption on this placement only.
+    pub show_title: Option<bool>,
+}
+
+impl PlacedView {
+    pub(crate) fn to_paper(&self, origin: [f64; 2], point: [f64; 2]) -> [f64; 2] {
+        [self.at[0] + (point[0] - origin[0]) / self.scale, self.at[1] + (point[1] - origin[1]) / self.scale]
+    }
+
+    pub(crate) fn to_model(&self, origin: [f64; 2], point: [f64; 2]) -> [f64; 2] {
+        [origin[0] + (point[0] - self.at[0]) * self.scale, origin[1] + (point[1] - self.at[1]) * self.scale]
+    }
 }
 
 /// Why a level was not added.
@@ -620,6 +936,8 @@ pub type Drawn = Vec<(String, Vec<[[f64; 2]; 2]>, Vec<Shape>)>;
 /// The project document.
 #[derive(Debug, Clone, Default)]
 pub struct Document {
+    /// Highest issued pile number, including piles since removed.
+    pub(crate) pile_high_water: u64,
     /// Low to high; equal elevations by name.
     levels: Vec<Level>,
     /// Floor plans, in the order they were made.
@@ -630,6 +948,8 @@ pub struct Document {
     views_3d: Vec<View3d>,
     /// Sheets, in the order they were made.
     sheets: Vec<Sheet>,
+    project_fields: TitleFields,
+    pub project_address: String,
     /// How dimensions look; a dimension names one by its place here.
     dimension_styles: DimensionStyles,
     /// Levels and views made so far, for the paths of new ones.
@@ -698,6 +1018,10 @@ impl Document {
         let dims = |d: &[Dimension]| {
             let one = |d: &Dimension| {
                 let style = if d.style == 0 { Value::Null } else { json!(self.dimension_style(d.style).name) };
+                if let Some(chain) = &d.chain {
+                    let refs: Vec<_> = d.references().map(|(at, anchor)| json!([at, anchor.map(Anchor::to_ifcx)])).collect();
+                    return json!({"references":refs, "axis":chain.axis, "baseline":chain.baseline, "offset":chain.offset, "style":style});
+                }
                 match (d.style, d.anchors) {
                     (0, [None, None]) => json!([d.from, d.to]),
                     (_, [None, None]) => json!([d.from, d.to, style]),
@@ -739,9 +1063,14 @@ impl Document {
             children.insert(format!("plan {}", i + 1), p.path.clone().into());
             let fills = |all: &[Fill]| all.iter().map(Fill::to_ifcx).collect::<Vec<_>>();
             let view = json!({
-                "name": p.name, "kind": p.kind.key(), "level": level, "cut": p.cut, "depth": p.depth, "scale": p.scale, "crop": rect(p.crop), "dimensions": dims(&p.dimensions), "notes": notes(&p.notes), "lines": p.lines, "fills": fills(&p.fills), "layers": p.layers,
+                "name": p.name, "kind": p.kind.key(), "level": level, "cut": p.cut, "depth": p.depth, "scale": p.scale, "crop": rect(p.crop), "dimension_format": 2, "dimensions": dims(&p.dimensions), "notes": notes(&p.notes), "lines": p.lines, "fills": fills(&p.fills), "layers": p.layers,
             });
-            let view = shaped(view, &p.shapes);
+            let mut view = shaped(view, &p.shapes);
+            if !p.presentation.is_null() { view["presentation"] = p.presentation.clone(); }
+            if p.pile_tag_marks { view["pile_tag_marks"] = true.into(); }
+            if let Some(photo) = &p.orthophoto { photo.write(&mut view["presentation"]); }
+            if p.pile_symbols { view["pile_symbols"] = true.into(); }
+            if !p.pile_offsets.is_empty() { view["pile_offsets"] = json!(p.pile_offsets); }
             nodes.push(json!({"path": p.path, "attributes": {"o3v::view::plan": with_hidden(with_drawing(view, &p.drawing), &p.hidden)}}));
         }
         for (i, s) in self.sections.iter().enumerate() {
@@ -750,7 +1079,8 @@ impl Document {
             let view = json!({
                 "name": s.name, "kind": s.kind.key(), "from": s.from, "to": s.to, "depth": s.depth, "scale": s.scale, "crop": rect(s.crop), "dimensions": dims(&s.dimensions), "notes": notes(&s.notes), "lines": s.lines, "fills": fills(&s.fills), "layers": s.layers,
             });
-            let view = shaped(view, &s.shapes);
+            let mut view = shaped(view, &s.shapes);
+            if !s.presentation.is_null() { view["presentation"] = s.presentation.clone(); }
             nodes.push(json!({"path": s.path, "attributes": {"o3v::view::section": with_hidden(with_drawing(view, &s.drawing), &s.hidden)}}));
         }
         for (i, v) in self.views_3d.iter().enumerate() {
@@ -767,11 +1097,17 @@ impl Document {
         }
         for (i, s) in self.sheets.iter().enumerate() {
             children.insert(format!("sheet {}", i + 1), s.path.clone().into());
-            let views: Vec<Value> = s.views.iter().map(|v| json!({"view": v.plan, "at": v.at, "scale": v.scale})).collect();
-            nodes.push(json!({"path": s.path, "attributes": {"o3v::sheet": {"number": s.number, "name": s.name, "paper": s.paper, "views": views}}}));
+            let views: Vec<Value> = s.views.iter().map(|v| {
+                let mut placement = json!({"view": v.plan, "at": v.at, "scale": v.scale});
+                if let Some(show) = v.show_title { placement["showTitle"] = show.into(); }
+                placement
+            }).collect();
+            let mut sheet = json!({"number": s.number, "name": s.name, "fields": s.fields, "revisions": s.revisions, "paper": s.paper, "views": views});
+            if let Some(presentation) = &s.presentation { sheet["presentation"] = presentation.as_ref().clone(); }
+            nodes.push(json!({"path": s.path, "attributes": {"o3v::sheet": sheet}}));
         }
-        if !nodes.is_empty() {
-            nodes.push(json!({"path": uuid("o3v/drawings"), "children": children, "attributes": {"o3v::drawings": {"version": 1, "dimension_styles": self.dimension_styles.0.iter().map(DimensionStyle::to_ifcx).collect::<Vec<_>>()}}}));
+        if !nodes.is_empty() || self.pile_high_water > 0 || !self.project_fields.is_empty() || !self.project_address.is_empty() {
+            nodes.push(json!({"path": uuid("o3v/drawings"), "children": children, "attributes": {"o3v::drawings": {"version": 1, "pile_high_water": self.pile_high_water, "project_fields": self.project_fields, "project_address": self.project_address, "dimension_styles": self.dimension_styles.0.iter().map(DimensionStyle::to_ifcx).collect::<Vec<_>>()}}}));
         }
         nodes
     }
@@ -786,6 +1122,21 @@ impl Document {
     /// [`Self::adopt_ifcx`], with `hidden` giving the elements a view hides from its attribute.
     pub fn adopt_ifcx_with(&mut self, nodes: &[(String, Value)], hidden: &dyn Fn(&Value) -> UnitKeySet) {
         let hidden = |v: &Value| Arc::new(hidden(v));
+        for high in nodes.iter().filter_map(|(_, a)| a.get("o3v::drawings")?.get("pile_high_water")?.as_u64()) {
+            self.pile_high_water = self.pile_high_water.max(high);
+        }
+        if self.project_address.is_empty() {
+            if let Some(address) = nodes.iter().find_map(|(_, a)| a.get("o3v::drawings")?.get("project_address")?.as_str()) {
+                self.project_address = address.to_owned();
+            }
+        }
+        for fields in nodes.iter().filter_map(|(_, a)| a.get("o3v::drawings")?.get("project_fields")) {
+            if let Ok(values) = serde_json::from_value::<TitleFields>(fields.clone()) {
+                for (field, value) in values {
+                    self.project_fields.entry(field).or_insert(value);
+                }
+            }
+        }
         // the styles first: the dimensions name them
         for style in nodes.iter().filter_map(|(_, a)| a.get("o3v::drawings")?.get("dimension_styles")?.as_array()).flatten().filter_map(DimensionStyle::from_ifcx) {
             self.set_dimension_style(style);
@@ -798,7 +1149,23 @@ impl Document {
             Some((pair(v.get(0)?)?, pair(v.get(1)?)?))
         };
         let dims = |v: Option<&Value>| -> Vec<Dimension> {
-            v.and_then(Value::as_array).into_iter().flatten().filter_map(|d| Some(Dimension { from: pair(d.get(0)?)?, to: pair(d.get(1)?)?, style: style(d.get(2)), anchors: [d.get(3).and_then(Anchor::from_ifcx), d.get(4).and_then(Anchor::from_ifcx)] })).collect()
+            v.and_then(Value::as_array).into_iter().flatten().filter_map(|d| {
+                if let Some(refs) = d.get("references").and_then(Value::as_array) {
+                    let refs = refs.iter().map(|r| Some((pair(r.get(0)?)?, r.get(1).and_then(Anchor::from_ifcx)))).collect::<Option<Vec<_>>>()?;
+                    if refs.len() < 2 { return None; }
+                    let axis = pair(d.get("axis")?)?;
+                    let length = axis[0].hypot(axis[1]);
+                    if !length.is_finite() || length < 1e-12 { return None; }
+                    let mut dimension = Dimension { from: refs[0].0, to: refs.last()?.0, style: style(d.get("style")), anchors: [None, None], chain: None };
+                    let axis = axis.map(|x| x / length);
+                    let offset = d.get("offset").and_then(Value::as_f64).filter(|x| x.is_finite()).unwrap_or(0.006);
+                    dimension.chain = Some(DimensionChain { axis, baseline: d.get("baseline").and_then(pair), offset, inner: Vec::new() });
+                    dimension.set_references(&refs, axis);
+                    Some(dimension)
+                } else {
+                    Some(Dimension { from: pair(d.get(0)?)?, to: pair(d.get(1)?)?, style: style(d.get(2)), anchors: [d.get(3).and_then(Anchor::from_ifcx), d.get(4).and_then(Anchor::from_ifcx)], chain: None })
+                }
+            }).collect()
         };
         let notes = |v: Option<&Value>| -> Vec<Note> {
             let all = v.and_then(Value::as_array).into_iter().flatten();
@@ -849,7 +1216,8 @@ impl Document {
                 let Some(level) = self.levels.iter().find(|l| same_name(&l.name, &text(p, "level"))).map(|l| l.path.clone()) else { continue };
                 let kind = PlanKind::from_key(&text(p, "kind"));
                 let (cut, depth) = self.plan_defaults(&level, kind);
-                self.plans.push(PlanView {
+                let mut plan = PlanView {
+                    orthophoto: p.get("presentation").and_then(crate::raster::OrthoPhoto::read),
                     path: path.clone(),
                     name: text(p, "name"),
                     level,
@@ -857,8 +1225,13 @@ impl Document {
                     cut: number(p, "cut", cut),
                     depth: number(p, "depth", depth),
                     scale: scale(p),
+                    presentation: p["presentation"].clone(),
                     drawing: p.get("drawing").and_then(Value::as_str).map(String::from),
                     tags: Vec::new(),
+                    pile_tag_marks: p.get("pile_tag_marks").and_then(Value::as_bool).unwrap_or(false),
+                    pile_symbols: p.get("pile_symbols").and_then(Value::as_bool).unwrap_or(false),
+                    pile_offsets: p.get("pile_offsets").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default(),
+                    pile_tags: Vec::new(), corner_labels: false, office_symbol_lines: 0, symbol_fills: Vec::new(),
                     symbols: Vec::new(),
                     dimensions: dims(p.get("dimensions")),
                     notes: notes(p.get("notes")),
@@ -868,7 +1241,16 @@ impl Document {
                     crop: rect(p.get("crop")),
                     layers: layers(p.get("layers")),
                     hidden: hidden(p),
-                });
+                };
+                if p.get("dimension_format").is_none() {
+                    if plan.presentation["dimensionChains"].is_array() {
+                        plan.adopt_dimension_chains();
+                    } else if plan.drawing.as_deref() == Some("pile-plan") {
+                        plan.dimensions = join_legacy_dimensions(plan.dimensions);
+                    }
+                }
+                plan.append_sounding_marks();
+                self.plans.push(plan);
             } else if let Some(s) = attributes.get("o3v::view::section") {
                 let (Some(from), Some(to)) = (s.get("from").and_then(pair), s.get("to").and_then(pair)) else { continue };
                 self.sections.push(SectionView {
@@ -879,6 +1261,7 @@ impl Document {
                     to,
                     depth: number(s, "depth", 100.0),
                     scale: scale(s),
+                    presentation: s["presentation"].clone(),
                     drawing: s.get("drawing").and_then(Value::as_str).map(String::from),
                     dimensions: dims(s.get("dimensions")),
                     notes: notes(s.get("notes")),
@@ -918,12 +1301,13 @@ impl Document {
             let views = s.get("views").and_then(Value::as_array).into_iter().flatten().filter_map(|v| {
                 let view = v.get("view")?.as_str()?.to_string();
                 (self.plan(&view).is_some() || self.section(&view).is_some()).then_some(())?;
-                Some(PlacedView { plan: view, at: pair(v.get("at")?)?, scale: number(v, "scale", SHEET_SCALE) })
+                Some(PlacedView { show_title: v.get("showTitle").or_else(|| v.get("show_title")).and_then(Value::as_bool), plan: view, at: pair(v.get("at")?)?, scale: v.get("scale").and_then(Value::as_f64).filter(|s| s.is_finite() && *s > 0.0).unwrap_or(SHEET_SCALE) })
             });
             let views: Vec<PlacedView> = views.collect();
             let (number, name) = (text(s, "number"), text(s, "name"));
             let paper = s.get("paper").and_then(pair).unwrap_or(A3_LANDSCAPE);
-            self.sheets.push(Sheet { path: path.clone(), title: format!("{number} {name}"), number, name, paper, views });
+            let background = crate::raster::PlacedImage::sheet_background(&s["presentation"], paper);
+            self.sheets.push(Sheet { background, presentation: s.get("presentation").cloned().map(Arc::new), path: path.clone(), title: format!("{number} {name}"), number, name, revisions: s.get("revisions").and_then(Value::as_array).map(|rows| std::array::from_fn(|i| rows.get(i).and_then(|r| serde_json::from_value(r.clone()).ok()).unwrap_or_default())).unwrap_or_default(), fields: s.get("fields").and_then(|f| serde_json::from_value(f.clone()).ok()).unwrap_or_default(), paper, views });
         }
     }
 
@@ -1017,7 +1401,7 @@ impl Document {
         }
         self.added += 1;
         let path = uuid(&format!("plan/{}/{level}", self.added));
-        self.plans.push(PlanView { path: path.clone(), name, level: level.to_string(), kind, cut, depth, scale: SHEET_SCALE, drawing: None, dimensions: Vec::new(), notes: Vec::new(), lines: Vec::new(), shapes: Vec::new(), tags: Vec::new(), symbols: Vec::new(), fills: Vec::new(), crop: None, layers: LayerSwitches::new(), hidden: Arc::default() });
+        self.plans.push(PlanView { orthophoto: None, path: path.clone(), name, level: level.to_string(), kind, cut, depth, scale: SHEET_SCALE, drawing: None, presentation: Value::Null, dimensions: Vec::new(), notes: Vec::new(), lines: Vec::new(), shapes: Vec::new(), tags: Vec::new(), pile_symbols: kind.structural(), pile_tag_marks: false, pile_offsets: Default::default(), pile_tags: Vec::new(), corner_labels: false, office_symbol_lines: 0, symbol_fills: Vec::new(), symbols: Vec::new(), fills: Vec::new(), crop: None, layers: LayerSwitches::new(), hidden: Arc::default() });
         Some(path)
     }
 
@@ -1070,7 +1454,7 @@ impl Document {
         }
         self.added += 1;
         let path = uuid(&format!("section/{}/{name}", self.added));
-        self.sections.push(SectionView { path: path.clone(), name: name.to_string(), kind, from, to, depth, scale: SHEET_SCALE, drawing: None, dimensions: Vec::new(), notes: Vec::new(), lines: Vec::new(), shapes: Vec::new(), fills: Vec::new(), crop: None, layers: LayerSwitches::new(), hidden: Arc::default() });
+        self.sections.push(SectionView { path: path.clone(), name: name.to_string(), kind, from, to, depth, scale: SHEET_SCALE, drawing: None, presentation: Value::Null, dimensions: Vec::new(), notes: Vec::new(), lines: Vec::new(), shapes: Vec::new(), fills: Vec::new(), crop: None, layers: LayerSwitches::new(), hidden: Arc::default() });
         Some(path)
     }
 
@@ -1216,8 +1600,25 @@ impl Document {
         self.plan(path).map(|p| &p.drawing).or_else(|| self.section(path).map(|s| &s.drawing))?.as_deref()
     }
 
-    /// Gives a view a kind of drawing (a key of the project's drawing standard), or none: the
-    /// kind usual for what it is.
+    /// Updates the authored values of the selected legend or group.
+    pub fn set_pile_legend_field(&mut self, path: &str, field: &PileLegendField, value: String) -> bool {
+        let Some(plan) = self.plans.iter_mut().find(|p| p.path == path && p.drawing.as_deref() == Some("pile-schedule")) else { return false };
+        let legend = &mut plan.presentation["legend"];
+        match field {
+            PileLegendField::Report => legend["report"] = value.into(),
+            PileLegendField::Advice => legend["advice"] = value.into(),
+            PileLegendField::Execution => legend["execution"] = value.into(),
+            PileLegendField::Datum => legend["datum"] = value.into(),
+            PileLegendField::Cutoff(key) | PileLegendField::Foot(key) | PileLegendField::Uncut(key) => {
+                if !legend["rows"].as_array().into_iter().flatten().any(|r| r["key"].as_str() == Some(key.as_str())) { return false; }
+                let property = match field { PileLegendField::Foot(_) => "foot", PileLegendField::Uncut(_) => "uncut", _ => "cutoffs" };
+                legend[property][key.as_str()] = value.into();
+            }
+        }
+        true
+    }
+
+    /// Sets the drawing standard used by the view.
     pub fn set_view_drawing(&mut self, path: &str, kind: Option<String>) -> bool {
         if let Some(p) = self.plans.iter_mut().find(|p| p.path == path) {
             p.drawing = kind;
@@ -1251,12 +1652,66 @@ impl Document {
     /// Adds a dimension between two points to a view's drawing; two points less than a
     /// millimetre apart, or not finite, measure nothing.
     pub fn add_dimension(&mut self, view: &str, from: [f64; 2], to: [f64; 2]) -> bool {
-        let dimension = Dimension { from, to, style: 0, anchors: [None, None] };
+        let dimension = Dimension { from, to, style: 0, anchors: [None, None], chain: None };
         if !(from.iter().chain(&to).all(|v| v.is_finite()) && dimension.length() >= 0.001) {
             return false;
         }
         let Some((dimensions, _)) = self.marks_mut(view) else { return false };
         dimensions.push(dimension);
+        true
+    }
+
+    /// Adds an ordered chain, with one measured interval per pair of adjacent references.
+    pub fn add_dimension_chain(&mut self, view: &str, points: &[[f64; 2]]) -> bool {
+        let (Some(&from), Some(&to)) = (points.first(), points.last()) else { return false };
+        if points.len() < 2 || points.iter().flatten().any(|x| !x.is_finite()) { return false; }
+        let mut d = Dimension { from, to, style: 0, anchors: [None, None], chain: None };
+        if d.length() < 0.001 || points.windows(2).any(|p| d.station(p[1]) - d.station(p[0]) < 0.001) { return false; }
+        let refs = points.iter().map(|&q| (q, None)).collect::<Vec<_>>();
+        d.set_references(&refs, d.axis());
+        let Some((dims, _)) = self.marks_mut(view) else { return false };
+        dims.push(d);
+        true
+    }
+
+    pub fn insert_dimension_reference(&mut self, view: &str, index: usize, at: [f64; 2], anchor: Option<Anchor>) -> bool {
+        let Some(d) = self.dimension_mut(view, index) else { return false };
+        let pos = d.station(at);
+        if !pos.is_finite() || d.references().any(|(q, _)| (d.station(q) - pos).abs() < 0.001) { return false; }
+        let mut refs = d.references().collect::<Vec<_>>();
+        refs.push((at, anchor));
+        refs.sort_by(|a,b| d.station(a.0).total_cmp(&d.station(b.0)));
+        d.set_references(&refs, d.axis());
+        true
+    }
+
+    /// An independent overall dimension of the two outside references, one row further out.
+    pub fn add_dimension_chain_total(&mut self, view: &str, index: usize) -> bool {
+        let scale = self.view_scale(view).unwrap_or(SHEET_SCALE);
+        let Some((dims,_)) = self.marks_mut(view) else { return false };
+        let Some(d) = dims.get(index) else { return false };
+        if d.references().count() < 3 { return false; }
+        let axis = d.axis();
+        let line = d.measured_ends()[0];
+        let normal = [-axis[1],axis[0]];
+        let end = [(d.from[0]+d.to[0])/2., (d.from[1]+d.to[1])/2.];
+        let signed = (line[0]-end[0])*normal[0] + (line[1]-end[1])*normal[1] + d.paper_offset()*scale;
+        let offset = d.paper_offset() + if signed < 0. { -0.008 } else { 0.008 };
+        if dims.iter().any(|other| other.from == d.from && other.to == d.to && other.paper_offset() == offset) {
+            return false;
+        }
+        let total = Dimension { from: d.from, to: d.to, style: d.style, anchors: d.anchors,
+            chain: Some(DimensionChain { axis, baseline: d.chain.as_ref().and_then(|c| c.baseline), offset, inner: Vec::new() }) };
+        dims.push(total);
+        true
+    }
+
+    pub fn remove_dimension_reference(&mut self, view: &str, index: usize, reference: usize) -> bool {
+        let Some(d) = self.dimension_mut(view, index) else { return false };
+        let mut refs = d.references().collect::<Vec<_>>();
+        if refs.len() <= 2 || reference >= refs.len() { return false; }
+        refs.remove(reference);
+        d.set_references(&refs, d.axis());
         true
     }
 
@@ -1309,6 +1764,16 @@ impl Document {
         let Some(d) = self.marks_mut(view).and_then(|(d, _)| d.get_mut(index)) else { return false };
         std::mem::swap(&mut d.from, &mut d.to);
         d.anchors.swap(0, 1);
+        if let Some(c) = &mut d.chain {
+            c.inner.reverse();
+            if let Some(b) = &mut c.baseline {
+                let n = [-c.axis[1], c.axis[0]];
+                let middle = [(d.from[0]+d.to[0])/2., (d.from[1]+d.to[1])/2.];
+                let distance = (b[0]-middle[0])*n[0] + (b[1]-middle[1])*n[1];
+                *b = [b[0]-2.*distance*n[0], b[1]-2.*distance*n[1]];
+            }
+            c.axis = c.axis.map(|x| -x);
+        }
         true
     }
 
@@ -1379,19 +1844,75 @@ impl Document {
         self.plan(path).map_or(&[], |p| &p.symbols[..])
     }
 
+    /// Preserve old view switches when registered columns acquire their own pile layer.
+    pub fn inherit_pile_visibility(&mut self) {
+        for layers in self.plans.iter_mut().map(|p| &mut p.layers).chain(self.sections.iter_mut().map(|s| &mut s.layers)) {
+            if let Some(shown) = layers.get("IfcColumn").copied() {
+                layers.entry("IfcPile".into()).or_insert(shown);
+            }
+        }
+    }
+
     /// Gives every floor plan what it says and draws by itself: `of` makes them for a plan.
-    pub fn set_plan_tags(&mut self, of: impl Fn(&PlanView) -> (Vec<Note>, Vec<[[f64; 2]; 2]>)) {
+    pub fn set_plan_tags(&mut self, of: impl Fn(&mut PlanView) -> (Vec<Note>, Vec<[[f64; 2]; 2]>)) {
         for p in &mut self.plans {
+            p.pile_tags.clear();
+            p.symbol_fills.clear();
+            p.corner_labels = false;
+            p.office_symbol_lines = 0;
             (p.tags, p.symbols) = of(p);
+            p.append_sounding_marks();
         }
     }
 
     /// The regions of a view filled in one colour that are no model, drawn under its lines.
-    pub fn view_fills(&self, path: &str) -> &[Fill] {
-        if let Some(p) = self.plan(path) {
-            return &p.fills;
+    pub fn view_fills(&self, path: &str) -> impl Iterator<Item = &Fill> {
+        let plan = self.plan(path);
+        let authored = plan.map(|p| p.fills.as_slice()).or_else(|| self.section(path).map(|s| s.fills.as_slice())).unwrap_or_default();
+        authored.iter().chain(plan.into_iter().flat_map(|p| &p.symbol_fills))
+    }
+
+    pub fn view_presentation(&self, path: &str) -> &Value {
+        self.plan(path).map(|p| &p.presentation).or_else(|| self.section(path).map(|s| &s.presentation)).unwrap_or(&Value::Null)
+    }
+
+    /// Pile layouts and their schedules supply their own annotation on paper.
+    pub(crate) fn view_has_sheet_caption(&self, path: &str) -> bool {
+        self.view_presentation(path)["sheet_caption"].as_bool().unwrap_or_else(|| {
+            !matches!(self.view_drawing(path), Some("pile-plan" | "pile-schedule"))
+                && !self.view_presentation(path)["legend"].is_object()
+        })
+    }
+
+    pub(crate) fn placed_view_has_title(&self, view: &PlacedView) -> bool {
+        view.show_title.unwrap_or_else(|| self.view_has_sheet_caption(&view.plan))
+    }
+
+    pub fn set_placed_title(&mut self, sheet: &str, index: usize, show: Option<bool>) {
+        if let Some(v) = self.sheets.iter_mut().find(|s| s.path == sheet).and_then(|s| s.views.get_mut(index)) {
+            v.show_title = show;
         }
-        self.section(path).map_or(&[], |s| &s.fills[..])
+    }
+
+    pub(crate) fn view_is_schedule(&self, path: &str) -> bool {
+        self.view_drawing(path) == Some("pile-schedule") || self.view_presentation(path)["legend"].is_object()
+    }
+
+    /// Consecutive detail lines with a common colour and width in millimetres.
+    pub fn detail_pens(&self, path: &str) -> Vec<(std::ops::Range<usize>, [u8; 3], f64)> {
+        let count = self.view_lines(path).len();
+        let mut starts: Vec<_> = self.view_presentation(path)["pens"].as_array().into_iter().flatten().filter_map(|p| {
+            let at = usize::try_from(p.get(0)?.as_u64()?).ok()?;
+            let rgb: [u8; 3] = serde_json::from_value(p.get(1)?.clone()).ok()?;
+            let width = p.get(2)?.as_f64()?;
+            (at < count && width.is_finite() && width > 0.0).then_some((at, rgb, width))
+        }).collect();
+        starts.sort_by_key(|p| p.0);
+        let mut pens: Vec<_> = starts.iter().enumerate().map(|(i, &(at, rgb, width))| (at..starts.get(i+1).map_or(count, |p| p.0), rgb, width)).collect();
+        if let Some(plan) = self.plan(path).filter(|p| p.office_symbol_lines > 0) {
+            pens.push((count..count + plan.office_symbol_lines, [0,0,0], 0.18));
+        }
+        pens
     }
 
     /// The lines of a view that are no model: the shapes and leaders of its tags.
@@ -1571,6 +2092,20 @@ impl Document {
         true
     }
 
+    pub fn move_pile_tag(&mut self, view: &str, index: usize, at: [f64; 2]) -> bool {
+        if !at.iter().all(|x| x.is_finite()) { return false; }
+        let Some(p) = self.plans.iter_mut().find(|p| p.path == view) else { return false };
+        let Some(index) = index.checked_sub(p.notes.len()) else { return false };
+        let Some(&(_, id, head)) = p.pile_tags.iter().find(|(k, _, _)| *k == index) else { return false };
+        let offset = [at[0] - head[0], at[1] - head[1]];
+        if p.corner_labels {
+            p.presentation["pile_label_offsets"][id.to_string()] = json!(offset);
+        } else {
+            p.pile_offsets.insert(id, offset);
+        }
+        true
+    }
+
     /// Moves a view's text to another point of its drawing.
     pub fn move_note(&mut self, view: &str, index: usize, at: [f64; 2]) -> bool {
         if !at.iter().all(|v| v.is_finite()) {
@@ -1616,6 +2151,57 @@ impl Document {
         self.sheets.iter().find(|s| s.path == path)
     }
 
+    pub fn view_origin(&self, path: &str) -> Option<[f64; 2]> {
+        let origin = self.view_presentation(path).get("origin")?;
+        Some([origin.get(0)?.as_f64()?, origin.get(1)?.as_f64()?])
+    }
+
+    pub fn set_revision(&mut self, sheet: &str, index: usize, date: bool, value: String) {
+        if let Some(entry) = self.sheets.iter_mut().find(|s| s.path == sheet).and_then(|s| s.revisions.get_mut(index)) {
+            if date { entry.date = value; } else { entry.description = value; }
+        }
+    }
+
+    pub fn set_project_address(&mut self, address: String) {
+        if self.project_address != address {
+            for sheet in &mut self.sheets { sheet.mark_stamp_field(Field::Address); }
+            self.project_address = address;
+        }
+    }
+
+    pub fn title_value<'a>(&'a self, sheet: &'a Sheet, field: Field) -> &'a str {
+        match field {
+            Field::Number => &sheet.number,
+            Field::Title => &sheet.name,
+            Field::Project | Field::ProjectNumber | Field::Client => self.project_fields.get(&field).map_or("", String::as_str),
+            _ => sheet.fields.get(&field).map_or("", String::as_str),
+        }
+    }
+
+    pub fn set_title_value(&mut self, path: &str, field: Field, value: String) {
+        let Some(current) = self.sheet(path) else { return };
+        if self.title_value(current, field) == value { return; }
+        let shared = matches!(field, Field::Project | Field::ProjectNumber | Field::Client);
+        for sheet in self.sheets.iter_mut().filter(|s| shared || s.path == path) {
+            sheet.mark_stamp_field(field);
+        }
+        let Some(sheet) = self.sheets.iter_mut().find(|s| s.path == path) else { return };
+        match field {
+            Field::Number => sheet.number = value,
+            Field::Title => sheet.name = value,
+            Field::Project | Field::ProjectNumber | Field::Client => {
+                self.project_fields.insert(field, value);
+                return;
+            }
+            Field::Logo | Field::Company | Field::Address | Field::Format | Field::Scale => return,
+            _ => {
+                sheet.fields.insert(field, value);
+                return;
+            }
+        }
+        sheet.title = format!("{} {}", sheet.number, sheet.name);
+    }
+
     /// Makes an empty A3 sheet numbered after the last (`A01`, `A02`, ..) and named `name`, and
     /// gives its path.
     pub fn add_sheet(&mut self, name: &str) -> String {
@@ -1627,7 +2213,7 @@ impl Document {
         let path = uuid(&format!("sheet/{}/{n}", self.added));
         let number = format!("A{n:02}");
         let title = format!("{number} {name}");
-        self.sheets.push(Sheet { path: path.clone(), number, name: name.to_string(), title, paper: A3_LANDSCAPE, views: Vec::new() });
+        self.sheets.push(Sheet { background: None, presentation: None, path: path.clone(), number, revisions: Default::default(), fields: TitleFields::new(), name: name.to_string(), title, paper: A3_LANDSCAPE, views: Vec::new() });
         path
     }
 
@@ -1645,7 +2231,7 @@ impl Document {
         let scale = self.view_scale(plan).unwrap_or(SHEET_SCALE);
         let sheet = self.sheets.iter_mut().find(|s| s.path == sheet)?;
         let at = [sheet.paper[0] / 2.0, sheet.paper[1] / 2.0];
-        sheet.views.push(PlacedView { plan: plan.to_string(), at, scale });
+        sheet.views.push(PlacedView { plan: plan.to_string(), at, scale, show_title: None });
         Some(sheet.views.len() - 1)
     }
 
@@ -1874,6 +2460,23 @@ mod tests {
 
     fn names(document: &Document) -> Vec<&str> {
         document.levels().iter().map(|l| l.name.as_str()).collect()
+    }
+
+    #[test]
+    fn office_dimension_typography_preserves_explicit_preferences() {
+        let read = |v: Value| DimensionStyle::from_ifcx(&v).unwrap();
+        let legacy = read(json!({"name":"3BM ronde stip","size":0.0025}));
+        assert_eq!(legacy.font_family.as_deref(), Some("Arial Narrow"));
+        assert_eq!(legacy.font_size_pt, Some(6.8));
+        assert_eq!(read(legacy.to_ifcx()), legacy);
+        let edited = read(json!({"name":"3BM ronde stip","font_family":"Segoe UI","font_size_pt":8.2}));
+        assert_eq!(edited.font_family.as_deref(), Some("Segoe UI"));
+        assert_eq!(edited.font_size_pt, Some(8.2));
+        assert_eq!(read(edited.to_ifcx()), edited);
+        assert_eq!(read(json!({"name":"3BM ronde stip","size":0.004})).paper_font_size(), 0.004);
+        let plain = read(json!({"name":"Other","size":0.004}));
+        assert_eq!(plain.label_family(), None);
+        assert!(plain.to_ifcx().get("font_size_pt").is_none());
     }
 
     #[test]
@@ -2222,6 +2825,95 @@ mod tests {
     }
 
     #[test]
+    fn authored_dimension_chains_keep_real_witness_origins_and_separate_outer_lines() {
+        let model = model_with(&[("00",0.)]);
+        let node = json!({"o3v::view::plan":{
+            "level":"00", "name":"Layout", "drawing":"pile-plan", "dimensions":[
+                [[0.,3.],[2.,3.]], [[2.,3.],[5.,3.]], [[0.,5.],[5.,5.]]],
+            "presentation":{"dimensionChains":[
+                {"axis":0,"offset":3.,"references":[[0.,1.],[2.,0.],[5.,1.]],"firstDimension":0,"segments":2},
+                {"axis":0,"offset":5.,"references":[[0.,1.],[5.,1.]],"firstDimension":2,"segments":1}]},
+            "lines":[[[2.,2.8],[2.,3.1]], [[0.,0.],[5.,0.]]]
+        }});
+        let mut doc = Document::from_model(&model);
+        doc.adopt_ifcx(&[("layout".into(),node)]);
+        let plan = doc.plan("layout").unwrap();
+        assert_eq!(plan.lines.len(),1);
+        assert_eq!(plan.dimensions.len(),2);
+        assert_eq!(plan.dimensions[1].measured_ends(),[[0.,5.],[5.,5.]]);
+        let spans = plan.dimensions[0].intervals().collect::<Vec<_>>();
+        assert_eq!(spans[1], ([[2.,0.],[5.,1.]], [[2.,3.],[5.,3.]]));
+        assert_eq!(plan.dimensions[0].paper_offset(),0.);
+        let nodes = doc.ifcx_drawing_nodes().into_iter().map(|n| (n["path"].as_str().unwrap().to_owned(), n["attributes"].clone())).collect::<Vec<_>>();
+        let mut again = Document::from_model(&model);
+        again.adopt_ifcx(&nodes);
+        assert_eq!(again.plan("layout").unwrap().dimensions, plan.dimensions);
+    }
+
+    #[test]
+    fn station_rounding_keeps_published_intervals_consistent_with_their_references() {
+        let model = model_with(&[("00",0.)]);
+        let mut doc = Document::from_model(&model);
+        let plan = doc.add_plan(&doc.levels()[0].path.clone()).unwrap();
+        assert!(doc.add_dimension_chain(&plan, &[[-44.,1.2],[-42.7308,1.2],[-41.0385,1.2]]));
+        let d = &doc.plan(&plan).unwrap().dimensions[0];
+        let office = DimensionStyle::from_ifcx(&json!({"name":"3BM ronde stip"})).unwrap();
+        let values = |style: &DimensionStyle| d.intervals().map(|(_, [a,b])| style.figure(d.interval_value(a,b,style))).collect::<Vec<_>>();
+        assert_eq!(values(&office), ["1269","1693"]);
+        assert_eq!(values(&DimensionStyle::standard()), ["1269","1692"]);
+        assert!((d.length()-2.9615).abs()<1e-9);
+    }
+
+    #[test]
+    fn an_explicit_negative_chain_stays_on_its_line_after_edits_and_its_total_is_further_out() {
+        let model = model_with(&[("00",0.)]);
+        let mut doc = Document::from_model(&model);
+        let plan = doc.add_plan(&doc.levels()[0].path.clone()).unwrap();
+        assert!(doc.add_dimension_chain(&plan,&[[0.,0.],[2.,0.],[4.,0.]]));
+        let c = doc.dimension_mut(&plan,0).unwrap().chain.as_mut().unwrap();
+        c.baseline = Some([0.,-2.]);
+        c.offset = 0.;
+        assert!(doc.add_dimension_chain_total(&plan,0));
+        assert_eq!(doc.plan(&plan).unwrap().dimensions[1].paper_offset(),-0.008);
+        assert!(doc.insert_dimension_reference(&plan,0,[5.,1.],None));
+        assert!(doc.remove_dimension_reference(&plan,0,0));
+        assert!(doc.remove_dimension_reference(&plan,0,0));
+        let d = doc.dimension_mut(&plan,0).unwrap();
+        d.order_references();
+        assert_eq!(d.measured_ends(), [[4.,-2.],[5.,-2.]]);
+        assert!(doc.flip_dimension(&plan,0));
+        assert_eq!(doc.plan(&plan).unwrap().dimensions[0].measured_ends(), [[5.,3.],[4.,3.]]);
+        let nodes = doc.ifcx_drawing_nodes().into_iter().map(|n| (n["path"].as_str().unwrap().to_owned(), n["attributes"].clone())).collect::<Vec<_>>();
+        let mut again = Document::from_model(&model);
+        again.adopt_ifcx(&nodes);
+        assert_eq!(again.plan(&plan).unwrap().dimensions, doc.plan(&plan).unwrap().dimensions);
+        assert!(again.flip_dimension(&plan,0));
+        assert_eq!(again.plan(&plan).unwrap().dimensions[0].measured_ends(), [[4.,-2.],[5.,-2.]]);
+    }
+
+    #[test]
+    fn dimension_chain_edits_keep_order_anchors_and_independent_totals_on_reopen() {
+        let model = model_with(&[("00", 0.0)]);
+        let mut doc = Document::from_model(&model);
+        let plan = doc.add_plan(&doc.levels()[0].path.clone()).unwrap();
+        assert!(doc.add_dimension_chain(&plan, &[[0.,0.], [2.,0.], [6.,0.]]));
+        let anchor = Some(Anchor { element: 15, point: 0, offset: [0.,0.], lost: false });
+        assert!(doc.insert_dimension_reference(&plan, 0, [3.,1.], anchor));
+        assert!(!doc.insert_dimension_reference(&plan, 0, [3.,2.], None));
+        assert!(doc.remove_dimension_reference(&plan, 0, 1));
+        assert!(doc.add_dimension_chain_total(&plan, 0));
+        assert!(doc.flip_dimension(&plan, 0));
+        let ds = &doc.plan(&plan).unwrap().dimensions;
+        assert_eq!(ds[0].references().collect::<Vec<_>>(), [([6.,0.],None), ([3.,1.],anchor), ([0.,0.],None)]);
+        let nodes = doc.ifcx_drawing_nodes().into_iter().map(|n| (n["path"].as_str().unwrap().to_owned(), n["attributes"].clone())).collect::<Vec<_>>();
+        let mut again = Document::from_model(&model);
+        again.adopt_ifcx(&nodes);
+        assert_eq!(&again.plan(&plan).unwrap().dimensions, ds);
+        assert!(again.remove_dimension_reference(&plan, 0, 1));
+        assert!(!again.remove_dimension_reference(&plan, 0, 1));
+    }
+
+    #[test]
     fn floor_plans_keep_their_dimensions() {
         let mut document = Document::from_model(&model_with(&[("00", 0.0)]));
         let level = document.levels()[0].path.clone();
@@ -2234,7 +2926,7 @@ mod tests {
         let lengths: Vec<f64> = document.plan(&plan).unwrap().dimensions.iter().map(Dimension::length).collect();
         assert_eq!(lengths, [3.6, 5.0]);
         assert!(document.flip_dimension(&plan, 1));
-        assert_eq!(document.plan(&plan).unwrap().dimensions[1], Dimension { from: [3.0, 4.0], to: [0.0, 0.0], style: 0, anchors: [None, None] });
+        assert_eq!(document.plan(&plan).unwrap().dimensions[1], Dimension { from: [3.0, 4.0], to: [0.0, 0.0], style: 0, anchors: [None, None], chain: None });
         assert!(!document.flip_dimension(&plan, 9));
         assert!(document.remove_dimension(&plan, 0));
         assert!(!document.remove_dimension(&plan, 5));
@@ -2290,6 +2982,40 @@ mod tests {
         assert!(document.remove_view_line(&plan, 2));
         assert!(document.view_shapes(&plan).is_empty() && document.view_lines(&plan).len() == 1);
         assert!(!document.remove_view_line(&plan, 4));
+    }
+
+    #[test]
+    fn used_sounding_is_projected_once_on_reopen_and_export() {
+        let model = model_with(&[("00", 0.0)]);
+        let mut doc = Document::from_model(&model);
+        let plan = doc.add_plan(&doc.levels()[0].path.clone()).unwrap();
+        // Delivered RD position of the public BRO fixture in bim-civil.
+        let id = "CPT000000000785";
+        doc.plans[0].presentation = json!({"rd_origin":[155000.,463000.], "crs":"EPSG:28992", "rd_unit":"metre",
+            "rd_rotation_degrees":90.0, "soundings":[{"id":id,"rd":[154652.,463125.],"crs":"EPSG:28992","source":"BRO"}]});
+        let nodes = |doc: &Document| doc.ifcx_drawing_nodes().into_iter().map(|n| (n["path"].as_str().unwrap().to_owned(), n["attributes"].clone())).collect::<Vec<_>>();
+        let mut reopened = Document::from_model(&model);
+        reopened.adopt_ifcx(&nodes(&doc));
+        for _ in 0..2 {
+            let symbol = reopened.view_symbols(&plan);
+            assert_eq!(symbol.len(), 34);
+            let [a,b] = symbol[32];
+            assert!(((a[0]+b[0])/2.0-125.).abs()<1e-8 && (a[1]-348.).abs()<1e-8);
+            assert_eq!(reopened.view_tags(&plan).iter().filter(|n| n.text==id).count(),1);
+            reopened.set_plan_tags(|_| (vec![],vec![]));
+        }
+        let drawing = crate::drawing2d::view_drawing(&reopened,&plan,&Default::default(),&Default::default()).unwrap();
+        assert!(drawing.texts.iter().any(|t| t.text == id));
+        assert!(drawing.lines.len() >= 34);
+        // Documents with a manually drawn and labelled cross keep one marker.
+        let arms = reopened.view_symbols(&plan)[32..].to_vec();
+        reopened.add_view_lines(&plan,&arms);
+        reopened.add_note(&plan,[126.,348.],id);
+        let mut legacy = Document::from_model(&model);
+        legacy.adopt_ifcx(&nodes(&reopened));
+        assert!(legacy.view_tags(&plan).is_empty() && legacy.view_symbols(&plan).is_empty());
+        assert_eq!(legacy.view_lines(&plan).len(),2);
+        assert_eq!(legacy.view_notes(&plan).unwrap()[0].text,id);
     }
 
     #[test]

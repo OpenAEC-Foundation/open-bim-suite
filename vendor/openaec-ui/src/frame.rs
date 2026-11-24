@@ -258,6 +258,8 @@ mod tests {
             profile,
         );
         let renderer = iced_tiny_skia::Renderer::new(crate::fonts::BODY, iced::Pixels(12.0));
+        #[cfg(feature = "gpu-renderer")]
+        let renderer = iced::Renderer::Secondary(renderer);
         let mut tree = Tree::new(&element);
         let node = element.as_widget_mut().layout(
             &mut tree,
@@ -279,6 +281,8 @@ mod tests {
         let profile = WorkspaceFrameProfile::OPEN_FRAME;
         let mut element = workspace_panes(profile, Some(band(1)), band(1), Some(band(1)));
         let renderer = iced_tiny_skia::Renderer::new(crate::fonts::BODY, iced::Pixels(12.0));
+        #[cfg(feature = "gpu-renderer")]
+        let renderer = iced::Renderer::Secondary(renderer);
         let mut tree = Tree::new(&element);
         let node = element.as_widget_mut().layout(
             &mut tree,
@@ -297,6 +301,8 @@ mod tests {
         let profile = SidebarFrameProfile::WORKSPACE_COMPOSER;
         let mut element = sidebar_frame(profile, band(1), band(1), band(1), band(1));
         let renderer = iced_tiny_skia::Renderer::new(crate::fonts::BODY, iced::Pixels(12.0));
+        #[cfg(feature = "gpu-renderer")]
+        let renderer = iced::Renderer::Secondary(renderer);
         let mut tree = Tree::new(&element);
         let node = element.as_widget_mut().layout(
             &mut tree,

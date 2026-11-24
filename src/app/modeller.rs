@@ -33,6 +33,7 @@ pub(super) mod shape_handles;
 pub mod slab_handles;
 pub mod snaps;
 pub mod spaces;
+mod pile_symbols;
 pub mod structure;
 pub mod temp_dims;
 pub mod sketch;
@@ -221,6 +222,7 @@ const ROUND: f64 = 0.01;
 pub struct Modeller {
     /// The modelled elements.
     pub model: bim_core::Model,
+    pub rebar_edit: Option<super::reinforcement::Editor>,
     /// The tool placing elements, and the name its elements get (in the interface language).
     pub tool: Option<(ModelTool, &'static str)>,
     /// The branches of the model explorer that are open, by their keys (see `explorer`).
@@ -249,6 +251,13 @@ pub struct Modeller {
     /// `structure::PILE_WORDS`), and the name the schedule has now.
     pub pile_words: [&'static str; 10],
     pub pile_schedule: String,
+    /// What the bar schedule, its columns and its kinds of bar are called, in the interface
+    /// language (see `structure::BAR_WORDS`), and the name the schedule has now.
+    pub bar_words: [&'static str; 11],
+    pub bar_schedule: String,
+    /// The same of the precast schedule (see `structure::PLANK_WORDS`).
+    pub plank_words: [&'static str; 8],
+    pub plank_schedule: String,
     /// What a space is called, in the interface language ("Space 1").
     pub space_word: &'static str,
     /// The length being typed for what a tool draws, in millimetres (see `typed_length`).
@@ -289,6 +298,8 @@ pub struct Modeller {
     pub slab_drag: Option<slab_handles::SlabDrag>,
     /// The sketch of a floor outline, open (see `sketch`).
     pub sketch: Option<sketch::Sketch>,
+    /// An unfinished floor outline kept while its project is being inspected.
+    pub parked_sketch: Option<sketch::Sketch>,
     /// Where the next click of the tool would place a point (snapped, scene coordinates), while
     /// the cursor is over the viewport: the preview runs to it.
     pub cursor: Option<DVec3>,
@@ -407,7 +418,9 @@ impl App {
             self.modeller.sketch = None;
         }
         let same = tool.map(|t| t.0) == self.modeller.tool.map(|t| t.0);
+        self.modeller.rebar_edit = None;
         self.modeller.tool = if same { None } else { tool };
+        self.modeller.length_typed.clear();
         self.modeller.grid_tool = false;
         self.modeller.points.clear();
         self.modeller.cursor = None;
@@ -692,28 +705,62 @@ impl App {
                 straight = Some(snaps::Snap::Ortho);
             }
         }
+        if straight.is_none() && snaps.polar {
+            if let Some(start) = self.modeller.points.last() {
+                let delta = (p - *start).truncate();
+                let heading = delta.y.atan2(delta.x);
+                let step = std::f64::consts::FRAC_PI_4;
+                let ray = (heading / step).round() * step;
+                if delta.length_squared() > 0.0 && (heading - ray).abs().to_degrees() < ORTHO_DEGREES {
+                    let direction = DVec2::new(ray.cos(), ray.sin());
+                    p = (start.truncate() + direction * delta.dot(direction)).extend(p.z);
+                    straight = Some(snaps::Snap::Polar);
+                }
+            }
+        }
         (p, straight)
+    }
+
+    /// Project a metric work-plane point onto the active viewport, then use the GUI placement path.
+    pub(crate) fn place_model_point(&mut self, x: f64, y: f64) -> Result<serde_json::Value, String> {
+        if !self.annotates || !self.modeller.in_modeller || self.active_doc_tab() != 0 { return Err("Open the Modeller 3D view first".into()) }
+        let (tool, _) = self.modeller.tool.ok_or("Choose a modelling tool in the ribbon first")?;
+        if tool.opens() { return Err("Pick the host face in the viewport for an opening".into()) }
+        let (z, _, _) = self.work_plane();
+        let (w, h) = self.viewport_size;
+        let target = DVec3::new(x, y, z);
+        let (px, py) = self.on_screen(target, w, h).filter(|(a,b)| (0.0..w).contains(a) && (0.0..h).contains(b)).ok_or("Point outside the current viewport")?;
+        let before = self.modeller.model.iter().map(|e| e.id.0).max().unwrap_or(0);
+        let (point, snap) = self.click_work_plane(tool, px, py, w, h).ok_or("The work plane is edge-on")?;
+        if let Some(reason) = self.modeller.refusal { return Err(reason.reason().into()) }
+        let created: Vec<_> = self.modeller.model.iter().filter(|e| e.id.0 > before).map(|e| e.id.0).collect();
+        Ok(serde_json::json!({"point": point.to_array(), "snap": snap.map(|s| s.label(openaec_ui::Language::English)), "created": created}))
     }
 
     /// A click in the viewport while a tool is on.
     pub(super) fn model_click(&mut self, x: f32, y: f32, width: f32, height: f32) {
-        let Some((tool, name)) = self.modeller.tool else { return };
+        let Some((tool, _)) = self.modeller.tool else { return };
         if tool.opens() {
             return self.place_opening(tool, x, y, width, height);
         }
+        let _ = self.click_work_plane(tool, x, y, width, height);
+    }
+
+    fn click_work_plane(&mut self, tool: ModelTool, x: f32, y: f32, width: f32, height: f32) -> Option<(DVec3, Option<snaps::Snap>)> {
+        let (_, name) = self.modeller.tool?;
         let (z, _, level) = self.work_plane();
-        let Some(p) = self.plane_point(x, y, width, height, z) else { return };
-        let p = self.snapped(p, x, y, width, height);
+        let p = self.plane_point(x, y, width, height, z)?;
+        let (p, snap) = self.snapped_as(p, x, y, width, height);
         // walls as a rectangle: the second click is the opposite corner, and four walls go
         // round, each from the end of the one before, as a chain does
         if tool == ModelTool::Wall && self.modeller.placement.rectangle {
             let Some(&a) = self.modeller.points.first() else {
                 self.modeller.points.push(p);
                 self.modeller.refusal = None;
-                return;
+                return Some((p, snap));
             };
             if (a.x - p.x).abs() < 1e-6 || (a.y - p.y).abs() < 1e-6 {
-                return;
+                return Some((p, snap));
             }
             let chained = std::mem::replace(&mut self.modeller.placement.chain, true);
             self.modeller.points.clear();
@@ -724,9 +771,10 @@ impl App {
             self.modeller.points.clear();
             self.modeller.placement.last_wall = None;
             self.modeller.placement.chain = chained;
-            return;
+            return Some((p, snap));
         }
         self.model_point(tool, name, level, p);
+        Some((p, snap))
     }
 
     /// The next point of `tool`, already snapped: with its last point the element is placed.
@@ -843,6 +891,11 @@ impl App {
         let mut element = Element::in_project(&grid, name, level, shape);
         element.top = top;
         element.service = service;
+        if let Some((tool,_)) = self.modeller.tool.filter(|(tool,_)| tool.service().is_some()) {
+            if matches!(&element.shape, Shape::Linear(_)) {
+                element.service_type = self.modeller.placement.of(tool).kind;
+            }
+        }
         // numbered per IFC class: Wall 1, Wall 2, Slab 1
         let number = self.modeller.model.iter().filter(|e| e.class() == element.class()).count() + 1;
         element.name = format!("{name} {number}");
@@ -923,7 +976,7 @@ impl App {
         let fits = |e: &Element| match kind {
             ConnectionKind::Cut => e.base() != bim_core::BaseKind::Connection,
             ConnectionKind::Butt | ConnectionKind::Apart => matches!(e.base(), bim_core::BaseKind::Linear | bim_core::BaseKind::System),
-            ConnectionKind::Mitre | ConnectionKind::EndPlate(_) | ConnectionKind::FinPlate(_) | ConnectionKind::Bend(_) | ConnectionKind::Tee(_) | ConnectionKind::Transition(_) => e.base() == bim_core::BaseKind::Linear,
+            ConnectionKind::Mitre | ConnectionKind::EndPlate(_) | ConnectionKind::FinPlate(_) | ConnectionKind::Bend(_) | ConnectionKind::Tee(_) | ConnectionKind::Transition(_) | ConnectionKind::Splice(_) | ConnectionKind::BasePlate(_) => e.base() == bim_core::BaseKind::Linear,
         };
         let picked: Vec<ElementId> = self.selected_modelled().into_iter().filter(|id| self.modeller.model.get(*id).is_some_and(fits)).collect();
         let [primary, secondary] = picked[..] else {
@@ -968,8 +1021,9 @@ impl App {
     /// the one shown before, and the scene is put together again without moving the camera.
     pub(super) fn show_modelled(&mut self) {
         self.modeller.touched = true;
+        self.issue_pile_numbers();
         let levels: Vec<(String, String)> = self.document.levels().iter().map(|l| (l.path.clone(), l.name.clone())).collect();
-        let (mut layers, parts) = viewer_layers(&self.modeller.model, &levels, &self.library);
+        let (mut layers, parts, assemblies) = viewer_layers(&self.modeller.model, &levels, &self.library);
         // the spaces its walls close in stand beside its elements, on a layer of their own
         layers.extend(spaces::space_layer(&self.spaces(), &levels));
         let mut built = Model::new(PathBuf::from("model.ifcx"), "IFCX", layers);
@@ -980,6 +1034,8 @@ impl App {
         built.project.cut_patterns = crate::hatching::library_patterns(&self.library);
         // an element of several materials is cut a face per part, each hatched as its material
         built.project.parts = parts;
+        // a framed system is an assembly per prefab unit
+        built.project.assemblies = assemblies;
         built.project.part_materials = crate::hatching::part_materials(&self.library);
         // and its drawing standard: the kinds of drawing and their settings, a node each
         built.project.types.extend(bim_library::drawing::nodes(&self.standard));
@@ -1037,6 +1093,8 @@ impl App {
         // and the floor plans say their spaces and draw their doors' swings again
         self.tag_plans();
         self.list_piles();
+        self.list_bars();
+        self.list_planks();
     }
 
     /// Puts `model` in the place of the scene shown, keeping the camera, the views and the
@@ -1080,7 +1138,7 @@ impl App {
         add(self, "Wall", wall(p(0.0, 0.0), p(10.0, 0.0), vec![door, window]));
         let side = add(self, "Wall", wall(p(10.0, 0.0), p(10.0, 6.0), Vec::new()));
         add(self, "Wall", wall(p(0.0, 6.0), p(0.0, 0.0), Vec::new()));
-        add(self, "Curtain wall", Shape::System(SystemDef { start: p(10.0, 6.0), end: p(0.0, 6.0), base: 0.0, height: 3.0, spacing: SYSTEM_SPACING, member: SYSTEM_MEMBER, panel: SYSTEM_PANEL, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), grid: None }));
+        add(self, "Curtain wall", Shape::System(SystemDef { start: p(10.0, 6.0), end: p(0.0, 6.0), base: 0.0, height: 3.0, spacing: SYSTEM_SPACING, member: SYSTEM_MEMBER, panel: SYSTEM_PANEL, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), grid: None, division: None }));
         // a pergola beside it: two columns and three beams in a U; the joins come by themselves
         // (butts at the columns, mitres at the far corners), and one butt becomes an end plate
         let column = |at: DVec2| Shape::Linear(LinearDef { start: at.extend(0.0), end: at.extend(3.0), profile: ProfileDef::Rectangle { width: COLUMN, height: COLUMN }, roll: 0.0, role: Default::default() });
@@ -1111,17 +1169,17 @@ impl App {
 /// The profile of a run of a building service: a duct of 1 mm sheet `width` × `depth`, a round
 /// duct or a pipe of diameter `width` (a pipe's wall a twentieth of it, at least 1 mm), a cable
 /// tray `width` wide with sides `depth` high, of 2 mm sheet, open above.
-pub(super) fn service_profile(tool: ModelTool, width: f64, depth: f64) -> ProfileDef {
+pub(super) fn service_profile(tool: ModelTool, width: f64, depth: f64, wall: Option<f64>) -> ProfileDef {
     let mm = |v: f64| format!("{}", (v * 1000.0).round());
     match tool {
-        ModelTool::RoundDuct => ProfileDef::Catalogue { designation: format!("Ø{}", mm(width)), shape: bim_library::ProfileShape::Chs { d: width, t: 0.001 } },
-        ModelTool::Pipe => ProfileDef::Catalogue { designation: format!("Ø{}", mm(width)), shape: bim_library::ProfileShape::Chs { d: width, t: (width / 20.0).max(0.001) } },
+        ModelTool::RoundDuct => ProfileDef::Catalogue { designation: format!("Ø{}", mm(width)), shape: bim_library::ProfileShape::Chs { d: width, t: wall.unwrap_or(0.001) } },
+        ModelTool::Pipe => ProfileDef::Catalogue { designation: format!("Ø{}", mm(width)), shape: bim_library::ProfileShape::Chs { d: width, t: wall.unwrap_or_else(|| (width / 20.0).max(0.001)) } },
         ModelTool::CableTray => {
-            let (w, h, t) = (width / 2.0, depth, 0.002);
+            let (w, h, t) = (width / 2.0, depth, wall.unwrap_or(0.002));
             let outer = vec![DVec2::new(-w, -h / 2.0), DVec2::new(w, -h / 2.0), DVec2::new(w, h / 2.0), DVec2::new(w - t, h / 2.0), DVec2::new(w - t, -h / 2.0 + t), DVec2::new(-w + t, -h / 2.0 + t), DVec2::new(-w + t, h / 2.0), DVec2::new(-w, h / 2.0)];
             ProfileDef::Polygon { outer, holes: Vec::new() }
         }
-        _ => ProfileDef::Catalogue { designation: format!("{}×{}", mm(width), mm(depth)), shape: bim_library::ProfileShape::Rhs { h: depth, b: width, t: 0.001, r_out: 0.0, r_in: 0.0 } },
+        _ => ProfileDef::Catalogue { designation: format!("{}×{}", mm(width), mm(depth)), shape: bim_library::ProfileShape::Rhs { h: depth, b: width, t: wall.unwrap_or(0.001), r_out: 0.0, r_in: 0.0 } },
     }
 }
 
@@ -1158,7 +1216,7 @@ pub(super) fn tool_shape(tool: ModelTool, a: DVec3, b: DVec3, z: f64, storey: f6
             let up = DVec3::Z * (z + s.height.unwrap_or(SERVICE_HEIGHT) - a.z);
             let role = tool.service().unwrap_or_default();
             // its rise takes its end up (a slope; a riser when both clicks are one point)
-            Shape::Linear(LinearDef { start: a + up, end: b + up + DVec3::Z * s.offset, profile: service_profile(tool, s.width, s.depth), roll: 0.0, role })
+            Shape::Linear(LinearDef { start: a + up, end: b + up + DVec3::Z * s.offset, profile: service_profile(tool, s.width, s.depth, s.kind.as_deref().and_then(|id| library.service_type(id)).and_then(|series| series.sizes.iter().find(|size| (size.width-s.width).abs() < 1e-6 && ((size.height-s.depth).abs() < 1e-6 || matches!(tool, ModelTool::Pipe | ModelTool::RoundDuct)))).map(|size| size.wall)), roll: 0.0, role })
         }
         ModelTool::Wall => {
             let base = z + s.offset;
@@ -1198,7 +1256,8 @@ pub(super) fn tool_shape(tool: ModelTool, a: DVec3, b: DVec3, z: f64, storey: f6
                 system_type: None,
                 openings: Vec::new(),
                 breaks: Vec::new(),
-                outline: Vec::new(), grid: None
+                outline: Vec::new(), grid: None,
+                division: None,
             };
             // a lying type (a floor, a ceiling) is laid in the rectangle between the two clicks, as a
             // slab is: its line along the rectangle's near side, its width to the far one, its top
@@ -1312,9 +1371,10 @@ fn class_colour(class: &str) -> [f32; 3] {
 /// `levels` names the levels by path.
 /// A part of a layered element has the colour of its layer's material in `library`.
 pub fn viewer_model(model: &bim_core::Model, levels: &[(String, String)], library: &bim_library::Library) -> Model {
-    let (layers, parts) = viewer_layers(model, levels, library);
+    let (layers, parts, assemblies) = viewer_layers(model, levels, library);
     let mut built = Model::new(PathBuf::from("model.ifcx"), "IFCX", layers);
     built.project.parts = parts;
+    built.project.assemblies = assemblies;
     built.project.part_materials = crate::hatching::part_materials(library);
     built.project.cut_patterns = crate::hatching::library_patterns(library);
     built
@@ -1323,20 +1383,37 @@ pub fn viewer_model(model: &bim_core::Model, levels: &[(String, String)], librar
 /// The layers of the model shown: one per class, each element with its properties; and the
 /// parts of the elements that are of several materials (see `ProjectData::parts`): the layer,
 /// the first index and the index count of each part, and its material in the library's order.
-fn viewer_layers(model: &bim_core::Model, levels: &[(String, String)], library: &bim_library::Library) -> (Vec<Layer>, Vec<(usize, u32, u32, u32)>) {
+/// And the assemblies of the framed systems (see `ProjectData::assemblies`): the parts of such
+/// a system are drawn assembly by assembly.
+#[allow(clippy::type_complexity)]
+fn viewer_layers(model: &bim_core::Model, levels: &[(String, String)], library: &bim_library::Library) -> (Vec<Layer>, Vec<(usize, u32, u32, u32)>, Vec<crate::model::Assembly>) {
     let grid = model.grid;
     let mut layers: Vec<Layer> = Vec::new();
     let mut of_parts: Vec<(usize, u32, u32, u32)> = Vec::new();
+    let has_rebar_areas = model.iter().any(|e| !e.reinforcement_areas.is_empty());
+    let mut of_assemblies: Vec<crate::model::Assembly> = Vec::new();
     for element in model.iter() {
-        let Ok(parts) = model.evaluate(element.id) else { continue };
+        let Ok(mut parts) = model.evaluate(element.id) else { continue };
         if parts.is_empty() {
             continue;
         }
+        // a framed system: its parts in the order of its prefab units, and where each unit ends
+        let units = bim_core::system::assemblies(model, element, &parts).unwrap_or_default();
+        let mut ends: Vec<usize> = Vec::with_capacity(units.len());
+        if !units.is_empty() && units.iter().map(|u| u.parts.len()).sum::<usize>() == parts.len() {
+            let mut taken: Vec<Option<bim_core::Part>> = parts.into_iter().map(Some).collect();
+            parts = Vec::with_capacity(taken.len());
+            for u in &units {
+                parts.extend(u.parts.iter().filter_map(|&i| taken[i].take()));
+                ends.push(parts.len());
+            }
+        }
+        let mut unit_firsts: Vec<u32> = Vec::with_capacity(ends.len() + 1);
         let class = element.class();
         let k = match layers.iter().position(|l| l.name == class) {
             Some(k) => k,
             None => {
-                layers.push(Layer { name: class.into(), color: class_colour(class), ..Layer::default() });
+                layers.push(Layer { name: class.into(), hidden: class == "IfcReinforcingBar" && !has_rebar_areas, color: class_colour(class), ..Layer::default() });
                 layers.len() - 1
             }
         };
@@ -1344,7 +1421,10 @@ fn viewer_layers(model: &bim_core::Model, levels: &[(String, String)], library: 
         let first = layer.indices.len() as u32;
         // of several materials: each part is told from the others where it is cut
         let several = parts.iter().filter_map(|p| p.material.as_deref()).collect::<std::collections::HashSet<_>>().len() > 1;
-        for part in &parts {
+        for (n, part) in parts.iter().enumerate() {
+            if n == 0 || ends.contains(&n) {
+                unit_firsts.push(layer.indices.len() as u32);
+            }
             let Ok(mesh) = Mesh::of(&part.solid) else { continue };
             let part_first = layer.indices.len() as u32;
             // tile-local f64 to the scene's f32, through the tile origin in f64
@@ -1366,12 +1446,21 @@ fn viewer_layers(model: &bim_core::Model, levels: &[(String, String)], library: 
             }
         }
         let count = layer.indices.len() as u32 - first;
+        unit_firsts.push(layer.indices.len() as u32);
+        if !ends.is_empty() {
+            let mut from = 0;
+            for ((u, range), &to) in units.iter().zip(unit_firsts.windows(2)).zip(&ends) {
+                of_assemblies.push(crate::model::Assembly { layer: k, first: range[0], count: range[1] - range[0], element: element.id.0, number: u.number as u32, of: units.len() as u32, mark: u.mark(element), length: u.length(), parts: (to - from) as u32 });
+                from = to;
+            }
+        }
         layer.elements.push((element.id.0, first, count));
         let level = element.level.as_deref().and_then(|path| levels.iter().find(|(p, _)| p == path)).map(|(_, name)| name.as_str());
         layer.props.push((element.id.0, properties(model, element, &parts, level, library)));
     }
     of_parts.sort_unstable();
-    (layers, of_parts)
+    of_assemblies.sort_by_key(|a| (a.layer, a.first));
+    (layers, of_parts, of_assemblies)
 }
 
 /// The NL-SfB code of an element: of its build-up, its linear type (found by the name its
@@ -1414,6 +1503,7 @@ fn properties(model: &bim_core::Model, e: &Element, parts: &[bim_core::Part], le
         put("level", level.into());
     }
     // the service it is of, and the kind of system that is in IFC
+    if let Some(key) = &e.service_type { put("Service type", key.clone()); }
     if let Some(service) = e.service {
         put("Service", service.name().into());
         put("System type", service.ifc_system().into());
@@ -1432,7 +1522,11 @@ fn properties(model: &bim_core::Model, e: &Element, parts: &[bim_core::Part], le
             if let Some(grade) = &e.grade {
                 put("Grade", grade.clone());
             }
-            put("Length", m((l.end - l.start).length()));
+            let span = l.end.distance(l.start);
+            put("Length", m(e.hairpin_leg.map_or(span, |leg| 2.0 * leg + std::f64::consts::PI * span / 2.0)));
+            if let Some(r) = &e.reinforcement {
+                put("Reinforcement", crate::app::element_props::bars_text(r));
+            }
         }
         Shape::Planar(p) => {
             put("Thickness", m(p.total_thickness()));
@@ -1463,8 +1557,18 @@ fn properties(model: &bim_core::Model, e: &Element, parts: &[bim_core::Part], le
             put("Length", m((s.end - s.start).length()));
             put("Height", m(s.height));
             put("Parts", parts.len().to_string());
+            // the prefab units it is made of, by their marks
+            let units = bim_core::system::assemblies(model, e, parts).unwrap_or_default();
+            if !units.is_empty() {
+                put("Assemblies", units.iter().map(|u| u.mark(e)).collect::<Vec<_>>().join(", "));
+            }
             if let Some(t) = &s.system_type {
                 put("Type", library.system_name(&t.id, bim_library::Lang::En).unwrap_or_else(|| t.id.clone()));
+                // a system is a curtain wall by class, which carries nothing: its type's group
+                // says whether it does, and so whether a structural plan draws it
+                if let Some(group) = library.system_type(&t.id).map(|t| t.group) {
+                    put("LoadBearing", group.carries().to_string());
+                }
             }
         }
         Shape::Connection(c) => {
@@ -1474,9 +1578,11 @@ fn properties(model: &bim_core::Model, e: &Element, parts: &[bim_core::Part], le
                 ConnectionKind::Cut => "Cut",
                 ConnectionKind::EndPlate(_) => "End plate",
                 ConnectionKind::FinPlate(_) => "Fin plate",
+                ConnectionKind::Splice(_) => "Splice",
                 ConnectionKind::Bend(_) => "Bend",
                 ConnectionKind::Tee(_) => "Tee",
                 ConnectionKind::Transition(_) => "Transition",
+                ConnectionKind::BasePlate(_) => "Base plate",
                 ConnectionKind::Apart => "Apart",
             };
             put("Kind", kind.into());
@@ -1761,6 +1867,18 @@ mod tests {
     }
 
     #[test]
+    fn enter_finishes_a_wall_chain_without_placing_an_extra_segment() {
+        let mut app = modelling();
+        app.set_model_tool(Some((ModelTool::Wall, "Wall")));
+        click(&mut app, 0.0, 0.0);
+        click(&mut app, 5.0, 0.0);
+        let _ = app.update(Message::MeasureFinish);
+        assert!(app.modeller.tool.is_none() && app.modeller.points.is_empty());
+        click(&mut app, 7.0, 2.0);
+        assert_eq!(app.modeller.model.len(), 1);
+    }
+
+    #[test]
     fn clicks_near_an_end_snap_to_it_and_nearly_straight_lines_straighten() {
         let mut app = modelling();
         app.set_model_tool(Some((ModelTool::Beam, "Beam")));
@@ -1822,6 +1940,141 @@ mod tests {
         app.sel.set(Some(Pickable::Element(shown)));
         assert!(app.delete_modelled());
         assert_eq!(app.modeller.model.len(), 1);
+    }
+
+    #[test]
+    fn tab_on_a_framed_wall_opens_its_sketch_and_a_rectangle_in_it_is_a_framed_opening() {
+        use super::sketch::{Segment, SketchError};
+        let mut app = App::default();
+        let generic = bim_core::SystemDef { start: glam::DVec2::new(2.0, 1.0), end: glam::DVec2::new(6.8, 1.0), base: 0.0, height: 2.7, spacing: glam::DVec2::new(1.5, 1.5), member: glam::DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), division: None };
+        let s = generic.typed_from(&app.library, "system.timber-frame-140").unwrap();
+        let grid = app.modeller.model.grid;
+        let id = app.modeller.model.add(Element::in_project(&grid, "Frame", None, Shape::System(s))).unwrap();
+        app.show_modelled();
+        let whole = app.modeller.model.evaluate(id).unwrap().len();
+        assert!(app.sketchable(id));
+        app.open_sketch(id);
+        // its outline in its own face: four lines, upright from its base at its start
+        let sketch = app.modeller.sketch.clone().unwrap();
+        assert_eq!(sketch.segments.len(), 4);
+        let face = sketch.face.unwrap();
+        assert_eq!((face.origin, face.along), (glam::DVec3::new(2.0, 1.0, 0.0), glam::DVec3::X));
+        // a window drawn in it, 1.2 by 1.2 at 1.2 along and 0.9 up
+        let p = glam::DVec2::new;
+        let rectangle = |a: glam::DVec2, b: glam::DVec2| [Segment::line(a, p(b.x, a.y)), Segment::line(p(b.x, a.y), b), Segment::line(b, p(a.x, b.y)), Segment::line(p(a.x, b.y), a)];
+        app.modeller.sketch.as_mut().unwrap().segments.extend(rectangle(p(1.2, 0.9), p(2.4, 2.1)));
+        app.finish_sketch();
+        assert!(app.modeller.sketch.is_none() && app.modeller.refusal.is_none(), "{:?}", app.modeller.refusal);
+        let Shape::System(made) = &app.modeller.model.get(id).unwrap().shape else { panic!() };
+        let mm = |v: f64| (v * 1000.0).round() as i64;
+        assert_eq!(made.openings.iter().map(|o| (mm(o.along), mm(o.sill), mm(o.width), mm(o.height))).collect::<Vec<_>>(), [(1200, 900, 1200, 1200)]);
+        assert!(made.outline.is_empty());
+        // framed: a header, a sill, trimmers and king studs more than the studs it took out
+        assert!(app.modeller.model.evaluate(id).unwrap().len() > whole);
+
+        // again: the window is there as four lines; a corner off the top at the end
+        app.open_sketch(id);
+        let sketch = app.modeller.sketch.as_mut().unwrap();
+        assert_eq!(sketch.segments.len(), 8);
+        sketch.segments.splice(0..4, [Segment::line(p(0.0, 0.0), p(4.8, 0.0)), Segment::line(p(4.8, 0.0), p(4.8, 1.8)), Segment::line(p(4.8, 1.8), p(3.9, 2.7)), Segment::line(p(3.9, 2.7), p(0.0, 2.7)), Segment::line(p(0.0, 2.7), p(0.0, 0.0))]);
+        app.finish_sketch();
+        assert!(app.modeller.sketch.is_none() && app.modeller.refusal.is_none(), "{:?}", app.modeller.refusal);
+        let Shape::System(made) = &app.modeller.model.get(id).unwrap().shape else { panic!() };
+        assert_eq!((made.outline.len(), made.openings.len(), made.height), (5, 1, 2.7));
+        // as high as ever at its start, and under the cut at its end
+        let highest = |from: f64, to: f64| app.modeller.model.evaluate(id).unwrap().iter().flat_map(|part| part.solid.positions.clone()).filter(|q| q.x - 2.0 >= from && q.x - 2.0 <= to).map(|q| q.z).fold(0.0, f64::max);
+        assert!(highest(0.0, 1.0) > 2.69 && highest(4.6, 4.8) < 2.0 && highest(4.6, 4.8) > 1.7, "{} {}", highest(0.0, 1.0), highest(4.6, 4.8));
+
+        // an opening that is not a rectangle is told, and the sketch stays open
+        app.open_sketch(id);
+        app.modeller.sketch.as_mut().unwrap().segments.extend([Segment::line(p(0.3, 0.3), p(0.9, 0.3)), Segment::line(p(0.9, 0.3), p(0.6, 0.9)), Segment::line(p(0.6, 0.9), p(0.3, 0.3))]);
+        app.finish_sketch();
+        assert_eq!(app.modeller.sketch.as_ref().unwrap().error, Some(SketchError::OpeningNotSquare));
+    }
+
+    #[test]
+    fn an_opening_sketched_in_brickwork_goes_to_the_courses_and_gets_a_lintel() {
+        use super::sketch::Segment;
+        let mut app = App::default();
+        let generic = bim_core::SystemDef { start: glam::DVec2::new(2.0, 1.0), end: glam::DVec2::new(6.4, 1.0), base: 0.0, height: 2.5, spacing: glam::DVec2::new(1.5, 1.5), member: glam::DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), division: None };
+        let s = generic.typed_from(&app.library, "system.masonry-waal-stretcher").unwrap();
+        let grid = app.modeller.model.grid;
+        let id = app.modeller.model.add(Element::in_project(&grid, "Wall", None, Shape::System(s))).unwrap();
+        app.show_modelled();
+        assert!(app.sketchable(id));
+        app.open_sketch(id);
+        // a window drawn from 0.92 to 2.13 up: its sill goes to course 15, its head to course 34
+        let p = glam::DVec2::new;
+        let (a, b) = (p(1.5, 0.92), p(2.5, 2.13));
+        app.modeller.sketch.as_mut().unwrap().segments.extend([Segment::line(a, p(b.x, a.y)), Segment::line(p(b.x, a.y), b), Segment::line(b, p(a.x, b.y)), Segment::line(p(a.x, b.y), a)]);
+        app.finish_sketch();
+        assert!(app.modeller.sketch.is_none() && app.modeller.refusal.is_none(), "{:?}", app.modeller.refusal);
+        let Shape::System(made) = &app.modeller.model.get(id).unwrap().shape else { panic!() };
+        let o = made.openings[0];
+        assert!((o.sill - 15.0 * 0.0625).abs() < 1e-9 && (o.sill + o.height - 34.0 * 0.0625).abs() < 1e-9, "{o:?}");
+        let parts = app.modeller.model.evaluate(id).unwrap();
+        assert_eq!(parts.iter().filter(|p| p.class == "IfcBeam").count(), 1);
+        // no brick thinner than a whole one less its joints
+        let thin = parts.iter().filter(|p| p.class == "IfcPlate").filter(|p| {
+            let (lo, hi) = p.solid.bounds();
+            hi.z - lo.z < 0.05
+        }).count();
+        assert_eq!(thin, 0);
+    }
+
+    #[test]
+    fn a_timber_frame_is_exported_as_an_assembly_for_every_prefab_unit() {
+        // 7.2 m of timber frame: three units of 2400
+        let mut app = App::default();
+        let generic = bim_core::SystemDef { start: glam::DVec2::new(2.0, 1.0), end: glam::DVec2::new(9.2, 1.0), base: 0.0, height: 2.7, spacing: glam::DVec2::new(1.5, 1.5), member: glam::DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), division: None };
+        let s = generic.typed_from(&app.library, "system.timber-frame-140").unwrap();
+        let grid = app.modeller.model.grid;
+        let id = app.modeller.model.add(Element::in_project(&grid, "Frame", None, Shape::System(s))).unwrap();
+        app.show_modelled();
+        let scene = app.model.clone().unwrap();
+        let units = &scene.project.assemblies;
+        assert_eq!(units.iter().map(|a| (a.element, a.number, a.of, a.mark.as_str())).collect::<Vec<_>>(), [(id.0, 1, 3, "Frame 1-1"), (id.0, 2, 3, "Frame 1-2"), (id.0, 3, 3, "Frame 1-3")]);
+        // together they are the element's triangles, one after the other
+        let (li, &(_, first, count)) = scene.layers.iter().enumerate().find_map(|(li, l)| l.elements.iter().find(|e| e.0 == id.0).map(|e| (li, e))).unwrap();
+        assert!(units.iter().all(|a| a.layer == li && a.count > 0));
+        assert_eq!((units[0].first, units[1].first, units[2].first + units[2].count), (first, units[0].first + units[0].count, first + count));
+        assert!(scene.element_props(id.0).iter().any(|(k, v)| k == "Assemblies" && v == "Frame 1-1, Frame 1-2, Frame 1-3"));
+
+        // IFCX: the frame without a mesh, its three assemblies under it with theirs
+        let bytes = crate::export::to_bytes(&scene, &app.document, "frame.ifcx").expect("IFCX");
+        let file: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let nodes = file["data"].as_array().unwrap();
+        let class = |n: &serde_json::Value| n["attributes"]["bsi::ifc::class"]["code"].as_str().unwrap_or_default().to_string();
+        let frame = nodes.iter().find(|n| class(n) == "IfcCurtainWall").unwrap();
+        assert!(frame["attributes"].get("usd::usdgeom::mesh").is_none() && frame["attributes"].get("openaec::element").is_some());
+        let children: Vec<&str> = frame["children"].as_object().unwrap().values().filter_map(|v| v.as_str()).collect();
+        let made: Vec<&serde_json::Value> = nodes.iter().filter(|n| class(n) == "IfcElementAssembly").collect();
+        assert_eq!(made.len(), 3);
+        for n in &made {
+            assert!(children.contains(&n["path"].as_str().unwrap()));
+            assert!(!n["attributes"]["usd::usdgeom::mesh"]["points"].as_array().unwrap().is_empty());
+            assert_eq!(n["attributes"]["bsi::ifc::prop::Length"], "2.400 m");
+        }
+        // read back: the one frame, to be edited as before
+        let source = crate::loaders::Source::Bytes { name: "frame.ifcx".into(), data: Arc::new(bytes) };
+        let loaded = crate::loaders::load_with(&source, &crate::loaders::Progress::default()).expect("read back");
+        let mut back = App::default();
+        back.set_model(Arc::new(loaded));
+        assert_eq!(back.modeller.model.iter().count(), 1);
+
+        // IFC: the curtain wall without a shape, three assemblies made in the workshop, part of it
+        let ifc = String::from_utf8(crate::export::to_bytes(&scene, &app.document, "frame.ifc").expect("IFC")).unwrap();
+        let wall = ifc.lines().find(|l| l.contains("=IFCCURTAINWALL(")).unwrap();
+        assert!(wall.contains(",$,'1',"), "no shape: {wall}");
+        let made: Vec<&str> = ifc.lines().filter(|l| l.contains("=IFCELEMENTASSEMBLY(")).collect();
+        assert_eq!(made.len(), 3);
+        assert!(made.iter().all(|l| l.contains(".FACTORY.") && l.contains("'Frame 1-")), "{made:?}");
+        let number = |l: &str| l.split('=').next().unwrap().to_string();
+        let parts = format!("{},({},{},{}))", number(wall), number(made[0]), number(made[1]), number(made[2]));
+        assert!(ifc.lines().any(|l| l.contains("=IFCRELAGGREGATES(") && l.ends_with(&format!("{parts};"))), "{parts}");
+        // in the storey: the wall, not its assemblies
+        let contained = ifc.lines().find(|l| l.contains("=IFCRELCONTAINEDINSPATIALSTRUCTURE(")).unwrap();
+        assert!(contained.contains(&number(wall)) && !contained.contains(&number(made[0])), "{contained}");
     }
 
     #[test]
@@ -1931,7 +2184,7 @@ mod tests {
     fn two_timber_frames_are_connected_at_their_corner() {
         let mut app = modelling();
         let frame = |a: (f64, f64), b: (f64, f64)| {
-            let s = SystemDef { start: glam::DVec2::new(a.0, a.1), end: glam::DVec2::new(b.0, b.1), base: 0.0, height: 2.7, spacing: SYSTEM_SPACING, member: SYSTEM_MEMBER, panel: SYSTEM_PANEL, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), grid: None };
+            let s = SystemDef { start: glam::DVec2::new(a.0, a.1), end: glam::DVec2::new(b.0, b.1), base: 0.0, height: 2.7, spacing: SYSTEM_SPACING, member: SYSTEM_MEMBER, panel: SYSTEM_PANEL, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), grid: None, division: None };
             Shape::System(s.typed_from(&bim_library::Library::starter(), "system.timber-frame-140").unwrap())
         };
         let long = app.add_element("Frame", None, frame((0.0, 0.0), (4.8, 0.0))).unwrap();

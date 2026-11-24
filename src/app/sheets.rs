@@ -123,7 +123,7 @@ impl App {
         }
         let shown: Vec<usize> = of.filter(|&i| query.is_empty() || sheets[i].title.to_lowercase().contains(query)).collect();
         let open = self.explorer_open[4] || !query.is_empty();
-        body = body.push(group_header(p, l.text("Tekeningen", "Drawings"), Some("beta"), shown.len(), open, Message::ToggleExplorer(4)));
+        body = body.push(group_header(p, l.text("Tekenbladen", "Sheets"), Some("beta"), shown.len(), open, Message::ToggleExplorer(4)));
         if !open {
             return body;
         }
@@ -159,7 +159,7 @@ impl App {
                     dimensions: dimensions.to_vec(),
                     notes: self.document.view_notes(path).unwrap_or(&[]).iter().chain(self.document.view_tags(path)).cloned().collect(),
                     lines: self.document.view_lines(path).iter().chain(self.document.view_symbols(path)).copied().collect(),
-                    fills: self.document.view_fills(path).to_vec(),
+                    fills: self.document.view_fills(path).cloned().collect(),
                 },
                 // a 3D view: its hidden lines, once they are made, within its crop where it has
                 // one: the viewport's box, measured from the point of the drawing at its position
@@ -786,17 +786,19 @@ impl canvas::Program<Message> for SheetDrawing {
                             });
                             frame.stroke(&marks, Stroke::default().with_color(ink).with_width(0.7));
                             let paper = fit.scale;
-                            for d in dimensions.iter().filter(|d| here([(d.from[0] + d.to[0]) / 2.0, (d.from[1] + d.to[1]) / 2.0])) {
-                                let (a, b) = (on(d.from), on(d.to));
-                                let style = self.styles.get(d.style).or(self.styles.first());
-                                let Some(style) = style.filter(|_| seen(a, b)) else { continue };
-                                let look = super::marks::DimensionLook { offset: paper * super::marks::OFFSET as f32, paper, size: (paper * style.size as f32).max(SMALLEST), style };
-                                super::marks::draw_dimension_px(&mut frame, a, b, d.length(), ink, look);
+                            for d in dimensions {
+                                let Some(style) = self.styles.get(d.style).or(self.styles.first()) else { continue };
+                                for (i, (actual, [from,to])) in d.intervals().enumerate() {
+                                    let (a,b) = (on(from), on(to));
+                                    if !here([(from[0]+to[0])/2., (from[1]+to[1])/2.]) || !seen(a,b) { continue; }
+                                    let look = super::marks::DimensionLook { offset: paper * d.paper_offset() as f32, paper, size: paper * style.paper_font_size() as f32, style };
+                                    super::marks::draw_interval_px(&mut frame, a, b, actual.map(on), i == 0, d.interval_value(from,to,style), ink, look);
+                                }
                             }
                             for note in notes.iter().filter(|n| here(n.at)) {
                                 let (at, size) = (on(note.at), note.size as f32 * paper);
                                 if size >= SMALLEST && at.x > -size * 60.0 && at.x < bounds.width + size * 60.0 && at.y > -size * 8.0 && at.y < bounds.height + size * 8.0 {
-                                    super::marks::draw_note_in(&mut frame, at, &note.text, size, ink, note.align, note.angle as f32 - turned, &note.face);
+                                    super::marks::draw_paper_note(&mut frame, at, note, size, ink, note.angle as f32 - turned);
                                 }
                             }
                         }

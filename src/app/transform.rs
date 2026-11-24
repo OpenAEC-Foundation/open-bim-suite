@@ -70,6 +70,8 @@ impl TransformKind {
     /// What to click next, `placed` points in.
     pub fn hint(self, l: Language, placed: usize) -> &'static str {
         match (self, placed) {
+            (TransformKind::Copy, 0) => l.text("Kies het basispunt van de kopie", "Pick the base point for the copy"),
+            (TransformKind::Copy, _) => l.text("Kies het doelpunt van de kopie", "Pick the destination for the copy"),
             (TransformKind::Rotate, 0) => l.text("Klik het draaipunt · Esc: stoppen", "Click the centre to turn about · Esc: stop"),
             (TransformKind::Rotate, 1) => l.text("Klik een punt om vanaf te draaien · Esc: opnieuw", "Click a point to turn from · Esc: start again"),
             (TransformKind::Rotate, _) => l.text("Klik waar dat punt heen draait · Esc: opnieuw", "Click where that point turns to · Esc: start again"),
@@ -93,6 +95,7 @@ pub struct Transform {
     /// The line to align to: a point on it and the way it runs.
     pub line: Option<(DVec2, DVec2)>,
     pub points: Vec<DVec3>,
+    pub(super) copy_faces: super::placing::Faces,
     /// What is drawn on a floor plan that it takes in place of elements: the plan, and the run of
     /// its lines that is the line or shape picked.
     pub drawn: Option<(std::sync::Arc<str>, std::ops::Range<usize>)>,
@@ -280,8 +283,14 @@ impl App {
         self.modeller.edit = None;
         self.modeller.refusal = None;
         self.modeller.turn_typed.clear();
-        self.modeller.transform = Some(Transform { kind, elements, grids, line: None, points: Vec::new(), drawn });
-        // a fresh 3D cursor is the base point of a move or a copy
+        let copy_faces = if kind == TransformKind::Copy {
+            self.modeller.cursor = None;
+            self.copy_source_faces(&elements, grids.first().copied(), drawn.as_ref())
+        } else {
+            Vec::new()
+        };
+        self.modeller.transform = Some(Transform { kind, elements, grids, line: None, points: Vec::new(), drawn, copy_faces });
+        // a fresh 3D cursor is the base point of a move; copying takes an explicit base point
         self.transform_from_cursor3d();
     }
 
@@ -317,6 +326,7 @@ impl App {
             return self.align_click(p, x, y, width, height);
         }
         let Some(t) = self.modeller.transform.as_mut() else { return };
+        if t.kind == TransformKind::Copy { self.modeller.cursor = Some(p); }
         t.points.push(p);
         if t.points.len() < t.kind.clicks() {
             return;
@@ -424,6 +434,8 @@ impl App {
                 let base = e.name.rsplit_once(' ').filter(|(_, n)| n.parse::<u32>().is_ok()).map_or(e.name.as_str(), |(base, _)| base);
                 let number = self.modeller.model.iter().filter(|o| o.class() == changed.class()).count() + 1;
                 changed.name = format!("{base} {number}");
+                // Region members belong to the source wall. A wall copied alone owns none.
+                changed.reinforcement_areas.clear();
                 self.modeller.model.add(changed)
             } else {
                 changed.id = e.id;
@@ -583,8 +595,22 @@ mod tests {
     fn copy_leaves_the_wall_and_makes_another_with_the_next_number() {
         let (mut app, id) = a_wall();
         let _ = app.update(Message::Transform(TransformKind::Copy));
+        let ink = iced::Color::BLACK;
+        assert!(app.placing_overlay(ink).is_none());
         click(&mut app, 10.0, 5.0);
+        let source = app.placing_overlay(ink).unwrap().faces;
+        assert!(!source.is_empty());
+        let (x, y) = app.on_screen(DVec3::new(10.0, 8.0, 0.0), 1000.0, 800.0).unwrap();
+        let hover = Navigate::Hover { x, y, width: 1000.0, height: 800.0 };
+        let _ = app.update(Message::Navigate(hover.clone()));
+        let preview = app.placing_overlay(ink).unwrap();
+        assert_eq!(app.modeller.model.len(), 1);
+        assert_eq!(preview.faces[0][0][0] - source[0][0][0], glam::Vec3::new(0.0, 3.0, 0.0));
+        let _ = app.update(Message::Navigate(Navigate::HoverOff));
+        assert!(app.placing_overlay(ink).is_none());
+        let _ = app.update(Message::Navigate(hover));
         click(&mut app, 10.0, 8.0);
+        assert!(app.placing_overlay(ink).is_none());
         let walls: Vec<&bim_core::Element> = app.modeller.model.iter().filter(|e| e.class() == "IfcWall").collect();
         assert_eq!(walls.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["Wall 1", "Wall 2"]);
         let (a, b) = ends(&app, id);

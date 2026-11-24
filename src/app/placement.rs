@@ -455,7 +455,18 @@ impl App {
         let Some((tool, mut s)) = self.tool_settings() else { return };
         let placement = &mut self.modeller.placement;
         match message {
-            PlaceMessage::Kind(kind) => s.kind = kind,
+            PlaceMessage::Kind(kind) => {
+                if let Some(series) = kind.as_deref().and_then(|id| self.library.service_type(id)) {
+                    if let Some(size) = series.sizes.iter().min_by(|a,b| {
+                        let distance = |size: &bim_library::service::Size| (size.width-s.width).abs() + (size.height-s.depth).abs();
+                        distance(a).total_cmp(&distance(b))
+                    }) {
+                        s.width = size.width;
+                        s.depth = size.height;
+                    }
+                }
+                s.kind = kind;
+            }
             PlaceMessage::Location(location) => s.location = location,
             PlaceMessage::Grade(grade) => s.grade = grade,
             PlaceMessage::Service(service) => s.service = service,
@@ -488,6 +499,9 @@ impl App {
             PlaceMessage::Field(field, typed) => {
                 if let Some(typed_in) = with_typed(tool, &s, field, &typed) {
                     s = typed_in;
+                    if matches!(field, PlaceField::Width | PlaceField::Depth) && s.kind.as_deref().and_then(|id| self.library.service_type(id)).is_some_and(|series| !series.sizes.iter().any(|v| (v.width-s.width).abs() < 1e-6 && (tool == ModelTool::Pipe || tool == ModelTool::RoundDuct || (v.height-s.depth).abs() < 1e-6))) {
+                        s.kind = None;
+                    }
                 }
                 placement.typing = Some((field, typed));
             }
@@ -697,7 +711,9 @@ impl App {
             let chain = button(text(l.text("Ketting", "Chain")).size(12)).padding([3, 10]).style(move |_, st| p.ribbon_button(on, st)).on_press(Message::Place(PlaceMessage::Chain(!on)));
             bar = bar.push(chain);
         }
-        Some(container(bar).padding([2, 8]).width(Fill).into())
+        let finish = button(text(l.text("Klaar (Enter)", "Finish (Enter)")).size(12))
+            .padding([3, 10]).style(move |_, st| p.ribbon_button(false, st)).on_press(Message::ModelTool(None));
+        Some(container(bar.push(finish)).padding([2, 8]).width(Fill).into())
     }
 
     /// The types `tool` can take, generic first; `None` for a tool without types.
@@ -730,7 +746,18 @@ impl App {
                     }
                 }
             }
-            ModelTool::Point | ModelTool::Appliance | ModelTool::Stair | ModelTool::Door | ModelTool::Window | ModelTool::Duct | ModelTool::RoundDuct | ModelTool::Pipe | ModelTool::CableTray => return None,
+            ModelTool::Duct | ModelTool::RoundDuct | ModelTool::Pipe | ModelTool::CableTray => {
+                use bim_library::service::{Carrier, Section};
+                let (carrier, section) = match tool {
+                    ModelTool::Duct => (Carrier::Duct, Section::Rectangular),
+                    ModelTool::RoundDuct => (Carrier::Duct, Section::Round),
+                    ModelTool::Pipe => (Carrier::Pipe, Section::Round),
+                    _ => (Carrier::CableTray, Section::Rectangular),
+                };
+                choices.extend(self.library.service_types_of(carrier).filter(|series| series.section == section)
+                    .map(|series| Choice { id: Some(series.id.clone()), name: series.name(lang).to_string() }));
+            }
+            ModelTool::Point | ModelTool::Appliance | ModelTool::Stair | ModelTool::Door | ModelTool::Window => return None,
         }
         Some(choices)
     }

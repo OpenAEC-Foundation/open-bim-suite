@@ -1025,7 +1025,7 @@ pub(super) fn grid(g: rvt_read::materials::Grid) -> crate::hatching::Grid {
 
 /// The reader's cut pattern of a material as the app's.
 fn pattern(p: rvt_read::materials::CutPattern) -> crate::hatching::Pattern {
-    crate::hatching::Pattern { fill: p.fill, line: p.line, solid: p.solid, grids: p.grids.into_iter().map(grid).collect(), on_paper: p.on_paper }
+    crate::hatching::Pattern { fill: p.fill, line: p.line, solid: p.solid, grids: p.grids.into_iter().map(grid).collect(), on_paper: p.on_paper, from: 0.0, below: None }
 }
 
 /// The properties of an element (a JSON object) with `LoadBearing` added: what a structural plan
@@ -1393,4 +1393,25 @@ mod tests {
             }
         }
     }
+    /// With `RVT_MATERIALS=<a Revit file>`: prints its materials, each with its class and its
+    /// colour, for `tools/revit-materials`.
+    #[test]
+    #[ignore]
+    fn print_the_materials_of_a_revit_file() {
+        let Some(path) = std::env::var_os("RVT_MATERIALS").map(std::path::PathBuf::from).filter(|p| p.exists()) else { return };
+        let doc = rvt_read::Document::open(&path).expect("rvt");
+        let mut first = true;
+        for id in doc.object_ids_of_class("MaterialElem") {
+            let Some(o) = doc.object(id) else { continue };
+            let Some(material) = o.get("m_pMaterial").and_then(|v| o.deref(v)) else { continue };
+            if first {
+                first = false;
+                println!("FIELDS {:?}", material.fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>());
+            }
+            let text = |field: &str| material.get(field).and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+            let colour = material.get("m_color").and_then(|v| v.as_i64()).map(rvt_read::materials::rgb).unwrap_or([0; 3]);
+            println!("MATERIAL\t{}\t{}\t{:?}", text("m_name"), text("m_sMaterialClass"), colour);
+        }
+    }
+
 }

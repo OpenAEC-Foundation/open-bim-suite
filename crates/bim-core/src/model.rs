@@ -72,6 +72,9 @@ impl Model {
     pub fn add(&mut self, mut element: Element) -> Result<ElementId, Refusal> {
         let id = ElementId(self.next.max(1));
         element.id = id;
+        // A copy is a new pile. Zero requests the next issued number on refresh.
+        element.pile_number = element.pile_number.map(|_| 0);
+        element.pile_mark = None;
         element.rehome(&self.grid);
         self.evaluate_element(&element)?;
         self.elements.insert(id, element);
@@ -150,6 +153,11 @@ impl Model {
         for id in &broken {
             self.elements.remove(id);
         }
+        // New automatic joins require a changed linear member. Broken connections were
+        // still checked above, including those between systems.
+        if changed.is_some_and(|ids| !ids.iter().any(|id| self.member(*id).is_ok())) {
+            return (Vec::new(), broken);
+        }
         // the ends joined already, and the pairs joined already
         let mut taken: std::collections::HashSet<(ElementId, MemberEnd)> = Default::default();
         let mut paired: std::collections::HashSet<(ElementId, ElementId)> = Default::default();
@@ -165,13 +173,14 @@ impl Model {
             }
         }
         let linear: Vec<(ElementId, LinearDef)> = self.elements.values().filter_map(|e| Some((e.id, self.member(e.id).ok()?))).collect();
+        let radii: Vec<std::cell::OnceCell<f64>> = (0..linear.len()).map(|_| Default::default()).collect();
         let mut added = Vec::new();
         for (id, me) in &linear {
             for (end, at) in [(MemberEnd::Start, me.start), (MemberEnd::End, me.end)] {
                 if taken.contains(&(*id, end)) {
                     continue;
                 }
-                let Some((other, other_end, def)) = self.partner(*id, at, &linear, &paired) else { continue };
+                let Some((other, other_end, def)) = self.partner(*id, at, &linear, &radii, &paired) else { continue };
                 if changed.is_some_and(|c| !c.contains(id) && !c.contains(&other)) {
                     continue;
                 }
@@ -208,15 +217,16 @@ impl Model {
         id: ElementId,
         at: glam::DVec3,
         linear: &[(ElementId, LinearDef)],
+        radii: &[std::cell::OnceCell<f64>],
         paired: &std::collections::HashSet<(ElementId, ElementId)>,
     ) -> Option<(ElementId, Option<MemberEnd>, LinearDef)> {
         // two runs of different services are never joined
         let service = |id: ElementId| self.elements.get(&id).and_then(|e| e.service);
         let mine = service(id);
         let apart = |o: ElementId| mine.is_some_and(|mine| service(o).is_some_and(|theirs| theirs != mine));
-        let others = linear.iter().filter(|(o, _)| *o != id && !paired.contains(&(id.min(*o), id.max(*o))) && !apart(*o));
+        let others = linear.iter().zip(radii).filter(|((o, _), _)| *o != id && !paired.contains(&(id.min(*o), id.max(*o))) && !apart(*o));
         let mut side = None;
-        for (o, def) in others {
+        for ((o, def), radius) in others {
             if def.start.distance(at) <= JOIN_TOLERANCE {
                 return Some((*o, Some(MemberEnd::Start), def.clone()));
             }
@@ -226,9 +236,12 @@ impl Model {
             let axis = def.end - def.start;
             let t = (at - def.start).dot(axis) / axis.length_squared().max(1e-300);
             let length = axis.length();
-            let radius = def.profile.profile().map_or(0.0, |p| p.outer().iter().map(|q| q.length()).fold(0.0, f64::max));
-            if t * length > JOIN_TOLERANCE && (1.0 - t) * length > JOIN_TOLERANCE && join::to_segment(at, def.start, def.end) <= radius + JOIN_TOLERANCE {
-                let d = join::to_segment(at, def.start, def.end);
+            if t * length <= JOIN_TOLERANCE || (1.0 - t) * length <= JOIN_TOLERANCE {
+                continue;
+            }
+            let radius = radius.get_or_init(|| def.profile.profile().map_or(0.0, |p| p.outer().iter().map(|q| q.length()).fold(0.0, f64::max)));
+            let d = join::to_segment(at, def.start, def.end);
+            if d <= *radius + JOIN_TOLERANCE {
                 if side.as_ref().is_none_or(|(_, best, _): &(ElementId, f64, LinearDef)| d < *best) {
                     side = Some((*o, d, def.clone()));
                 }
@@ -361,6 +374,9 @@ impl Model {
             // a framed system meeting another at a corner ends there as the corner says
             Shape::System(s) => Ok(crate::system::joined_parts(self, element, s)?.into_iter().map(|p| Part { class: p.class, tile: element.tile, solid: p.solid, material: p.material }).collect()),
             Shape::Linear(l) => {
+                if let Some(leg) = element.hairpin_leg {
+                    return Ok(vec![part(crate::reinforcement::hairpin_solid(l, leg)?)]);
+                }
                 let joined = self.joined(element.id, element.tile);
                 let body = join::finish(&Member::of(l)?, joined.start, joined.end, &joined.additions, &joined.removals);
                 // additions or removals that cannot be made leave the member with its trims only
@@ -413,7 +429,7 @@ impl Model {
             return Err(Refusal::SameMember);
         }
         match c.kind {
-            ConnectionKind::Butt | ConnectionKind::Mitre | ConnectionKind::EndPlate(_) | ConnectionKind::FinPlate(_) | ConnectionKind::Bend(_) | ConnectionKind::Tee(_) | ConnectionKind::Transition(_) | ConnectionKind::Apart => self.join(c).map(|_| ()),
+            ConnectionKind::Butt | ConnectionKind::Mitre | ConnectionKind::EndPlate(_) | ConnectionKind::FinPlate(_) | ConnectionKind::Bend(_) | ConnectionKind::Tee(_) | ConnectionKind::Transition(_) | ConnectionKind::Splice(_) | ConnectionKind::BasePlate(_) | ConnectionKind::Apart => self.join(c).map(|_| ()),
             ConnectionKind::Cut => {
                 let target = self.elements.get(&c.secondary).ok_or(Refusal::Missing)?;
                 let parts = self.body(target)?;
@@ -483,6 +499,8 @@ impl Model {
             ConnectionKind::Mitre => JoinKind::Mitre,
             ConnectionKind::EndPlate(plate) => JoinKind::EndPlate(plate),
             ConnectionKind::FinPlate(plate) => JoinKind::FinPlate(plate),
+            ConnectionKind::Splice(plate) => JoinKind::Splice(plate),
+            ConnectionKind::BasePlate(plate) => JoinKind::BasePlate(plate),
             ConnectionKind::Bend(b) => JoinKind::Bend(b),
             ConnectionKind::Tee(t) => JoinKind::Tee(t),
             ConnectionKind::Transition(t) => JoinKind::Transition(t),
@@ -701,7 +719,7 @@ mod tests {
         let point = add(&mut m, Shape::Point(PointDef { at: DVec3::new(1.0, 1.0, 0.0), rotation: 0.5, size: DVec3::new(0.6, 0.6, 0.9), opening: None, role: Default::default() }));
         let system = add(
             &mut m,
-            Shape::System(SystemDef { start: DVec2::new(0.0, 5.0), end: DVec2::new(6.0, 5.0), base: 0.0, height: 3.0, spacing: DVec2::new(1.2, 1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), grid: None }),
+            Shape::System(SystemDef { start: DVec2::new(0.0, 5.0), end: DVec2::new(6.0, 5.0), base: 0.0, height: 3.0, spacing: DVec2::new(1.2, 1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), grid: None, division: None }),
         );
         assert!((m.evaluate(point).unwrap()[0].solid.volume() - 0.6 * 0.6 * 0.9).abs() < 1e-12);
         assert!(m.evaluate(system).unwrap().len() > 10);
@@ -764,7 +782,7 @@ mod tests {
         let mut m = Model::new(TileGrid::default());
         let s = add(
             &mut m,
-            Shape::System(SystemDef { start: DVec2::ZERO, end: DVec2::new(3.0, 0.0), base: 0.0, height: 3.0, spacing: DVec2::new(1.5, 1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), grid: None }),
+            Shape::System(SystemDef { start: DVec2::ZERO, end: DVec2::new(3.0, 0.0), base: 0.0, height: 3.0, spacing: DVec2::new(1.5, 1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), grid: None, division: None }),
         );
         let parts = m.evaluate(s).unwrap().len();
         let b = add(&mut m, beam(DVec3::new(0.75, -1.0, 2.0), DVec3::new(0.75, 1.0, 2.0)));
@@ -833,6 +851,43 @@ mod tests {
         let json = serde_json::to_string(m.get(joint).unwrap()).unwrap();
         assert!(json.contains("fin_plate"), "{json}");
         assert_eq!(&serde_json::from_str::<Element>(&json).unwrap(), m.get(joint).unwrap());
+    }
+
+    #[test]
+    fn a_splice_and_a_base_plate_are_assemblies_with_their_fixity() {
+        let mut m = Model::new(TileGrid::default());
+        let steel = |a: DVec3, b: DVec3, name: &str| Shape::Linear(LinearDef { role: Default::default(), start: a, end: b, profile: ProfileDef::steel(name).unwrap(), roll: 0.0 });
+        // two beams in one line: joined by nothing of themselves, spliced on request
+        let a = add(&mut m, steel(DVec3::new(0.0, 0.0, 3.0), DVec3::new(4.0, 0.0, 3.0), "IPE 300"));
+        let b = add(&mut m, steel(DVec3::new(4.0, 0.0, 3.0), DVec3::new(9.0, 0.0, 3.0), "IPE 300"));
+        assert!(joints(&m).is_empty());
+        let before = m.evaluate(a).unwrap()[0].solid.volume();
+        let kind = ConnectionKind::Splice(crate::join::EndPlate::default());
+        assert_eq!(kind.fixity(), Some(crate::Fixity::Rigid));
+        let splice = add(&mut m, Shape::Connection(ConnectionDef { kind, primary: a, secondary: b }));
+        assert_eq!(m.get(splice).unwrap().class(), "IfcElementAssembly");
+        assert_eq!(m.evaluate(splice).unwrap().len(), 6, "two plates and four bolts");
+        assert!(m.evaluate(a).unwrap()[0].solid.volume() < before, "the beam makes room for its plate");
+        // a steel column on a concrete pile: a base plate, a hinge to the analysis
+        let pile = add(&mut m, Shape::Linear(LinearDef { role: Default::default(), start: DVec3::new(20.0, 0.0, -8.0), end: DVec3::new(20.0, 0.0, 0.0), profile: ProfileDef::Rectangle { width: 0.4, height: 0.4 }, roll: 0.0 }));
+        let column = add(&mut m, steel(DVec3::new(20.0, 0.0, 0.0), DVec3::new(20.0, 0.0, 3.0), "HEA 200"));
+        let kind = ConnectionKind::BasePlate(crate::join::BasePlate::default());
+        assert_eq!(kind.fixity(), Some(crate::Fixity::Pinned));
+        let base = add(&mut m, Shape::Connection(ConnectionDef { kind, primary: pile, secondary: column }));
+        let parts = m.evaluate(base).unwrap();
+        assert_eq!(parts.iter().filter(|p| p.class == "IfcMechanicalFastener").count(), 4);
+        assert!(parts.iter().any(|p| p.material.as_deref() == Some("grout")));
+        let (lo, _) = m.evaluate(column).unwrap()[0].solid.bounds();
+        assert!((lo.z - 0.05).abs() < 1e-9, "the column stands on grout and plate: {lo}");
+        let json = serde_json::to_string(m.get(base).unwrap()).unwrap();
+        assert!(json.contains("base_plate"), "{json}");
+        assert_eq!(&serde_json::from_str::<Element>(&json).unwrap(), m.get(base).unwrap());
+        // a splice of members at an angle is refused
+        let c = add(&mut m, steel(DVec3::new(30.0, 0.0, 3.0), DVec3::new(34.0, 0.0, 3.0), "IPE 300"));
+        let d = add(&mut m, steel(DVec3::new(34.0, 0.0, 3.0), DVec3::new(34.0, 4.0, 3.0), "HEA 200"));
+        let grid = m.grid;
+        let bent = Element::in_project(&grid, "c", None, Shape::Connection(ConnectionDef { kind: ConnectionKind::Splice(Default::default()), primary: c, secondary: d }));
+        assert_eq!(m.add(bent).map(|_| ()), Err(Refusal::NotInLine));
     }
 
     fn joints(m: &Model) -> Vec<ConnectionDef> {

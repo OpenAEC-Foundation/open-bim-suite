@@ -48,10 +48,72 @@ pub enum LabelField {
     Length,
     Area,
     Level,
+    /// Its grade or strength class ("S355", "C20/25"): the element's own, else its material's.
+    Grade,
     /// A property of the element, by its name.
     Property(String),
     /// A fixed text ("Ø", "d=").
     Text(String),
+}
+
+impl LabelField {
+    /// The field as it is typed: its word ("name", "thickness"), a property as `prop:Key`, a
+    /// fixed text between quotes.
+    pub fn word(&self) -> String {
+        match self {
+            LabelField::Name => "name".into(),
+            LabelField::Type => "type".into(),
+            LabelField::Code => "code".into(),
+            LabelField::Material => "material".into(),
+            LabelField::Thickness => "thickness".into(),
+            LabelField::Profile => "profile".into(),
+            LabelField::Length => "length".into(),
+            LabelField::Area => "area".into(),
+            LabelField::Level => "level".into(),
+            LabelField::Grade => "grade".into(),
+            LabelField::Property(key) => format!("prop:{key}"),
+            LabelField::Text(text) => format!("\"{text}\""),
+        }
+    }
+
+    /// The field a typed word names, whatever its case; none for a word that names no field.
+    pub fn of_word(word: &str) -> Option<LabelField> {
+        let word = word.trim();
+        if let Some(text) = word.strip_prefix('"').and_then(|rest| rest.strip_suffix('"')) {
+            return (!text.is_empty()).then(|| LabelField::Text(text.to_string()));
+        }
+        if let Some(key) = word.strip_prefix("prop:").or_else(|| word.strip_prefix("PROP:")) {
+            return (!key.trim().is_empty()).then(|| LabelField::Property(key.trim().to_string()));
+        }
+        Some(match word.to_lowercase().as_str() {
+            "name" => LabelField::Name,
+            "type" => LabelField::Type,
+            "code" => LabelField::Code,
+            "material" => LabelField::Material,
+            "thickness" => LabelField::Thickness,
+            "profile" => LabelField::Profile,
+            "length" => LabelField::Length,
+            "area" => LabelField::Area,
+            "level" => LabelField::Level,
+            "grade" => LabelField::Grade,
+            _ => return None,
+        })
+    }
+
+    /// The fields a typed list names ("name, profile, grade"); none when a word names no field
+    /// or the list is empty.
+    pub fn list(typed: &str) -> Option<Vec<LabelField>> {
+        let fields: Option<Vec<LabelField>> = list(typed).iter().map(|word| LabelField::of_word(word)).collect();
+        fields.filter(|fields| !fields.is_empty())
+    }
+}
+
+impl Frame {
+    pub const ALL: [Frame; 5] = [Frame::None, Frame::Rectangle, Frame::Rounded, Frame::Circle, Frame::Hexagon];
+}
+
+impl Place {
+    pub const ALL: [Place; 6] = [Place::Centre, Place::Along, Place::Above, Place::Below, Place::Left, Place::Right];
 }
 
 /// What is drawn round a label.
@@ -122,6 +184,11 @@ pub struct Filter {
     pub property: Option<(String, String)>,
 }
 
+/// A list as it is typed: parts between commas, each trimmed, the empty ones left out.
+pub fn list(typed: &str) -> Vec<String> {
+    typed.split(',').map(str::trim).filter(|part| !part.is_empty()).map(str::to_string).collect()
+}
+
 /// What a dimension rule measures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -155,6 +222,10 @@ pub struct Rule {
     pub filter: Filter,
     #[serde(flatten)]
     pub gives: Gives,
+    /// Off: the rule takes nothing until it is turned on. A rule that is added starts off, so
+    /// it changes no drawing before its filter is set.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub off: bool,
 }
 
 /// A drawing set.
@@ -226,6 +297,7 @@ impl LabelType {
                 LabelField::Length => element.prop("Length").map(millimetres),
                 LabelField::Area => element.prop("Area").map(str::to_string),
                 LabelField::Level => element.prop("Level").map(str::to_string),
+                LabelField::Grade => element.prop("Grade").map(str::to_string),
                 LabelField::Property(key) => element.prop(key).map(str::to_string),
                 LabelField::Text(text) => Some(text.clone()),
             };
@@ -272,7 +344,7 @@ impl DrawingSet {
     pub fn annotate(&self, element: &Described) -> Annotation {
         let mut out = Annotation::default();
         let mut labelled = false;
-        for rule in self.rules.iter().filter(|rule| rule.filter.takes(element)) {
+        for rule in self.rules.iter().filter(|rule| !rule.off && rule.filter.takes(element)) {
             match &rule.gives {
                 Gives::Label { label } if !labelled => {
                     labelled = true;
@@ -283,6 +355,29 @@ impl DrawingSet {
             }
         }
         out
+    }
+
+    /// Moves rule `key` one place up (tried sooner) or down; whether it moved.
+    pub fn move_rule(&mut self, key: &str, up: bool) -> bool {
+        let Some(at) = self.rules.iter().position(|r| r.key == key) else { return false };
+        let to = if up { at.checked_sub(1) } else { Some(at + 1).filter(|to| *to < self.rules.len()) };
+        to.map(|to| self.rules.swap(at, to)).is_some()
+    }
+
+    /// Takes rule `key` away; whether it had it.
+    pub fn remove_rule(&mut self, key: &str) -> bool {
+        let before = self.rules.len();
+        self.rules.retain(|r| r.key != key);
+        self.rules.len() != before
+    }
+
+    /// Adds a rule at the end that is off: turned on it takes every element and gives the set's
+    /// first label (or, without labels, a dimension of the length); its key.
+    pub fn add_rule(&mut self, names: Names) -> String {
+        let key = (1..).map(|n| format!("rule-{n}")).find(|key| self.rules.iter().all(|r| r.key != *key)).unwrap_or_default();
+        let gives = self.labels.first().map_or(Gives::Dimension { measure: Measure::Length, chain: false }, |label| Gives::Label { label: label.key.clone() });
+        self.rules.push(Rule { key: key.clone(), names, filter: Filter::default(), gives, off: true });
+        key
     }
 
     /// Whether it holds together: keys each once, labels with fields, and rules that name a
@@ -319,7 +414,7 @@ impl DrawingSet {
 pub fn starter() -> Vec<DrawingSet> {
     let label = |key: &str, nl: &str, en: &str, de: &str, fr: &str, fields: Vec<LabelField>, text_style: &str, frame, leader, place| LabelType { key: key.into(), names: Names::new(nl, en, de, fr), fields, separator: " ".into(), text_style: text_style.into(), frame, leader, place };
     let filter = |classes: &[&str], codes: &[&str]| Filter { classes: classes.iter().map(|c| c.to_string()).collect(), codes: codes.iter().map(|c| c.to_string()).collect(), ..Filter::default() };
-    let rule = |key: &str, nl: &str, en: &str, de: &str, fr: &str, filter: Filter, gives| Rule { key: key.into(), names: Names::new(nl, en, de, fr), filter, gives };
+    let rule = |key: &str, nl: &str, en: &str, de: &str, fr: &str, filter: Filter, gives| Rule { key: key.into(), names: Names::new(nl, en, de, fr), filter, gives, off: false };
     let labelled = |label: &str| Gives::Label { label: label.into() };
     let measured = |measure, chain| Gives::Dimension { measure, chain };
     use LabelField::*;
@@ -327,10 +422,12 @@ pub fn starter() -> Vec<DrawingSet> {
     let wall_code = || label("wall-code", "wandcode", "wall code", "Wandcode", "code de mur", vec![Code, Thickness], "2.5", Frame::Hexagon, true, Place::Centre);
     let room = || label("room", "ruimte", "room", "Raum", "pièce", vec![Name, Area], "3.5", Frame::None, false, Place::Centre);
     let opening = || label("opening", "kozijnmerk", "opening mark", "Öffnungsnummer", "repère de baie", vec![Name], "2.5", Frame::Circle, false, Place::Centre);
-    let member = || label("member", "profiel", "profile", "Profil", "profilé", vec![Name, Profile], "2.5", Frame::None, false, Place::Along);
-    let column = || label("column", "kolom", "column", "Stütze", "poteau", vec![Name, Profile], "2.5", Frame::None, true, Place::Right);
+    let member = || label("member", "profiel", "profile", "Profil", "profilé", vec![Name, Profile, Grade], "2.5", Frame::None, false, Place::Along);
+    let column = || label("column", "kolom", "column", "Stütze", "poteau", vec![Name, Profile, Grade], "2.5", Frame::None, true, Place::Right);
     let slab = || label("slab", "vloer", "floor", "Decke", "plancher", vec![Type, Text("d=".into()), Thickness], "2.5", Frame::Rectangle, false, Place::Centre);
     let pile = || label("pile", "paal", "pile", "Pfahl", "pieu", vec![Name], "2.5", Frame::Circle, false, Place::Right);
+    let run = || label("run", "tracé", "run", "Trasse", "tracé", vec![Type], "2.5", Frame::None, true, Place::Along);
+    let terminal = || label("terminal", "eindapparaat", "terminal", "Endgerät", "terminal", vec![Name], "2.5", Frame::Rounded, false, Place::Right);
     let rooms = || rule("rooms", "ruimten", "rooms", "Räume", "pièces", filter(&["IfcSpace"], &[]), labelled("room"));
     let openings = || rule("openings", "kozijnen", "doors and windows", "Türen und Fenster", "portes et fenêtres", filter(&["IfcDoor", "IfcWindow"], &[]), labelled("opening"));
     let grids = || rule("grids", "maten op stramien", "dimensions to the grids", "Maße zum Raster", "cotes sur trames", filter(&["IfcColumn"], &[]), measured(Measure::Grids, true));
@@ -385,6 +482,19 @@ pub fn starter() -> Vec<DrawingSet> {
             ],
         },
         DrawingSet {
+            key: "services-plan-100".into(),
+            names: Names::new("installatieplattegrond 1:100", "services plan 1:100", "Grundriss Haustechnik 1:100", "plan des installations 1:100"),
+            kind: "floor-plan".into(),
+            scale: Some(100),
+            labels: vec![run(), terminal(), room()],
+            rules: vec![
+                rule("runs", "kanalen, leidingen en goten", "ducts, pipes and trays", "Kanäle, Rohre und Trassen", "conduits, tuyaux et chemins de câbles", filter(&["IfcDuctSegment", "IfcPipeSegment", "IfcCableCarrierSegment"], &[]), labelled("run")),
+                rule("terminals", "eindapparaten", "terminals", "Endgeräte", "terminaux", filter(&["IfcAirTerminal", "IfcSanitaryTerminal", "IfcSpaceHeater", "IfcOutlet", "IfcLightFixture"], &[]), labelled("terminal")),
+                rooms(),
+                rule("run-lengths", "lengten van tracés", "lengths of runs", "Längen der Trassen", "longueurs des tracés", filter(&["IfcDuctSegment", "IfcPipeSegment", "IfcCableCarrierSegment"], &[]), measured(Measure::Length, false)),
+            ],
+        },
+        DrawingSet {
             key: "architectural-section-50".into(),
             names: Names::new("bouwkundige doorsnede 1:50", "architectural section 1:50", "Schnitt Architektur 1:50", "coupe d'architecte 1:50"),
             kind: "section".into(),
@@ -426,7 +536,7 @@ mod tests {
     fn the_starter_sets_hold_together_and_are_for_kinds_of_the_dutch_standard() {
         let standard = crate::drawing::Standard::netherlands();
         let sets = starter();
-        assert_eq!(sets.len(), 4);
+        assert_eq!(sets.len(), 5);
         for s in &sets {
             s.check().unwrap_or_else(|e| panic!("{}: {e}", s.key));
             let kind = standard.kinds.iter().find(|k| k.key == s.kind).unwrap_or_else(|| panic!("{}: no kind {}", s.key, s.kind));
@@ -516,4 +626,89 @@ mod tests {
         let back: DrawingSet = serde_json::from_value(written["attributes"][DRAWING_SET].clone()).unwrap();
         assert_eq!(back, ok);
     }
+    #[test]
+    fn the_rules_of_a_set_are_moved_added_and_taken_away() {
+        let mut library = crate::Library::starter();
+        // a project takes a set as a copy under a key of its own
+        let from = library.drawing_set("architectural-plan-100").unwrap().clone();
+        let key = library.copy_drawing_set(&from);
+        assert_eq!(key, "architectural-plan-100-2");
+        assert_eq!(library.drawing_set(&key).map(|s| (&s.rules, &s.labels)), Some((&from.rules, &from.labels)));
+        let set = library.drawing_set_mut(&key).unwrap();
+        let order = |set: &DrawingSet| set.rules.iter().map(|r| r.key.clone()).collect::<Vec<_>>();
+        assert_eq!(order(set), ["rooms", "openings", "wall-codes", "external-walls", "wall-lengths"]);
+        // the order is the order they are tried in
+        assert!(set.move_rule("wall-codes", true) && set.move_rule("rooms", false));
+        assert_eq!(order(set), ["wall-codes", "rooms", "openings", "external-walls", "wall-lengths"]);
+        assert!(!set.move_rule("wall-codes", true) && !set.move_rule("wall-lengths", false) && !set.move_rule("nothing", true));
+        // a new rule takes every element and gives the first label
+        let added = set.add_rule(Names::same("New rule"));
+        assert_eq!((added.as_str(), set.rules.last().map(|r| (&r.filter, &r.gives))), ("rule-1", Some((&Filter::default(), &Gives::Label { label: "room".into() }))));
+        assert_eq!(set.add_rule(Names::same("New rule")), "rule-2");
+        assert!(set.remove_rule("rule-2") && !set.remove_rule("rule-2") && set.check().is_ok());
+        // the copy through a file, and taken away; the one it was copied from is as it was
+        let file = crate::ifcx::file(&library, "test", "test", "2026-11-23T00:00:00Z");
+        assert_eq!(crate::ifcx::read(&file).unwrap().drawing_set(&key), library.drawing_set(&key));
+        assert!(library.remove_drawing_set(&key) && !library.remove_drawing_set(&key));
+        assert_eq!(library.drawing_set("architectural-plan-100"), Some(&from));
+        assert_eq!(list(" IfcWall, IfcSlab ,, "), ["IfcWall", "IfcSlab"]);
+    }
+
+    #[test]
+    fn the_services_plan_labels_runs_and_terminals() {
+        let set = starter().into_iter().find(|s| s.key == "services-plan-100").expect("the services plan");
+        assert!(set.check().is_ok());
+        let of = |class: &str, name: &str, type_name: &str| Described { class: class.into(), name: name.into(), type_name: type_name.into(), ..Described::default() };
+        let duct = set.annotate(&of("IfcDuctSegment", "", "Spiro 160"));
+        assert_eq!((duct.label, duct.dimensions.len()), (Some(("run".to_string(), "Spiro 160".to_string())), 1));
+        assert_eq!(set.annotate(&of("IfcAirTerminal", "T1", "Ventiel 125")).label, Some(("terminal".to_string(), "T1".to_string())));
+        assert_eq!(set.annotate(&of("IfcWall", "", "Kalkzandsteen 100")), Annotation::default());
+    }
+
+    #[test]
+    fn a_structural_label_reads_the_grade_where_the_element_has_one() {
+        let set = starter().into_iter().find(|s| s.key == "structural-plan-100").unwrap();
+        let beam = |props: &[(&str, &str)]| Described { class: "IfcBeam".into(), name: "L1".into(), props: props.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(), ..Described::default() };
+        assert_eq!(set.annotate(&beam(&[("Profile", "HEA 200"), ("Grade", "S355")])).label.map(|l| l.1).as_deref(), Some("L1 HEA 200 S355"));
+        assert_eq!(set.annotate(&beam(&[("Profile", "HEA 200")])).label.map(|l| l.1).as_deref(), Some("L1 HEA 200"), "without a grade nothing is written for it");
+        // as a field it is written and read as the others
+        let field = serde_json::to_value(LabelField::Grade).unwrap();
+        assert_eq!(serde_json::from_value::<LabelField>(field).unwrap(), LabelField::Grade);
+    }
+
+    #[test]
+    fn the_fields_of_a_label_are_typed_as_words() {
+        use LabelField::*;
+        let all = vec![Name, Type, Code, Material, Thickness, Profile, Length, Area, Level, Grade, Property("FireRating".into()), Text("d=".into())];
+        let typed = all.iter().map(LabelField::word).collect::<Vec<_>>().join(", ");
+        assert_eq!(typed, "name, type, code, material, thickness, profile, length, area, level, grade, prop:FireRating, \"d=\"");
+        assert_eq!(LabelField::list(&typed), Some(all));
+        assert_eq!(LabelField::list(" Name ,PROFILE, "), Some(vec![Name, Profile]));
+        // a word that names no field, or nothing at all, is no list
+        assert_eq!((LabelField::list("name, colour"), LabelField::list(" , "), LabelField::list("prop:"), LabelField::list("\"\"")), (None, None, None, None));
+        assert_eq!((Frame::ALL.len(), Place::ALL.len()), (5, 6));
+    }
+
+    #[test]
+    fn a_rule_added_is_off_and_changes_nothing_until_it_is_turned_on() {
+        let mut set = starter().into_iter().find(|s| s.key == "structural-plan-100").unwrap();
+        let wall = Described { class: "IfcWall".into(), name: "W1".into(), ..Described::default() };
+        let beam = Described { class: "IfcBeam".into(), name: "L1".into(), ..Described::default() };
+        let before = (set.annotate(&wall), set.annotate(&beam));
+        assert_eq!(before.0.label, None, "a wall has no label on a structural plan");
+        let key = set.add_rule(Names::same("New rule"));
+        assert!(set.rules.last().is_some_and(|r| r.key == key && r.off) && set.check().is_ok());
+        assert_eq!((set.annotate(&wall), set.annotate(&beam)), before);
+        // turned on, it gives what no label rule took the set's first label; what had one keeps it
+        set.rules.last_mut().unwrap().off = false;
+        assert_eq!(set.annotate(&wall).label.map(|l| l.0).as_deref(), Some("member"));
+        assert_eq!(set.annotate(&beam), before.1);
+        // written only where it is off, and read back
+        let on = serde_json::to_value(&set.rules[0]).unwrap();
+        assert!(on.get("off").is_none());
+        set.rules[0].off = true;
+        let back: Rule = serde_json::from_value(serde_json::to_value(&set.rules[0]).unwrap()).unwrap();
+        assert!(back.off && !serde_json::from_value::<Rule>(on).unwrap().off);
+    }
+
 }

@@ -44,6 +44,8 @@ use serde_json::{json, Map, Value};
 
 /// The attribute of a material node with the library's own data.
 pub const MATERIAL: &str = "openaec::material";
+/// The attribute of the node that says the level of detail a library's drawings show at.
+pub const DETAIL: &str = "openaec::detail";
 /// The attribute of a type node with its build-up.
 pub const BUILDUP: &str = "openaec::buildup";
 /// The attribute of a type node with its linear type.
@@ -75,7 +77,7 @@ pub fn system_type_path(id: &str) -> String {
 
 /// The node of a material.
 pub fn material_node(material: &Material) -> Value {
-    json!({
+    let mut node = json!({
         "path": material_path(&material.key),
         "attributes": {
             "bsi::ifc::material": {"code": material.key, "uri": format!("urn:openaec:material:{}", material.key)},
@@ -83,7 +85,16 @@ pub fn material_node(material: &Material) -> Value {
             "bsi::ifc::presentation::diffuseColor": material.colour_f64(),
             MATERIAL: material,
         }
-    })
+    });
+    // its NL-SfB material code, where its kind has one ([`crate::kind`])
+    if let (Some(code), Some(attributes)) = (material.material_code(), node["attributes"].as_object_mut()) {
+        attributes.insert(crate::kind::MATERIAL_CODE.into(), json!({"code": code}));
+    }
+    // the strength class its grade names, and IFC's own properties of it ([`crate::class`])
+    if let (Some(class), Some(attributes)) = (material.class(), node["attributes"].as_object_mut()) {
+        attributes.extend(class.attributes());
+    }
+    node
 }
 
 /// A profile as IFC has it: the `class` of its parametric profile definition, `ProfileType`
@@ -125,6 +136,14 @@ pub fn profile_of(value: &Value) -> Option<ProfileShape> {
 /// types.
 pub fn nodes(library: &Library) -> Vec<Value> {
     let mut nodes: Vec<Value> = library.materials.iter().map(material_node).collect();
+    // IFC's own properties of a material's physics, on its node (over those of its class)
+    for (node, material) in nodes.iter_mut().zip(&library.materials) {
+        if let (Some((physics, _)), Some(attributes)) = (library.physics(&material.key), node["attributes"].as_object_mut()) {
+            for (name, value) in physics.ifc_properties() {
+                attributes.insert(format!("bsi::ifc::prop::{name}"), json!(value));
+            }
+        }
+    }
     for b in &library.buildups {
         let name = library.name(&b.id, Lang::En).unwrap_or_default();
         nodes.push(json!({
@@ -137,6 +156,12 @@ pub fn nodes(library: &Library) -> Vec<Value> {
                 BUILDUP: b,
             }
         }));
+        // what a delivery asks of it, as IFC's own properties (`Pset_WallCommon` and its likes)
+        if let Some(attributes) = nodes.last_mut().and_then(|node| node["attributes"].as_object_mut()) {
+            for (name, value) in b.delivery_properties(&library.materials) {
+                attributes.insert(format!("bsi::ifc::prop::{name}"), value);
+            }
+        }
     }
     for t in &library.linear_types {
         let name = library.linear_name(&t.id, Lang::En).unwrap_or_default();
@@ -152,6 +177,11 @@ pub fn nodes(library: &Library) -> Vec<Value> {
                 PROFILE: profile_value(&t.profile, t.designation.as_deref()),
             }
         }));
+        if let Some(attributes) = nodes.last_mut().and_then(|node| node["attributes"].as_object_mut()) {
+            for (name, value) in t.delivery_properties() {
+                attributes.insert(format!("bsi::ifc::prop::{name}"), value);
+            }
+        }
     }
     for t in &library.system_types {
         let name = library.system_name(&t.id, Lang::En).unwrap_or_default();
@@ -166,11 +196,26 @@ pub fn nodes(library: &Library) -> Vec<Value> {
                 SYSTEM_TYPE: t,
             }
         }));
+        if let Some(attributes) = nodes.last_mut().and_then(|node| node["attributes"].as_object_mut()) {
+            for (name, value) in t.delivery_properties() {
+                attributes.insert(format!("bsi::ifc::prop::{name}"), value);
+            }
+        }
     }
     nodes.extend(library.object_types.iter().map(crate::object::node));
+    nodes.extend(library.connection_types.iter().map(crate::connection::node));
+    nodes.extend(library.service_types.iter().map(crate::service::node));
+    nodes.extend(library.cover_types.iter().map(|c| crate::service::cover_node(c, &library.materials)));
+    nodes.extend(library.hatch_standards.iter().map(crate::standard::node));
     nodes.extend(library.codes.iter().map(nlsfb::code_node));
     nodes.extend(library.drawing_sets.iter().map(crate::annotate::node));
     nodes.extend(library.view_templates.iter().map(crate::template::node));
+    // the level of detail its drawings show at, where it says one: a node of its own
+    if let Some(detail) = library.detail {
+        nodes.push(json!({"path": uuid("openaec-library/detail"), "attributes": {"bsi::ifc::prop::Name": "Level of detail", DETAIL: detail}}));
+    }
+    // the aspects last: each a node with its item's path, composed onto the item's own
+    nodes.extend(library.aspects.iter().map(crate::aspect::Aspect::node));
     nodes
 }
 
@@ -215,8 +260,20 @@ pub fn read(file: &Value) -> Result<Library, LibraryError> {
     let mut linear_types: Vec<LinearType> = Vec::new();
     let mut system_types: Vec<SystemType> = Vec::new();
     let mut object_types: Vec<crate::object::ObjectType> = Vec::new();
+    let mut connection_types: Vec<crate::connection::ConnectionType> = Vec::new();
+    let mut service_types: Vec<crate::service::ServiceType> = Vec::new();
+    let mut cover_types: Vec<crate::service::CoverType> = Vec::new();
+    let mut aspects: Vec<crate::aspect::Aspect> = Vec::new();
     for path in order {
         let attributes = &composed[path];
+        if let Some(detail) = attributes.get(DETAIL) {
+            library.detail = serde_json::from_value(detail.clone()).ok();
+        }
+        for (name, value) in attributes {
+            if let Some(kind) = crate::aspect::Kind::of_attribute(name) {
+                aspects.push(crate::aspect::Aspect::read(path, kind, value)?);
+            }
+        }
         if let Some(own) = attributes.get(MATERIAL) {
             let material: Material = serde_json::from_value(own.clone()).map_err(|e| LibraryError::Unreadable(format!("material {path}: {e}")))?;
             library.add_material(material)?;
@@ -275,6 +332,32 @@ pub fn read(file: &Value) -> Result<Library, LibraryError> {
             }
             object_types.push(object);
         }
+        if let Some(own) = attributes.get(crate::connection::CONNECTION_TYPE) {
+            let mut connection: crate::connection::ConnectionType = serde_json::from_value(own.clone()).map_err(|e| LibraryError::Unreadable(format!("type {path}: {e}")))?;
+            if let Some(class) = &class {
+                connection.code = Some(class.clone()).filter(|class| Some(class.as_str()) != connection.family.code());
+            }
+            connection_types.push(connection);
+        }
+        if let Some(own) = attributes.get(crate::service::SERVICE_TYPE) {
+            let mut service: crate::service::ServiceType = serde_json::from_value(own.clone()).map_err(|e| LibraryError::Unreadable(format!("type {path}: {e}")))?;
+            if let Some(class) = &class {
+                service.code = Some(class.clone()).filter(|class| class != service.carrier.code());
+            }
+            service_types.push(service);
+        }
+        if let Some(own) = attributes.get(crate::standard::HATCH_STANDARD) {
+            let standard: crate::standard::HatchStandard = serde_json::from_value(own.clone()).map_err(|e| LibraryError::Unreadable(format!("hatch standard {path}: {e}")))?;
+            // (as written: the chosen one stays chosen)
+            standard.check()?;
+            if library.hatch_standards.iter().any(|s| s.key == standard.key) {
+                return Err(LibraryError::Duplicate(standard.key));
+            }
+            library.hatch_standards.push(standard);
+        }
+        if let Some(own) = attributes.get(crate::service::COVER_TYPE) {
+            cover_types.push(serde_json::from_value(own.clone()).map_err(|e| LibraryError::Unreadable(format!("type {path}: {e}")))?);
+        }
         if let Some(own) = attributes.get(SYSTEM_TYPE) {
             let mut system: SystemType = serde_json::from_value(own.clone()).map_err(|e| LibraryError::Unreadable(format!("type {path}: {e}")))?;
             if let Some(class) = &class {
@@ -299,6 +382,21 @@ pub fn read(file: &Value) -> Result<Library, LibraryError> {
     // (an object names its material, which may stand after it in the file)
     for o in object_types {
         library.add_object_type(o)?;
+    }
+    for c in connection_types {
+        library.add_connection_type(c)?;
+    }
+    for s in service_types {
+        library.add_service_type(s)?;
+    }
+    for c in cover_types {
+        library.add_cover_type(c)?;
+    }
+    // an aspect on a node that is no item of the library (a material without the library's own
+    // data is one) is left out
+    let items = library.item_paths();
+    for a in aspects.into_iter().filter(|a| items.contains(&a.item)) {
+        library.set_aspect(a)?;
     }
     Ok(library)
 }
@@ -349,7 +447,7 @@ mod tests {
         assert_eq!(masonry["attributes"][SYSTEM_TYPE]["grid"]["pattern"], "running_bond");
         let ceiling = nodes.iter().find(|n| n["path"] == system_type_path("system.ceiling-600x600")).unwrap();
         assert_eq!(ceiling["attributes"]["bsi::ifc::prop::PredefinedType"], "CEILING");
-        assert_eq!(nodes.len(), library.materials.len() + library.buildups.len() + library.linear_types.len() + library.system_types.len() + library.codes.len() + library.drawing_sets.len() + library.view_templates.len() + library.object_types.len());
+        assert_eq!(nodes.len(), library.materials.len() + library.buildups.len() + library.linear_types.len() + library.system_types.len() + library.codes.len() + library.drawing_sets.len() + library.view_templates.len() + library.object_types.len() + library.connection_types.len() + library.service_types.len() + library.cover_types.len() + library.hatch_standards.len());
         // paths are stable
         assert_eq!(nodes, self::nodes(&Library::starter()));
     }

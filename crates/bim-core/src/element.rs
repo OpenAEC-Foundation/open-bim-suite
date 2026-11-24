@@ -950,7 +950,8 @@ impl PlanarDef {
 /// face, depth across it) run on the division lines; panels `panel` thick fill the bays. A type
 /// (`system_type`, copied from a library) adds a running bond, the materials and layers across the
 /// face ([`crate::system`]). A framed type (a timber frame) frames `openings` in the face, measured
-/// as a wall's from the system's start and base; a system that is not framed has none.
+/// as a wall's from the system's start and base; a system on a grid (brickwork, a curtain wall) is
+/// cut where they lie, its panels and its members ending at them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SystemDef {
     pub start: DVec2,
@@ -970,9 +971,16 @@ pub struct SystemDef {
     pub breaks: Vec<f64>,
     /// A lying system (a floor, a ceiling) laid in an outline: the outline in plan. It is laid
     /// along its line over the rectangle that holds the outline and cut to it; its openings are
-    /// measured from its line's start. Empty: the rectangle its line and its `height` make.
+    /// measured from its line's start. A standing system that is not a rectangle (a corner off,
+    /// a gable): the outline in its own face, each point along its line from its start and up
+    /// from its base; it is made as the rectangle and cut to it. Empty: the rectangle its line
+    /// and its `height` make.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outline: Vec<DVec2>,
+    /// How its bays are divided along its line, where this system does not follow its type:
+    /// equal ones, or whole ones with what is left at the end, at the start or at both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub division: Option<Division>,
     /// A curtain wall's own grid, once its lines were moved, added or taken away, or a bay got a
     /// panel of its own (see [`OwnGrid`]); none: equal bays about `spacing`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1031,6 +1039,8 @@ impl OwnGrid {
     }
 }
 
+pub use bim_library::system::Division;
+
 /// How a connection joins its members.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1048,6 +1058,12 @@ pub enum ConnectionKind {
     /// A steel fin plate: the secondary stops a gap short of the primary's face, and a plate
     /// welded to that face is bolted through the secondary's web (see [`crate::join::FinPlate`]).
     FinPlate(crate::join::FinPlate),
+    /// A steel splice: two members in one line each stop a plate's thickness short of where they
+    /// meet, and the plates on their ends are bolted together (sizes as [`crate::join::EndPlate`]).
+    Splice(crate::join::EndPlate),
+    /// A steel base plate: the secondary (a column) stands on the primary on a plate, a bed of
+    /// grout and four anchors (see [`crate::join::BasePlate`]).
+    BasePlate(crate::join::BasePlate),
     /// A bend between two runs of a building service that meet end to end: both stop short of the
     /// corner and a fitting turns from the one into the other (see [`crate::join::Bend`]).
     Bend(crate::join::Bend),
@@ -1079,12 +1095,12 @@ impl ConnectionKind {
     }
 
     /// What a steel connection is to the analysis model: a fin plate is a hinge, an end plate
-    /// passes moments on. `None` for a join that is no connection of its own (a butt, a mitre,
+    /// and a splice pass moments on, and a base plate with its four anchors is taken as a hinge. `None` for a join that is no connection of its own (a butt, a mitre,
     /// a cut).
     pub fn fixity(&self) -> Option<Fixity> {
         match self {
-            ConnectionKind::FinPlate(_) => Some(Fixity::Pinned),
-            ConnectionKind::EndPlate(_) => Some(Fixity::Rigid),
+            ConnectionKind::FinPlate(_) | ConnectionKind::BasePlate(_) => Some(Fixity::Pinned),
+            ConnectionKind::EndPlate(_) | ConnectionKind::Splice(_) => Some(Fixity::Rigid),
             _ => None,
         }
     }
@@ -1138,9 +1154,25 @@ pub struct Element {
     /// concrete class (C30/37), a timber class (C24).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grade: Option<String>,
+    /// Issued pile mark, retained through changes of shape or position.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pile_number: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pile_mark: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reinforcing_bar: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reinforcement_areas: Vec<crate::reinforcement::Area>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hairpin_leg: Option<f64>,
+    /// The reinforcement of a concrete member with a rectangular section, when it is given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reinforcement: Option<crate::reinforcement::Reinforcement>,
     /// The service it belongs to, when it is part of an installation (see [`Service`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service: Option<Service>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_type: Option<String>,
     pub shape: Shape,
 }
 
@@ -1151,12 +1183,12 @@ impl Element {
     pub fn in_project(grid: &TileGrid, name: impl Into<String>, level: Option<String>, mut shape: Shape) -> Self {
         let tile = shape.placement().map_or(TileKey::default(), |p| grid.tile_of(p));
         shape.translate(-grid.origin(tile));
-        Self { id: ElementId(0), name: name.into(), tile, level, top: None, grade: None, service: None, shape }
+        Self { id: ElementId(0), name: name.into(), tile, level, top: None, grade: None, service: None, service_type: None, reinforcement: None, pile_number: None, pile_mark: None, reinforcing_bar: false, reinforcement_areas: Vec::new(), hairpin_leg: None, shape }
     }
 
     /// The same element (its id, name, level, top, grade and service) with `shape`, given in project coordinates.
     pub fn reshaped(&self, grid: &TileGrid, shape: Shape) -> Self {
-        Self { id: self.id, top: self.top.clone(), grade: self.grade.clone(), service: self.service, ..Self::in_project(grid, self.name.clone(), self.level.clone(), shape) }
+        Self { id: self.id, pile_number: self.pile_number, pile_mark: self.pile_mark.clone(), hairpin_leg: self.hairpin_leg, reinforcement_areas: self.reinforcement_areas.clone(), reinforcing_bar: self.reinforcing_bar, top: self.top.clone(), grade: self.grade.clone(), service: self.service, service_type: self.service_type.clone(), reinforcement: self.reinforcement, ..Self::in_project(grid, self.name.clone(), self.level.clone(), shape) }
     }
 
     /// Its definition in project coordinates.
@@ -1177,6 +1209,8 @@ impl Element {
             Shape::Point(PointDef { opening: Some(OpeningKind::Door), .. }) => "IfcDoor",
             Shape::Point(PointDef { opening: Some(OpeningKind::Window), .. }) => "IfcWindow",
             Shape::Point(p) => p.role.class(),
+            Shape::Linear(_) if self.pile_number.is_some() => "IfcPile",
+            Shape::Linear(_) if self.reinforcing_bar => "IfcReinforcingBar",
             Shape::Linear(l) => l.role.segment_class().unwrap_or_else(|| linear_class(l.end - l.start)),
             Shape::Planar(PlanarDef { form: PlanarForm::Wall { .. }, .. }) => "IfcWall",
             Shape::Planar(PlanarDef { form: PlanarForm::Slab { role: SlabRole::Roof, .. }, .. }) => "IfcRoof",
@@ -1185,7 +1219,7 @@ impl Element {
             Shape::Planar(PlanarDef { form: PlanarForm::Stair { .. }, .. }) => "IfcStair",
             Shape::System(_) => "IfcCurtainWall",
             // a join with parts of its own is an assembly of them; one without is a relation only
-            Shape::Connection(ConnectionDef { kind: ConnectionKind::EndPlate(_) | ConnectionKind::FinPlate(_), .. }) => "IfcElementAssembly",
+            Shape::Connection(ConnectionDef { kind: ConnectionKind::EndPlate(_) | ConnectionKind::FinPlate(_) | ConnectionKind::Splice(_) | ConnectionKind::BasePlate(_), .. }) => "IfcElementAssembly",
             // a fitting of a building service: the bend or the tee itself
             Shape::Connection(ConnectionDef { kind: ConnectionKind::Bend(b), .. }) => b.role.fitting_class(),
             Shape::Connection(ConnectionDef { kind: ConnectionKind::Tee(t), .. }) => t.role.fitting_class(),
@@ -1265,7 +1299,10 @@ impl Shape {
             Shape::System(s) => {
                 s.start += flat;
                 s.end += flat;
-                s.outline.iter_mut().for_each(|p| *p += flat);
+                // a lying system's outline is in plan; a standing one's is in its own face
+                if s.lies() {
+                    s.outline.iter_mut().for_each(|p| *p += flat);
+                }
                 s.base += delta.z;
             }
             Shape::Connection(_) => {}
@@ -1880,7 +1917,7 @@ mod tests {
 
     #[test]
     fn a_system_fills_its_domain_with_members_and_panels() {
-        let s = SystemDef { start: DVec2::ZERO, end: DVec2::new(3.0, 0.0), base: 0.0, height: 3.0, spacing: DVec2::new(1.5, 1.5), member: DVec2::new(0.05, 0.15), panel: 0.03, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), grid: None };
+        let s = SystemDef { start: DVec2::ZERO, end: DVec2::new(3.0, 0.0), base: 0.0, height: 3.0, spacing: DVec2::new(1.5, 1.5), member: DVec2::new(0.05, 0.15), panel: 0.03, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), grid: None, division: None };
         let parts = system_parts(&s).unwrap();
         let members = parts.iter().filter(|p| p.class == "IfcMember").count();
         let panels = parts.iter().filter(|p| p.class == "IfcPlate").count();

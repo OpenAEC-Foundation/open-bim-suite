@@ -5,8 +5,11 @@ use crate::annotate::{self, DrawingSet};
 use crate::buildup::{self, BuildUp, Role};
 use crate::material::{self, Material};
 use crate::nlsfb::{self, Code};
+use crate::connection::{self, ConnectionType, Family};
 use crate::object::{self, ObjectGroup, ObjectType};
 use crate::profile::{self, LinearRole, LinearType};
+use crate::service::{self, Carrier, CoverType, ServiceType};
+use crate::standard::{self, HatchStandard, MaterialHatch};
 use crate::system::{self, SystemGroup, SystemType};
 use crate::template::{self, ViewTemplate};
 use crate::{Lang, LibraryError};
@@ -40,6 +43,28 @@ pub struct Library {
     /// ([`crate::object`]).
     #[serde(default)]
     pub object_types: Vec<ObjectType>,
+    /// Its connection types: how elements are joined where they meet ([`crate::connection`]).
+    #[serde(default)]
+    pub connection_types: Vec<ConnectionType>,
+    /// Its service types: ducts, pipes, cable trays, ladders and conduits with their sizes
+    /// and fittings ([`crate::service`]).
+    #[serde(default)]
+    pub service_types: Vec<ServiceType>,
+    /// Its cover types: the insulation round a run and the lining inside it.
+    #[serde(default)]
+    pub cover_types: Vec<CoverType>,
+    /// Its hatch standards, one of them chosen: how its materials are hatched
+    /// ([`crate::standard`]).
+    #[serde(default)]
+    pub hatch_standards: Vec<HatchStandard>,
+    /// What else is known of its items: costs, the maker's data and the like, each with a
+    /// source and a date ([`crate::aspect`]). In a file they are attributes on the items' nodes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aspects: Vec<crate::aspect::Aspect>,
+    /// The level of detail its drawings show its materials at ([`crate::detail`]); none: 350,
+    /// their hatches. At 200 what is cut is an outline alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<crate::detail::Detail>,
 }
 
 /// Names made unique: " (2)", " (3)" after a name given before, in order.
@@ -87,7 +112,7 @@ impl Library {
     /// linear types and system types. The steel profiles are a catalogue
     /// ([`profile::steel_profiles`]) a project takes types from, not starter types.
     pub fn starter() -> Self {
-        Self { materials: material::starter(), buildups: buildup::starter(), linear_types: profile::starter(), system_types: system::starter(), codes: nlsfb::starter(), object_types: object::starter(), drawing_sets: annotate::starter(), view_templates: template::starter() }
+        Self { materials: [material::starter(), material::common()].concat(), buildups: buildup::starter(), linear_types: profile::starter(), system_types: system::starter(), codes: nlsfb::starter(), object_types: object::starter(), connection_types: connection::starter(), service_types: service::starter(), cover_types: service::covers(), hatch_standards: standard::starter(), drawing_sets: annotate::starter(), view_templates: template::starter(), aspects: Vec::new(), detail: None }
     }
 
     pub fn material(&self, key: &str) -> Option<&Material> {
@@ -257,6 +282,140 @@ impl Library {
         self.object_types.iter().find(|o| o.id == id)
     }
 
+    /// The connection type with key `id`.
+    pub fn connection_type(&self, id: &str) -> Option<&ConnectionType> {
+        self.connection_types.iter().find(|c| c.id == id)
+    }
+
+    /// The connection types of `family`, in the order they were added.
+    pub fn connection_types_of(&self, family: Family) -> impl Iterator<Item = &ConnectionType> {
+        self.connection_types.iter().filter(move |c| c.family == family)
+    }
+
+    /// Adds a connection type. Refused when it does not hold together, its key is taken, or
+    /// its parts are of a material the library lacks.
+    pub fn add_connection_type(&mut self, connection: ConnectionType) -> Result<(), LibraryError> {
+        connection.check()?;
+        if self.connection_type(&connection.id).is_some() {
+            return Err(LibraryError::Duplicate(connection.id));
+        }
+        if let Some(material) = connection.material.as_ref().filter(|key| self.material(key).is_none()) {
+            return Err(LibraryError::UnknownMaterial(material.clone()));
+        }
+        self.connection_types.push(connection);
+        Ok(())
+    }
+
+    /// The service type with key `id`.
+    pub fn service_type(&self, id: &str) -> Option<&ServiceType> {
+        self.service_types.iter().find(|s| s.id == id)
+    }
+
+    /// The service types of `carrier`, in the order they were added.
+    pub fn service_types_of(&self, carrier: Carrier) -> impl Iterator<Item = &ServiceType> {
+        self.service_types.iter().filter(move |s| s.carrier == carrier)
+    }
+
+    /// Adds a service type. Refused when it does not hold together, its key is taken, or it
+    /// is of a material the library lacks.
+    pub fn add_service_type(&mut self, service: ServiceType) -> Result<(), LibraryError> {
+        service.check(&self.materials)?;
+        if self.service_type(&service.id).is_some() {
+            return Err(LibraryError::Duplicate(service.id));
+        }
+        self.service_types.push(service);
+        Ok(())
+    }
+
+    /// The cover type with key `id`.
+    pub fn cover_type(&self, id: &str) -> Option<&CoverType> {
+        self.cover_types.iter().find(|c| c.id == id)
+    }
+
+    /// Adds a cover type, refused as a service type is.
+    pub fn add_cover_type(&mut self, cover: CoverType) -> Result<(), LibraryError> {
+        cover.check(&self.materials)?;
+        if self.cover_type(&cover.id).is_some() {
+            return Err(LibraryError::Duplicate(cover.id));
+        }
+        self.cover_types.push(cover);
+        Ok(())
+    }
+
+    /// The hatch standard a drawing hatches by: the chosen one, else the first.
+    pub fn hatch_standard(&self) -> Option<&HatchStandard> {
+        self.hatch_standards.iter().find(|s| s.chosen).or_else(|| self.hatch_standards.first())
+    }
+
+    /// Chooses the standard with `key`; false when the library has none such.
+    pub fn choose_hatch_standard(&mut self, key: &str) -> bool {
+        if !self.hatch_standards.iter().any(|s| s.key == key) {
+            return false;
+        }
+        for s in &mut self.hatch_standards {
+            s.chosen = s.key == key;
+        }
+        true
+    }
+
+    /// Adds a hatch standard. Refused without a key or a name, or when its key is taken; where
+    /// the library has a chosen one already, it comes unchosen.
+    pub fn add_hatch_standard(&mut self, mut standard: HatchStandard) -> Result<(), LibraryError> {
+        standard.check()?;
+        if self.hatch_standards.iter().any(|s| s.key == standard.key) {
+            return Err(LibraryError::Duplicate(standard.key));
+        }
+        standard.chosen &= !self.hatch_standards.iter().any(|s| s.chosen);
+        self.hatch_standards.push(standard);
+        Ok(())
+    }
+
+    /// Adds a standard named `names` as a copy of the one with key `from`: the same set, and
+    /// what the materials name under `from` they name under the copy too. Its key is made of
+    /// its English name, numbered where that is taken; it is returned.
+    pub fn copy_hatch_standard(&mut self, from: &str, names: crate::material::Names) -> Result<String, LibraryError> {
+        let set = self.hatch_standards.iter().find(|s| s.key == from).ok_or_else(|| LibraryError::BadHatch(format!("a standard of the library, not \"{from}\"")))?.set;
+        let slug: String = names.en.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+        let slug = slug.split('-').filter(|part| !part.is_empty()).collect::<Vec<_>>().join("-");
+        let slug = if slug.is_empty() { "standard".to_string() } else { slug };
+        let key = std::iter::once(slug.clone()).chain((2..).map(|n| format!("{slug}-{n}"))).find(|key| !self.hatch_standards.iter().any(|s| &s.key == key)).expect("a free key");
+        self.add_hatch_standard(HatchStandard::new(&key, names, set))?;
+        for m in &mut self.materials {
+            if let Some(own) = m.hatches.get(from).cloned() {
+                m.hatches.insert(key.clone(), own);
+            }
+        }
+        Ok(key)
+    }
+
+    /// The hatch of the material with `key` under the chosen standard; a library without
+    /// standards gives the material's own sign.
+    pub fn material_hatch(&self, key: &str) -> Option<MaterialHatch> {
+        let material = self.material(key)?;
+        Some(match self.hatch_standard() {
+            Some(standard) => standard.of(material),
+            None => MaterialHatch { cut: material.catalogue_hatch().map(|h| h.key.clone()), ..MaterialHatch::default() },
+        })
+    }
+
+    /// Gives the material with key `material` its own hatch under the standard with key
+    /// `standard`, or takes it away (`None`: its sign gives it again). Refused when the
+    /// library lacks either, or the hatch does not hold together.
+    pub fn set_material_hatch(&mut self, material: &str, standard: &str, hatch: Option<MaterialHatch>) -> Result<(), LibraryError> {
+        if !self.hatch_standards.iter().any(|s| s.key == standard) {
+            return Err(LibraryError::BadHatch(format!("a standard of the library, not \"{standard}\"")));
+        }
+        if let Some(hatch) = &hatch {
+            hatch.check()?;
+        }
+        let m = self.materials.iter_mut().find(|m| m.key == material).ok_or_else(|| LibraryError::UnknownMaterial(material.into()))?;
+        match hatch {
+            Some(hatch) => m.hatches.insert(standard.into(), hatch),
+            None => m.hatches.remove(standard),
+        };
+        Ok(())
+    }
+
     /// The object types of `group`, in the order they were added.
     pub fn object_types_of(&self, group: ObjectGroup) -> impl Iterator<Item = &ObjectType> {
         self.object_types.iter().filter(move |o| o.group == group)
@@ -291,9 +450,49 @@ impl Library {
         Ok(())
     }
 
+    /// The drawing set `key` of the library, to change.
+    pub fn drawing_set_mut(&mut self, key: &str) -> Option<&mut DrawingSet> {
+        self.drawing_sets.iter_mut().find(|s| s.key == key)
+    }
+
+    /// Takes a drawing set as a copy under a key of its own ("-2", "-3" after one it has); its
+    /// key.
+    pub fn copy_drawing_set(&mut self, from: &DrawingSet) -> String {
+        let key = std::iter::once(from.key.clone()).chain((2..).map(|n| format!("{}-{n}", from.key))).find(|key| self.drawing_set(key).is_none()).unwrap_or_default();
+        self.drawing_sets.push(DrawingSet { key: key.clone(), ..from.clone() });
+        key
+    }
+
+    /// Takes drawing set `key` away; whether the library had it.
+    pub fn remove_drawing_set(&mut self, key: &str) -> bool {
+        let before = self.drawing_sets.len();
+        self.drawing_sets.retain(|s| s.key != key);
+        self.drawing_sets.len() != before
+    }
+
     /// The view template `key` of the library.
     pub fn view_template(&self, key: &str) -> Option<&ViewTemplate> {
         self.view_templates.iter().find(|t| t.key == key)
+    }
+
+    /// The view template `key` of the library, to change.
+    pub fn view_template_mut(&mut self, key: &str) -> Option<&mut ViewTemplate> {
+        self.view_templates.iter_mut().find(|t| t.key == key)
+    }
+
+    /// Takes a view template as a copy under a key of its own ("-2", "-3" after one it has);
+    /// its key.
+    pub fn copy_view_template(&mut self, from: &ViewTemplate) -> String {
+        let key = std::iter::once(from.key.clone()).chain((2..).map(|n| format!("{}-{n}", from.key))).find(|key| self.view_template(key).is_none()).unwrap_or_default();
+        self.view_templates.push(ViewTemplate { key: key.clone(), ..from.clone() });
+        key
+    }
+
+    /// Takes view template `key` away; whether the library had it.
+    pub fn remove_view_template(&mut self, key: &str) -> bool {
+        let before = self.view_templates.len();
+        self.view_templates.retain(|t| t.key != key);
+        self.view_templates.len() != before
     }
 
     /// Adds a view template. Refused when it does not hold together or the library has its key.
@@ -330,14 +529,18 @@ impl Library {
         self.code(code).map(|c| c.name(lang).to_string()).or_else(|| nlsfb::group_name(code, lang).map(str::to_string))
     }
 
-    /// The types that have `code`, by their ids: build-ups, linear types and system types. With
+    /// The types that have `code`, by their ids: build-ups, linear types, system types,
+    /// object types, connection types and service types. With
     /// `deeper`, also those of a code under it ("21" has the types of "21.22").
     pub fn coded(&self, code: &str, deeper: bool) -> Vec<&str> {
         let has = |of: String| of == code || deeper && of.strip_prefix(code).is_some_and(|rest| rest.starts_with('.') || code.contains('.'));
         let buildups = self.buildups.iter().filter(|b| has(b.nlsfb(&self.materials))).map(|b| b.id.as_str());
         let linear = self.linear_types.iter().filter(|t| has(t.nlsfb())).map(|t| t.id.as_str());
         let systems = self.system_types.iter().filter(|t| has(t.nlsfb())).map(|t| t.id.as_str());
-        buildups.chain(linear).chain(systems).collect()
+        let objects = self.object_types.iter().filter(|o| has(o.nlsfb())).map(|o| o.id.as_str());
+        let connections = self.connection_types.iter().filter(|c| c.nlsfb().is_some_and(&has)).map(|c| c.id.as_str());
+        let services = self.service_types.iter().filter(|s| has(s.nlsfb())).map(|s| s.id.as_str());
+        buildups.chain(linear).chain(systems).chain(objects).chain(connections).chain(services).collect()
     }
 
     /// Adds what `other` has and this library lacks, as Open BIM Studio imports a library:
@@ -403,7 +606,90 @@ impl Library {
                 added += 1;
             }
         }
+        // (by their keys: a connection the library has is not taken again)
+        for c in &other.connection_types {
+            if self.add_connection_type(c.clone()).is_ok() {
+                added += 1;
+            }
+        }
+        // (service and cover types by their keys too, each once its material is there)
+        for s in &other.service_types {
+            if self.add_service_type(s.clone()).is_ok() {
+                added += 1;
+            }
+        }
+        for c in &other.cover_types {
+            if self.add_cover_type(c.clone()).is_ok() {
+                added += 1;
+            }
+        }
+        for s in &other.hatch_standards {
+            if self.add_hatch_standard(s.clone()).is_ok() {
+                added += 1;
+            }
+        }
+        // an aspect comes with the item it is of, where this library has none of its kind (not
+        // counted; one of a type that got another id in the merge stays behind)
+        for a in &other.aspects {
+            if self.aspect(&a.item, a.kind).is_none() {
+                let _ = self.set_aspect(a.clone());
+            }
+        }
         added
+    }
+
+    /// The level of detail its drawings show at: what it says, else 350.
+    pub fn shown_detail(&self) -> crate::detail::Detail {
+        self.detail.unwrap_or_default()
+    }
+
+    /// Whether a drawing hatches what it cuts: not at a level of detail of 200.
+    pub fn hatches_cuts(&self) -> bool {
+        self.shown_detail().material() == crate::detail::Shown::Hatch
+    }
+
+    /// The paths of the nodes of its items: what an aspect can be of.
+    pub fn item_paths(&self) -> std::collections::BTreeSet<String> {
+        let mut paths: std::collections::BTreeSet<String> = self.materials.iter().map(|m| crate::ifcx::material_path(&m.key)).collect();
+        paths.extend(self.buildups.iter().map(|b| crate::ifcx::buildup_path(&b.id)));
+        paths.extend(self.linear_types.iter().map(|t| crate::ifcx::linear_type_path(&t.id)));
+        paths.extend(self.system_types.iter().map(|t| crate::ifcx::system_type_path(&t.id)));
+        paths.extend(self.object_types.iter().map(|t| crate::object::path(&t.id)));
+        paths.extend(self.connection_types.iter().map(|t| crate::connection::path(&t.id)));
+        paths.extend(self.service_types.iter().map(|t| crate::service::path(&t.id)));
+        paths.extend(self.cover_types.iter().map(|t| crate::service::cover_path(&t.id)));
+        paths
+    }
+
+    /// The aspect of `kind` of the item at `item`.
+    pub fn aspect(&self, item: &str, kind: crate::aspect::Kind) -> Option<&crate::aspect::Aspect> {
+        self.aspects.iter().find(|a| a.item == item && a.kind == kind)
+    }
+
+    /// The aspects of the item at `item`.
+    pub fn aspects_of<'a>(&'a self, item: &'a str) -> impl Iterator<Item = &'a crate::aspect::Aspect> {
+        self.aspects.iter().filter(move |a| a.item == item)
+    }
+
+    /// Gives an item an aspect, in the place of the one of its kind it had. Refused when the
+    /// aspect does not check or the library has no such item.
+    pub fn set_aspect(&mut self, aspect: crate::aspect::Aspect) -> Result<(), LibraryError> {
+        aspect.check()?;
+        if !self.item_paths().contains(&aspect.item) {
+            return Err(LibraryError::BadAspect("an item of the library".into()));
+        }
+        match self.aspects.iter_mut().find(|a| a.item == aspect.item && a.kind == aspect.kind) {
+            Some(had) => *had = aspect,
+            None => self.aspects.push(aspect),
+        }
+        Ok(())
+    }
+
+    /// Takes the aspect of `kind` from the item at `item`; whether it had one.
+    pub fn remove_aspect(&mut self, item: &str, kind: crate::aspect::Kind) -> bool {
+        let before = self.aspects.len();
+        self.aspects.retain(|a| !(a.item == item && a.kind == kind));
+        self.aspects.len() != before
     }
 }
 
@@ -416,7 +702,7 @@ mod tests {
     #[test]
     fn the_starter_library_checks() {
         let lib = Library::starter();
-        let mut fresh = Library { materials: lib.materials.clone(), codes: lib.codes.clone(), drawing_sets: lib.drawing_sets.clone(), view_templates: lib.view_templates.clone(), object_types: lib.object_types.clone(), ..Library::default() };
+        let mut fresh = Library { materials: lib.materials.clone(), hatch_standards: lib.hatch_standards.clone(), codes: lib.codes.clone(), drawing_sets: lib.drawing_sets.clone(), view_templates: lib.view_templates.clone(), object_types: lib.object_types.clone(), connection_types: lib.connection_types.clone(), ..Library::default() };
         for b in &lib.buildups {
             fresh.add_buildup(b.clone()).unwrap_or_else(|e| panic!("{}: {e}", b.id));
         }
@@ -425,6 +711,12 @@ mod tests {
         }
         for t in &lib.system_types {
             fresh.add_system_type(t.clone()).unwrap_or_else(|e| panic!("{}: {e}", t.id));
+        }
+        for t in &lib.service_types {
+            fresh.add_service_type(t.clone()).unwrap_or_else(|e| panic!("{}: {e}", t.id));
+        }
+        for c in &lib.cover_types {
+            fresh.add_cover_type(c.clone()).unwrap_or_else(|e| panic!("{}: {e}", c.id));
         }
         assert_eq!(fresh, lib);
         assert_eq!(lib.name("roof.flat-concrete-pir", Lang::Nl).unwrap(), "Isolatie PIR-beton 320");
@@ -521,7 +813,10 @@ mod tests {
         twin.grid.row = 2.0;
         project.add_system_type(twin).unwrap();
         assert_eq!(project.system_name("system.twin", Lang::Nl).unwrap(), "Vliesgevel aluminium 50×150 h.o.h. 1500 (2)");
-        assert_eq!(project.system_names(SystemGroup::Ceiling, Lang::En), vec![("system.ceiling-600x600", "Mineral fibre 15 600×600".to_string())]);
+        let ceilings = project.system_names(SystemGroup::Ceiling, Lang::En);
+        assert_eq!(ceilings.len(), 7);
+        assert_eq!(ceilings[0], ("system.ceiling-600x600", "Mineral fibre 15 600×600".to_string()));
+        assert!(ceilings.contains(&("system.ceiling-gypsum-1", "Gypsum board 1×12.5 steel 60×27 c/c 500".to_string())), "{ceilings:?}");
         let other = Library { system_types: vec![SystemType { id: "system.x".into(), ..project.system_types[0].clone() }], ..Library::default() };
         let mut bare = Library::default();
         assert_eq!(bare.merge(&other), 0, "a type of materials the library lacks is left out");

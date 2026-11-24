@@ -37,7 +37,7 @@ fn p(x: f64, y: f64) -> DVec2 {
 
 /// A standing system of type `id` on the line `a`–`b`, or lying in the rectangle from `a` to `b`.
 fn system(app: &App, id: &str, a: DVec2, b: DVec2, height: f64, openings: Vec<Opening>) -> Option<Shape> {
-    let generic = SystemDef { start: a, end: b, base: 0.0, height, spacing: SYSTEM_SPACING, member: SYSTEM_MEMBER, panel: SYSTEM_PANEL, system_type: None, openings, breaks: Vec::new(), outline: Vec::new(), grid: None };
+    let generic = SystemDef { start: a, end: b, base: 0.0, height, spacing: SYSTEM_SPACING, member: SYSTEM_MEMBER, panel: SYSTEM_PANEL, system_type: None, openings, breaks: Vec::new(), outline: Vec::new(), grid: None, division: None };
     let t = app.library.system_type(id)?;
     if let Some(above) = t.lying {
         let (lo, hi) = (a.min(b), a.max(b));
@@ -211,9 +211,19 @@ fn build() -> (App, Log) {
     let steel = |d: &str| ProfileDef::steel(d);
     if let (Some(column), Some(beam)) = (steel("HEA200").or_else(|| steel("HEA 200")), steel("IPE200").or_else(|| steel("IPE 200"))) {
         let at = p(x0 + 8.0, y);
-        let c = add(&mut app, &mut log, "Column", Shape::Linear(LinearDef { start: at.extend(0.0), end: at.extend(3.0), profile: column, roll: 0.0, role: Default::default() }));
-        let b = add(&mut app, &mut log, "Beam", Shape::Linear(LinearDef { start: at.extend(2.4), end: (at + p(3.6, 0.0)).extend(2.4), profile: beam, roll: 0.0, role: Default::default() }));
+        let c = add(&mut app, &mut log, "Column", Shape::Linear(LinearDef { start: at.extend(0.0), end: at.extend(3.0), profile: column.clone(), roll: 0.0, role: Default::default() }));
+        let b = add(&mut app, &mut log, "Beam", Shape::Linear(LinearDef { start: at.extend(2.4), end: (at + p(3.6, 0.0)).extend(2.4), profile: beam.clone(), roll: 0.0, role: Default::default() }));
         connect(&mut app, &mut log, "End plate", ConnectionKind::EndPlate(bim_core::join::EndPlate::default()), c, b);
+        // the other steel connections: a beam on a fin plate, two beams spliced, and a column
+        // on a base plate on a concrete pile
+        let at = p(x0 + 8.0, y + 3.0);
+        let c = add(&mut app, &mut log, "Column", Shape::Linear(LinearDef { role: Default::default(), start: at.extend(0.0), end: at.extend(3.0), profile: column.clone(), roll: 0.0 }));
+        let b = add(&mut app, &mut log, "Beam", Shape::Linear(LinearDef { role: Default::default(), start: at.extend(2.4), end: (at + p(1.8, 0.0)).extend(2.4), profile: beam.clone(), roll: 0.0 }));
+        connect(&mut app, &mut log, "Fin plate", ConnectionKind::FinPlate(bim_core::join::FinPlate { rows: 2, ..Default::default() }), c, b);
+        let next = add(&mut app, &mut log, "Beam", Shape::Linear(LinearDef { role: Default::default(), start: (at + p(1.8, 0.0)).extend(2.4), end: (at + p(3.6, 0.0)).extend(2.4), profile: beam, roll: 0.0 }));
+        connect(&mut app, &mut log, "Splice", ConnectionKind::Splice(bim_core::join::EndPlate::default()), b, next);
+        let pile = add(&mut app, &mut log, "Pile", Shape::Linear(LinearDef { role: Default::default(), start: at.extend(-2.0), end: at.extend(0.0), profile: ProfileDef::Rectangle { width: 0.4, height: 0.4 }, roll: 0.0 }));
+        connect(&mut app, &mut log, "Base plate", ConnectionKind::BasePlate(bim_core::join::BasePlate::default()), pile, c);
     } else {
         log.refused.push("steel: HEA200 or IPE200 is not in the catalogue".into());
     }
@@ -332,7 +342,7 @@ fn report_overlaps(app: &App) {
 
 /// A standing system of type `id` on the line `a`–`b` from `base` up `height`.
 fn standing(app: &App, id: &str, a: DVec2, b: DVec2, base: f64, height: f64, openings: Vec<Opening>) -> Option<Shape> {
-    let generic = SystemDef { start: a, end: b, base, height, spacing: SYSTEM_SPACING, member: SYSTEM_MEMBER, panel: SYSTEM_PANEL, system_type: None, openings, breaks: Vec::new(), outline: Vec::new(), grid: None };
+    let generic = SystemDef { start: a, end: b, base, height, spacing: SYSTEM_SPACING, member: SYSTEM_MEMBER, panel: SYSTEM_PANEL, system_type: None, openings, breaks: Vec::new(), outline: Vec::new(), grid: None, division: None };
     generic.typed_from(&app.library, id).map(Shape::System)
 }
 
@@ -341,7 +351,7 @@ fn standing(app: &App, id: &str, a: DVec2, b: DVec2, base: f64, height: f64, ope
 fn lying(app: &App, id: &str, a: DVec2, b: DVec2, level: f64) -> Option<Shape> {
     let t = app.library.system_type(id)?;
     let (lo, hi) = (a.min(b), a.max(b));
-    let rectangle = SystemDef { start: lo, end: p(hi.x, lo.y), base: level + t.lying?, height: hi.y - lo.y, spacing: SYSTEM_SPACING, member: SYSTEM_MEMBER, panel: SYSTEM_PANEL, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), grid: None };
+    let rectangle = SystemDef { start: lo, end: p(hi.x, lo.y), base: level + t.lying?, height: hi.y - lo.y, spacing: SYSTEM_SPACING, member: SYSTEM_MEMBER, panel: SYSTEM_PANEL, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), grid: None, division: None };
     rectangle.laid(t).map(Shape::System)
 }
 

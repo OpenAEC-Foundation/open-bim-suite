@@ -36,6 +36,12 @@ pub enum BuildUpMessage {
     Named(String),
     /// An NL-SfB code of its own, one of the library's; none for the rule's.
     Coded(Option<String>),
+    /// Whether it bears, said by itself; none: as its code says.
+    Bearing(Option<bool>),
+    /// Whether it is external, said by itself; none: as its code says.
+    External(Option<bool>),
+    /// Typed as its fire rating; empty for none.
+    FireRating(String),
     /// The material (its key) of a layer.
     Material(usize, String),
     /// Typed as a layer's thickness in millimetres.
@@ -178,6 +184,9 @@ impl App {
             }
             BuildUpMessage::Named(name) => picked.as_deref().map(|id| change(&mut self.library, id, |b| b.name = (!name.trim().is_empty()).then_some(name))),
             BuildUpMessage::Coded(code) => picked.as_deref().map(|id| change(&mut self.library, id, |b| b.code = code)),
+            BuildUpMessage::Bearing(bears) => picked.as_deref().map(|id| change(&mut self.library, id, |b| b.delivery.load_bearing = bears)),
+            BuildUpMessage::External(external) => picked.as_deref().map(|id| change(&mut self.library, id, |b| b.delivery.is_external = external)),
+            BuildUpMessage::FireRating(typed) => picked.as_deref().map(|id| change(&mut self.library, id, |b| b.delivery.fire_rating = Some(typed.trim().to_string()).filter(|rating| !rating.is_empty()))),
             BuildUpMessage::Material(layer, key) => picked.as_deref().map(|id| {
                 change(&mut self.library, id, |b| {
                     if let Some(layer) = b.layers.get_mut(layer) {
@@ -313,12 +322,16 @@ impl App {
             let refused = l.text("Niet overgenomen: de opbouw zou dan niet meer kloppen.", "Not taken: the build-up would no longer hold together.");
             text(format!("{refused} ({why})")).size(11).color(p.accent).wrapping(Wrapping::Word)
         });
+        // what a delivery asks of it (BIM basis ILS): said here, or left to its code
+        let coded = BuildUp { delivery: Default::default(), ..b.clone() };
+        let delivery = delivery_controls(p, l, coded.load_bearing(&library.materials), coded.is_external(&library.materials), &b.delivery, b.missing(&library.materials), true, BuildUpMessage::Bearing, BuildUpMessage::External, BuildUpMessage::FireRating);
         // what is edited, under the drawing of what it makes
         let editor = column![
             layers,
             text(total).size(11).color(p.text_secondary),
             own,
             super::codes::picker(p, l, library, b.rule_code(&library.materials), b.code.as_deref(), BuildUpMessage::Coded),
+            delivery,
             row![act(l.text("Dupliceren", "Duplicate"), BuildUpMessage::Duplicate), act(l.text("Verwijderen", "Remove"), BuildUpMessage::Remove), Space::new().width(Fill)].spacing(4),
         ]
         .push(refused)
@@ -332,6 +345,59 @@ impl App {
         ]
         .spacing(8);
         container(pane).padding(8).into()
+    }
+}
+
+/// The fields of what a delivery asks of a type (BIM basis ILS): whether it bears and whether it
+/// is external, each said or left to its code (`bears` and `external` are what the code says),
+/// its fire rating, and a line of what it still lacks.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn delivery_controls<'a, M: Clone + 'a>(
+    p: Palette,
+    l: Language,
+    bears: Option<bool>,
+    external: bool,
+    delivery: &bim_library::ils::Delivery,
+    lacks: Vec<bim_library::ils::Missing>,
+    // (of an object it is not asked whether it bears: that field is then left out)
+    ask_bearing: bool,
+    to_bearing: fn(Option<bool>) -> M,
+    to_external: fn(Option<bool>) -> M,
+    to_rating: fn(String) -> M,
+) -> Column<'a, M> {
+    let yes_no = |by_code: Option<bool>| -> Vec<Said> {
+        let rule = match by_code {
+            Some(true) => l.text("volgens de code: ja", "by its code: yes"),
+            Some(false) => l.text("volgens de code: nee", "by its code: no"),
+            None => l.text("volgens de code: onbekend", "by its code: unknown"),
+        };
+        vec![Said(None, rule), Said(Some(true), l.text("ja", "yes")), Said(Some(false), l.text("nee", "no"))]
+    };
+    let asked = |label: &'static str, choices: Vec<Said>, now: Option<bool>, to: fn(Option<bool>) -> M| {
+        let picked = choices.iter().find(|c| c.0 == now).cloned();
+        let pick = pick_list(choices, picked, move |c: Said| to(c.0)).text_size(12).padding([2, 6]).width(Length::FillPortion(3));
+        row![text(label).size(12).color(p.text_secondary).width(Length::FillPortion(2)), a11y::named(pick, Aria::ComboBox, label)].spacing(8).align_y(Center)
+    };
+    let rating_name = l.text("Brandwerendheid", "Fire rating");
+    let rating = row![
+        text(rating_name).size(12).color(p.text_secondary).width(Length::FillPortion(2)),
+        a11y::named(text_input("REI 60", delivery.fire_rating.as_deref().unwrap_or_default()).on_input(to_rating).size(12).padding([2, 6]).width(Length::FillPortion(3)), Aria::TextField, rating_name),
+    ]
+    .spacing(8)
+    .align_y(Center);
+    let lacks: Vec<&str> = lacks.into_iter().map(|missing| l.text(missing.names().0, missing.names().1)).collect();
+    let says = if lacks.is_empty() { l.text("BIM basis ILS: compleet", "BIM basis ILS: complete").to_string() } else { format!("{}: {}", l.text("BIM basis ILS, ontbreekt nog", "BIM basis ILS, still missing"), lacks.join(", ")) };
+    let bearing = ask_bearing.then(|| asked(l.text("Dragend", "Loadbearing"), yes_no(bears), delivery.load_bearing, to_bearing));
+    Column::new().spacing(8).push(bearing).push(asked(l.text("Uitwendig", "External"), yes_no(Some(external)), delivery.is_external, to_external)).push(rating).push(text(says).size(11).color(p.text_secondary).wrapping(Wrapping::Word))
+}
+
+/// What a build-up says of itself for a delivery (none: as its code says), with its name, to pick.
+#[derive(Debug, Clone, PartialEq)]
+struct Said(Option<bool>, &'static str);
+
+impl std::fmt::Display for Said {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.1)
     }
 }
 
@@ -428,4 +494,31 @@ mod tests {
         let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 700.0), app.buildup_pane(app.theme.palette(), Language::English));
         assert!(pane.find("Top side up").is_ok() && pane.find("Duplicate").is_ok() && pane.find("Own name").is_ok());
     }
+    #[test]
+    fn a_build_up_says_what_a_delivery_asks_and_the_pane_what_is_missing() {
+        let mut app = App::default();
+        let id = app.library.buildups_of(Role::Wall).next().unwrap().id.clone();
+        let _ = app.buildup_update(BuildUpMessage::Pick(id.clone()));
+        let of = |app: &App| app.library.buildup(&id).unwrap().clone();
+        let lacks = |app: &App| of(app).missing(&app.library.materials).len();
+        let before = lacks(&app);
+        assert!(before >= 2, "a starter wall has no fire rating and no code of four digits");
+        {
+            let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 1600.0), app.buildup_pane(app.theme.palette(), Language::English));
+            assert!(pane.find("Loadbearing").is_ok() && pane.find("External").is_ok() && pane.find("Fire rating").is_ok());
+        }
+        let _ = app.buildup_update(BuildUpMessage::Bearing(Some(true)));
+        let _ = app.buildup_update(BuildUpMessage::External(Some(false)));
+        let _ = app.buildup_update(BuildUpMessage::FireRating(" REI 60 ".into()));
+        let wall = of(&app);
+        assert_eq!((wall.delivery.load_bearing, wall.delivery.is_external, wall.delivery.fire_rating.as_deref()), (Some(true), Some(false), Some("REI 60")));
+        assert!(!wall.is_external(&app.library.materials) && lacks(&app) < before);
+        // back to its code, and no rating
+        let _ = app.buildup_update(BuildUpMessage::Bearing(None));
+        let _ = app.buildup_update(BuildUpMessage::External(None));
+        let _ = app.buildup_update(BuildUpMessage::FireRating("  ".into()));
+        assert!(of(&app).delivery.is_empty());
+        assert_eq!(lacks(&app), before);
+    }
+
 }

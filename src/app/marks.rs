@@ -44,6 +44,16 @@ pub enum MarkPick {
     Line(usize),
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct ReferenceChoice(usize, [f64; 2]);
+
+impl std::fmt::Display for ReferenceChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let [x, y] = self.1;
+        write!(f, "{}  ({x:.3}, {y:.3}) m", self.0 + 1)
+    }
+}
+
 /// What a drawing tool draws on a view with its clicks: lines that are no model. In the order
 /// of the Draw group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -230,6 +240,7 @@ pub enum LookEdit {
     NextTick,
     /// Its style writes the figure in the other unit.
     NextUnit,
+    NextFont,
     /// Its style's figures half a millimetre smaller, or larger.
     Smaller,
     Larger,
@@ -320,14 +331,17 @@ impl App {
             // its own texts and lines, then what the model says and draws on it by itself
             notes: self.document.view_notes(view)?.iter().chain(self.document.view_tags(view)).cloned().collect(),
             lines: self.document.view_lines(view).iter().chain(self.document.view_symbols(view)).copied().collect(),
-            fills: self.document.view_fills(view).to_vec(),
+            image: self.document.plan(view).and_then(|p| p.orthophoto.as_ref()).and_then(|p| p.image.placed(self.document.view_marks(view).and_then(|(_, crop)| crop), |q| q)),
+            fills: self.document.view_fills(view).cloned().collect(),
             cut: self.cuts.get(view).cloned(),
             crop,
             measuring: self.dimension_tool,
+            reference_index: self.reference_target.as_ref().and_then(|(path, i)|
+                (path.as_ref() == view && self.mark_pick == Some(MarkPick::Dimension(*i))).then_some(*i)),
             noting: self.note_tool.then(|| self.note_to_place(l)),
             levelling: self.note_tool && self.level_tool && !is_plan,
             cutting: self.section_tool && is_plan,
-            sections: if is_plan { self.document.sections().iter().map(|s| (s.mark(), s.from, s.to)).collect() } else { Vec::new() },
+            sections: crate::drawing2d::plan_sections(&self.document, view),
             word: l.text("Doorsnede", "Section"),
             pick: self.mark_pick,
             more: self.lines_picked(),
@@ -339,6 +353,7 @@ impl App {
             datums: if self.drawing_on_paper { self.view_datums(view) } else { Vec::new() },
             drawing: self.draw_tool.filter(|_| self.annotates && !self.dimension_tool && !self.section_tool && !self.note_tool),
             own_lines: self.document.view_lines(view).len(),
+            pens: self.document.detail_pens(view),
             shapes: self.document.view_shapes(view).to_vec(),
             transforming: self.modeller.transform.is_some() || self.modeller.offset.is_some() || self.modeller.pair_edit.is_some(),
             selected: self.sel.items().iter().filter_map(|item| if let super::Pickable::Element(id) = item { Some(*id) } else { None }).collect(),
@@ -385,6 +400,7 @@ impl App {
             rows = rows.push(text_input("100", &e.size).on_input(Message::PairSize).size(12).padding([3, 6]));
         }
         match self.mark_pick.filter(|_| self.annotates) {
+            Some(MarkPick::Note(k)) if k >= self.document.view_notes(view).map_or(0, |n| n.len()) => {}
             Some(MarkPick::Note(_)) => {
                 rows = rows.push(text_input(l.text("Tekst", "Text"), &self.note_text).on_input(Message::NoteText).size(12).padding([3, 6]));
                 rows = rows.push(tool(l.text("Tekst verwijderen", "Remove text"), false, Message::RemoveMark));
@@ -395,6 +411,8 @@ impl App {
                 let named = |label: String, edit: LookEdit| -> Element<'static, Message> {
                     button(text(label).size(12)).padding([3, 8]).style(move |_, s| p.ribbon_button(false, s)).on_press(Message::DimensionLook(edit)).into()
                 };
+                let family = style.font_family.as_deref().unwrap_or(l.text("Standaard", "Default"));
+                rows = rows.push(named(format!("{}: {family}", l.text("Lettertype", "Typeface")), LookEdit::NextFont));
                 let tick = match style.tick {
                     Tick::Slash => l.text("Streepje", "Slash"),
                     Tick::Arrow => l.text("Pijl", "Arrow"),
@@ -411,10 +429,10 @@ impl App {
                         .spacing(6)
                         .align_y(Center)
                         .push(named("A−".to_string(), LookEdit::Smaller))
-                        .push(text(format!("{:.1} mm", style.size * 1000.0)).size(12).color(p.text_secondary))
+                        .push(text(style.font_size_pt.map_or_else(|| format!("{:.1} mm", style.size * 1000.0), |pt| format!("{pt:.1} pt"))).size(12).color(p.text_secondary))
                         .push(named("A+".to_string(), LookEdit::Larger)),
                 );
-                rows = rows.push(self.dimension_value_field(view, k));
+                rows = rows.push(self.dimension_value_field(view, k)).push(self.reference_controls(view, k, l));
                 rows = rows.push(choices(vec![tool(l.text("Andere kant", "Other side"), false, Message::FlipDimension), tool(l.text("Maat verwijderen", "Remove dimension"), false, Message::RemoveMark)]));
             }
             Some(MarkPick::Line(k)) => {
@@ -526,8 +544,34 @@ impl App {
         true
     }
 
+    pub(super) fn reference_controls(&self, view: &str, index: usize, l: Language) -> Element<'static, Message> {
+        use iced::widget::{column, pick_list};
+        let path: Arc<str> = Arc::from(view);
+        let target = (path.clone(), index);
+        let armed = self.reference_target.as_ref() == Some(&target);
+        let caption = if armed {
+            l.text("Klik de referentie in de tekening (Esc annuleert)", "Click the reference in the drawing (Esc cancels)")
+        } else {
+            l.text("Referentie toevoegen", "Add reference")
+        };
+        let mut controls = column![button(text(caption).size(12))
+            .on_press(Message::ArmDimensionReference((!armed).then_some(target)))].spacing(4);
+        if let Some(dimension) = self.document.view_marks(view).and_then(|(dims, _)| dims.get(index)) {
+            let choices: Vec<_> = dimension.references().enumerate().map(|(i, (at, _))| ReferenceChoice(i, at)).collect();
+            if choices.len() > 2 {
+                controls = controls.push(button(text(l.text("Totaalmaat buiten ketting", "Add outside overall dimension")).size(12))
+                    .on_press(Message::AddChainTotal(path.clone(), index)));
+                controls = controls.push(pick_list(choices, None::<ReferenceChoice>, move |r|
+                    Message::RemoveDimensionReference(path.clone(), index, r.0))
+                    .placeholder(l.text("Referentie verwijderen...", "Remove reference...")).text_size(12));
+            }
+        }
+        controls.into()
+    }
+
     /// Picks a dimension or text of the view shown; a picked text's wording can then be edited.
     pub(super) fn pick_mark(&mut self, pick: Option<MarkPick>) {
+        self.reference_target = None;
         self.mark_pick = pick;
         self.more_marks.clear();
         self.modeller.dimension_value = None;
@@ -608,27 +652,27 @@ impl App {
             if at.len() <= 2 { Vec::new() } else { at }
         };
         let (below, left) = (chain(along_u, lo[0], hi[0]), chain(along_v, lo[1], hi[1]));
-        let mut made = Vec::new();
-        // below: right to left, so the line stands under what it measures
-        for pair in below.windows(2) {
-            made.push(Dimension { from: [pair[1], lo[1]], to: [pair[0], lo[1]], style: 0, anchors: [None, None] });
+        let mut rows = Vec::new();
+        if !below.is_empty() {
+            rows.push(below.iter().rev().map(|&x| [x,lo[1]]).collect::<Vec<_>>());
         }
-        let out = if below.is_empty() { 0.0 } else { 1.0 };
-        made.push(Dimension { from: [hi[0], lo[1] - out], to: [lo[0], lo[1] - out], style: 0, anchors: [None, None] });
-        // on the left: upwards, so the line stands left of what it measures
-        for pair in left.windows(2) {
-            made.push(Dimension { from: [lo[0], pair[0]], to: [lo[0], pair[1]], style: 0, anchors: [None, None] });
+        let y = lo[1] - if below.is_empty() { 0.0 } else { 1.0 };
+        rows.push(vec![[hi[0],y], [lo[0],y]]);
+        if !left.is_empty() {
+            rows.push(left.iter().map(|&y| [lo[0],y]).collect());
         }
-        let out = if left.is_empty() { 0.0 } else { 1.0 };
-        made.push(Dimension { from: [lo[0] - out, lo[1]], to: [lo[0] - out, hi[1]], style: 0, anchors: [None, None] });
-        let same = |a: &Dimension, b: &Dimension| {
-            let close = |p: [f64; 2], q: [f64; 2]| (p[0] - q[0]).abs() < 0.001 && (p[1] - q[1]).abs() < 0.001;
-            (close(a.from, b.from) && close(a.to, b.to)) || (close(a.from, b.to) && close(a.to, b.from))
-        };
+        let x = lo[0] - if left.is_empty() { 0.0 } else { 1.0 };
+        rows.push(vec![[x,lo[1]], [x,hi[1]]]);
         let mut added = 0;
-        for d in made {
-            let has = self.document.view_marks(view).is_some_and(|(own, _)| own.iter().any(|o| same(o, &d)));
-            if !has && self.document.add_dimension(view, d.from, d.to) {
+        for points in rows {
+            let close = |p: [f64; 2], q: [f64; 2]| (p[0]-q[0]).hypot(p[1]-q[1]) < 0.001;
+            let exists = self.document.view_marks(view).is_some_and(|(dims,_)| dims.iter().any(|d| {
+                let refs: Vec<_> = d.references().map(|(q,_)| q).collect();
+                refs.len() == points.len() && (refs.iter().zip(&points).all(|(&p,&q)| close(p,q))
+                    || refs.iter().rev().zip(&points).all(|(&p,&q)| close(p,q)))
+            }));
+            if !exists && self.document.add_dimension_chain(view, &points) {
+                self.anchor_last_dimension(view);
                 added += 1;
             }
         }
@@ -667,6 +711,15 @@ impl App {
                 let next = (style + 1) % self.document.dimension_styles().len().max(1);
                 self.document.set_dimension_style_of(&view, k, next);
             }
+            LookEdit::NextFont => {
+                self.document.edit_dimension_style(style, |s| {
+                    s.font_family = Some(Arc::from(match s.font_family.as_deref() {
+                        Some(crate::typeface::ARIAL_NARROW) => "Segoe UI",
+                        Some("Segoe UI") => "Inter",
+                        _ => crate::typeface::ARIAL_NARROW,
+                    }));
+                });
+            }
             LookEdit::NextTick => {
                 self.document.edit_dimension_style(style, |s| {
                     let at = Tick::ALL.iter().position(|t| *t == s.tick).unwrap_or(0);
@@ -682,8 +735,14 @@ impl App {
                 });
             }
             LookEdit::Smaller | LookEdit::Larger => {
-                let step = if edit == LookEdit::Larger { 0.0005 } else { -0.0005 };
-                self.document.edit_dimension_style(style, |s| s.size = ((s.size + step) * 2000.0).round().clamp(2.0, 40.0) / 2000.0);
+                let step: f64 = if edit == LookEdit::Larger { 0.0005 } else { -0.0005 };
+                self.document.edit_dimension_style(style, |s| {
+                    if let Some(pt) = s.font_size_pt.as_mut() {
+                        *pt = ((*pt + step.signum() * 0.1) * 10.).round().clamp(1., 2880.) / 10.;
+                    } else {
+                        s.size = ((s.size + step) * 2000.0).round().clamp(2.0, 40.0) / 2000.0;
+                    }
+                });
             }
         }
     }
@@ -719,6 +778,7 @@ pub(super) struct ViewMarks {
     /// The lines of the view's tags: their shapes and leaders.
     lines: Vec<[[f64; 2]; 2]>,
     /// The regions of the view filled in one colour, under its lines.
+    image: Option<crate::raster::PlacedImage>,
     fills: Vec<crate::document::Fill>,
     /// The view's lines, to snap to.
     cut: Option<Arc<Cut>>,
@@ -726,6 +786,7 @@ pub(super) struct ViewMarks {
     crop: Option<([f64; 2], [f64; 2])>,
     /// The dimension tool is on.
     measuring: bool,
+    reference_index: Option<usize>,
     /// The text tool is on, with the text a click places.
     noting: Option<String>,
     /// The text tool places level marks: a click marks the height there.
@@ -753,6 +814,7 @@ pub(super) struct ViewMarks {
     drawing: Option<DrawKind>,
     /// How many of `lines` are the view's own (the first ones): those can be picked.
     own_lines: usize,
+    pens: Vec<(std::ops::Range<usize>, [u8; 3], f64)>,
     /// The shapes among the view's own lines: a click on a line of one picks all of it.
     shapes: Vec<crate::document::Shape>,
     /// A move, copy, turn or mirror is under way: its clicks are points, and pick nothing here.
@@ -776,6 +838,19 @@ pub(super) struct MarksState {
 }
 
 impl ViewMarks {
+    pub(super) fn widget(self) -> iced::Element<'static, Message> {
+        use iced::widget::canvas;
+        use iced::Length::Fill;
+        let Some(image) = self.image.clone() else { return canvas(self).width(Fill).height(Fill).into() };
+        let (camera, plane, paper, dark) = (self.camera.clone(), self.frame, self.on_paper, self.palette.dark);
+        let background = crate::raster::Backdrop(move |frame: &mut Frame, bounds: Rectangle| {
+            if paper { frame.fill_rectangle(Point::ORIGIN, bounds.size(), if dark { Color::from_rgb(0.16, 0.16, 0.18) } else { Color::WHITE }); }
+            let screen = Screen { view_proj: camera.view_proj(bounds.width / bounds.height.max(1.0)), size: (bounds.width, bounds.height) };
+            image.draw(frame, |q| screen.project(plane.world(q)).map(|p| Point::new(p.x, p.y)));
+        });
+        iced::widget::stack![canvas(background).width(Fill).height(Fill), canvas(self).width(Fill).height(Fill)].into()
+    }
+
     fn screen(&self, bounds: Rectangle) -> Screen {
         Screen { view_proj: self.camera.view_proj(bounds.width / bounds.height.max(1.0)), size: (bounds.width, bounds.height) }
     }
@@ -816,19 +891,25 @@ impl ViewMarks {
         (self.paper(screen, q) * height as f32).max(SMALLEST)
     }
 
+    fn note_font_size(&self, screen: &Screen, note: &Note) -> f32 {
+        if note.face.family.is_empty() { self.note_size(screen, note.at, note.size) }
+        else { self.paper(screen, note.at) * note.size as f32 }
+    }
+
     /// The sizes of a dimension from `q` as drawn.
     fn look(&self, screen: &Screen, q: [f64; 2], style: usize) -> DimensionLook<'_> {
         let paper = self.paper(screen, q);
         let style = self.styles.get(style).unwrap_or(&self.styles[0]);
-        DimensionLook { offset: paper * OFFSET as f32, paper, size: (paper * style.size as f32).max(SMALLEST), style }
+        DimensionLook { offset: paper * OFFSET as f32, paper, size: if style.label_family().is_some() { paper * style.paper_font_size() as f32 } else { (paper * style.size as f32).max(SMALLEST) }, style }
     }
 
     /// The ends of dimension `k`'s line on screen, [`OFFSET`] on paper to the left of what it
     /// measures.
     fn dimension_line(&self, screen: &Screen, k: usize) -> Option<(Point, Point)> {
         let d = self.dimensions.get(k)?;
-        let offset = self.look(screen, d.from, d.style).offset;
-        let (a, b) = (self.px(screen, d.from)?, self.px(screen, d.to)?);
+        let offset = self.paper(screen, d.from) * d.paper_offset() as f32;
+        let [from,to] = d.measured_ends();
+        let (a, b) = (self.px(screen, from)?, self.px(screen, to)?);
         let run = a.distance(b);
         (run > 0.0).then(|| {
             let n = iced::Vector::new((b.y - a.y) / run * offset, -(b.x - a.x) / run * offset);
@@ -840,7 +921,7 @@ impl ViewMarks {
     fn note_box(&self, screen: &Screen, k: usize) -> Option<Rectangle> {
         let note = self.notes.get(k)?;
         let at = self.px(screen, note.at)?;
-        let size = self.note_size(screen, note.at, note.size);
+        let size = self.note_font_size(screen, note);
         let lines = note.text.lines().count().max(1) as f32;
         let width = note.text.lines().map(|l| l.chars().count()).max().unwrap_or(0) as f32 * size * 0.56;
         let left = match note.align {
@@ -1188,6 +1269,9 @@ impl canvas::Program<Message> for ViewMarks {
             iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) if self.transforming => None,
             iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 let p = pointer?;
+                if let Some(i) = self.reference_index {
+                    return Some(canvas::Action::publish(Message::InsertDimensionReference(self.view.clone(), i, self.snap(&screen, p)?)).and_capture());
+                }
                 if let Some(kind) = self.drawing {
                     let (q, _) = self.draw_snap(&screen, p, state.points.last().copied())?;
                     // a polyline: a click on its last point ends it, one on its first closes it
@@ -1249,6 +1333,7 @@ impl canvas::Program<Message> for ViewMarks {
             iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) if self.drawing == Some(DrawKind::Polyline) && !state.points.is_empty() && pointer.is_some() => self.end_polyline(state, false),
             iced::Event::Keyboard(keyboard::Event::KeyPressed { key: keyboard::Key::Named(keyboard::key::Named::Enter), .. }) if self.drawing == Some(DrawKind::Polyline) && !state.points.is_empty() => self.end_polyline(state, false),
             iced::Event::Keyboard(keyboard::Event::KeyPressed { key: keyboard::Key::Named(keyboard::key::Named::Escape), .. }) => {
+                if self.reference_index.is_some() { return Some(canvas::Action::publish(Message::ArmDimensionReference(None)).and_capture()); }
                 // Esc keeps the polyline drawn so far, and lets go of any other shape begun
                 if self.drawing == Some(DrawKind::Polyline) && state.points.len() >= 2 {
                     return self.end_polyline(state, false);
@@ -1281,7 +1366,7 @@ impl canvas::Program<Message> for ViewMarks {
         let mut frame = Frame::new(renderer, bounds.size());
         let ink = p.text;
         // as a sheet draws it: on paper, over the model as the 3D view shows it
-        if self.on_paper {
+        if self.on_paper && self.image.is_none() {
             let paper = if p.dark { Color::from_rgb(0.16, 0.16, 0.18) } else { Color::WHITE };
             frame.fill_rectangle(Point::ORIGIN, bounds.size(), paper);
         }
@@ -1327,15 +1412,19 @@ impl canvas::Program<Message> for ViewMarks {
         // the grid lines and levels of the view, as its drawing has them
         for d in &self.datums {
             if let (Some(a), Some(b)) = (self.px(&screen, d.a), self.px(&screen, d.b)) {
-                draw_datum(&mut frame, a, b, &d.name, d.level.is_some(), ink, if p.dark { Color::from_rgb(0.16, 0.16, 0.18) } else { Color::WHITE });
+                draw_datum(&mut frame, a, b, &d.name, d.level.is_some(), self.paper(&screen, d.a) / 1000.0, ink, if p.dark { Color::from_rgb(0.16, 0.16, 0.18) } else { Color::WHITE });
             }
         }
         for (k, d) in self.dimensions.iter().enumerate() {
-            let (Some(a), Some(b)) = (self.px(&screen, d.from), self.px(&screen, d.to)) else { continue };
-            // an end whose element is gone: the dimension measures nothing that is, and shows it
-            let lost = d.anchors.iter().flatten().any(|a| a.lost);
+            let lost = d.references().filter_map(|(_, a)| a).any(|a| a.lost);
             let color = if self.pick == Some(MarkPick::Dimension(k)) { p.accent } else if lost { Color::from_rgb8(200, 40, 40) } else { ink };
-            draw_dimension_px(&mut frame, a, b, d.length(), color, self.look(&screen, d.from, d.style));
+            for (i, (actual, [from, to])) in d.intervals().enumerate() {
+                let [Some(a), Some(b)] = [from, to].map(|q| self.px(&screen, q)) else { continue };
+                let [Some(first), Some(last)] = actual.map(|q| self.px(&screen, q)) else { continue };
+                let mut look = self.look(&screen, from, d.style);
+                look.offset = look.paper * d.paper_offset() as f32;
+                draw_interval_px(&mut frame, a, b, [first, last], i == 0, d.interval_value(from,to,look.style), color, look);
+            }
         }
         // the regions filled in one colour, under the lines: black is the ink of the drawing
         for fill in &self.fills {
@@ -1380,16 +1469,7 @@ impl canvas::Program<Message> for ViewMarks {
             frame.fill(&picked, canvas::Fill { style: canvas::Style::Solid(Color { a: 0.35, ..p.accent }), rule: canvas::fill::Rule::EvenOdd });
             frame.stroke(&picked, Stroke::default().with_color(p.accent).with_width(2.0));
         }
-        if !self.lines.is_empty() {
-            let lines = Path::new(|path| {
-                for line in &self.lines {
-                    let (Some(a), Some(b)) = (self.px(&screen, line[0]), self.px(&screen, line[1])) else { continue };
-                    path.move_to(a);
-                    path.line_to(b);
-                }
-            });
-            frame.stroke(&lines, Stroke::default().with_color(ink).with_width(1.0));
-        }
+        draw_detail_lines(&mut frame, &self.lines, &self.pens, self.crop, ink, &|q| self.px(&screen, q), self.paper(&screen, [0.0, 0.0]) / 1000.0);
         // the line picked, with the shape it is part of, and what a drawing tool would draw to
         // where the pointer is
         let through = |lines: &[[[f64; 2]; 2]]| {
@@ -1426,7 +1506,7 @@ impl canvas::Program<Message> for ViewMarks {
         for (k, note) in self.notes.iter().enumerate() {
             let Some(at) = self.px(&screen, note.at) else { continue };
             let picked = self.pick == Some(MarkPick::Note(k));
-            let size = self.note_size(&screen, note.at, note.size);
+            let size = self.note_font_size(&screen, note);
             let at = if note.level { draw_level_mark(&mut frame, at, size, if picked { p.accent } else { ink }) } else { at };
             draw_note_in(&mut frame, at, &note.text, size, if picked { p.accent } else { ink }, note.align, note.angle as f32, &note.face);
             if picked {
@@ -1448,7 +1528,7 @@ impl canvas::Program<Message> for ViewMarks {
                 (None, Some(from)) if self.cutting => self.draw_section(&mut frame, &screen, from, aim, String::new(), p.accent),
                 (None, Some(from)) => {
                     if let Some(a) = self.px(&screen, from) {
-                        let length = Dimension { from, to: aim, style: 0, anchors: [None, None] }.length();
+                        let length = Dimension { from, to: aim, style: 0, anchors: [None, None], chain: None }.length();
                         draw_dimension_px(&mut frame, a, c, length, p.accent, self.look(&screen, from, 0));
                     }
                 }
@@ -1488,6 +1568,10 @@ pub(super) struct DimensionLook<'a> {
 /// a → b (as seen with y up), extension lines from just off the points to just past it, its
 /// style's mark at each end, and the length in its style's unit over the middle.
 pub(super) fn draw_dimension_px(frame: &mut Frame, a: Point, b: Point, length: f64, color: Color, look: DimensionLook) {
+    draw_interval_px(frame, a, b, [a,b], true, length, color, look);
+}
+
+pub(super) fn draw_interval_px(frame: &mut Frame, a: Point, b: Point, witnesses: [Point; 2], first_witness: bool, length: f64, color: Color, look: DimensionLook) {
     let run = a.distance(b);
     if run <= 0.0 {
         return;
@@ -1499,25 +1583,28 @@ pub(super) fn draw_dimension_px(frame: &mut Frame, a: Point, b: Point, length: f
     let off = |q: Point, d: f32| Point::new(q.x + nx * d, q.y + ny * d);
     let (a2, b2) = (off(a, look.offset), off(b, look.offset));
     let lines = Path::new(|path| {
-        for q in [a, b] {
-            path.move_to(off(q, gap.min(look.offset)));
-            path.line_to(off(q, look.offset + extension));
+        for (q, mark) in witnesses.into_iter().zip([a2,b2]).skip(usize::from(!first_witness)) {
+            let distance = (mark.x - q.x) * nx + (mark.y - q.y) * ny;
+            let side = if distance < 0.0 { -1.0 } else { 1.0 };
+            path.move_to(off(q, gap.min(distance.abs()) * side));
+            path.line_to(off(mark, extension * side));
         }
         path.move_to(a2);
         path.line_to(b2);
         if style.tick == Tick::Slash {
             let (sx, sy) = ((ux + nx) * tick, (uy + ny) * tick);
-            for q in [a2, b2] {
+            for q in [a2, b2].into_iter().skip(usize::from(!first_witness)) {
                 path.move_to(Point::new(q.x - sx, q.y - sy));
                 path.line_to(Point::new(q.x + sx, q.y + sy));
             }
         }
     });
-    frame.stroke(&lines, Stroke::default().with_color(color).with_width(0.9));
+    let weight = crate::drawing2d::Pen::Dimension.weight_mm() as f32 * look.paper / 1000.0;
+    frame.stroke(&lines, Stroke::default().with_color(color).with_width(weight));
     match style.tick {
         Tick::Arrow => {
             // the point on the end of the line, the head lying on the line
-            for (q, inward) in [(a2, 1.0), (b2, -1.0)] {
+            for (q, inward) in [(a2, 1.0), (b2, -1.0)].into_iter().skip(usize::from(!first_witness)) {
                 let back = Point::new(q.x + ux * tick * inward, q.y + uy * tick * inward);
                 let head = Path::new(|path| {
                     path.move_to(q);
@@ -1529,16 +1616,26 @@ pub(super) fn draw_dimension_px(frame: &mut Frame, a: Point, b: Point, length: f
             }
         }
         Tick::Dot => {
-            for q in [a2, b2] {
-                frame.fill(&Path::circle(q, (tick / 2.0).max(1.0)), color);
+            for q in [a2, b2].into_iter().skip(usize::from(!first_witness)) {
+                frame.fill(&Path::circle(q, tick / 2.0), color);
             }
         }
         Tick::Slash | Tick::None => {}
     }
     // the length beside the line, clear of it whichever way the line runs
     let content = style.figure(length);
+    if style.aligned_text {
+        let angle = style.label_angle(f64::from(ux), f64::from(-uy)) as f32;
+        let (sin, cos) = angle.sin_cos();
+        let gap = crate::document::DimensionStyle::ALIGNED_LABEL_GAP as f32 * look.paper;
+        let middle = Point::new((a2.x+b2.x)/2.0, (a2.y+b2.y)/2.0);
+        let at = Point::new(middle.x-sin*gap, middle.y-cos*gap);
+        let face = style.label_family().as_deref().map_or_else(crate::typeface::Face::default, crate::typeface::Face::of);
+        draw_note_in(frame, at, &content, look.size, color, Align::Center, angle, &face);
+        return;
+    }
     let (w, h) = (content.chars().count() as f32 * look.size * 0.6, look.size);
-    let clear = nx.abs() * w / 2.0 + ny.abs() * h / 2.0 + 2.0;
+    let clear = nx.abs() * w / 2.0 + ny.abs() * h / 2.0 + look.paper * 0.0015;
     frame.fill_text(canvas::Text {
         content,
         position: off(Point::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0), look.offset + clear),
@@ -1546,41 +1643,56 @@ pub(super) fn draw_dimension_px(frame: &mut Frame, a: Point, b: Point, length: f
         align_y: alignment::Vertical::Center,
         size: iced::Pixels(look.size),
         color,
-        font: openaec_ui::fonts::MEDIUM,
+        font: style.label_family().as_deref().map_or(openaec_ui::fonts::MEDIUM, |name| crate::typeface::Face::of(name).font()),
         ..canvas::Text::default()
     });
 }
 
+pub(super) fn draw_detail_lines(frame: &mut Frame, lines: &[[[f64; 2]; 2]], pens: &[(std::ops::Range<usize>, [u8; 3], f64)], crop: Option<([f64; 2], [f64; 2])>, ink: Color, to: &dyn Fn([f64; 2]) -> Option<Point>, px_per_mm: f32) {
+    let mut draw = |range: std::ops::Range<usize>, color, width| {
+        if range.is_empty() { return; }
+        let path = Path::new(|p| {
+            for &[a, b] in &lines[range] {
+                let Some((a, b)) = crate::drawing2d::crop_segment(a, b, crop) else { continue };
+                if let (Some(a), Some(b)) = (to(a), to(b)) {
+                    p.move_to(a);
+                    p.line_to(b);
+                }
+            }
+        });
+        frame.stroke(&path, Stroke::default().with_color(color).with_width(width));
+    };
+    let base = crate::drawing2d::Pen::Detail.weight_mm() as f32 * px_per_mm;
+    let mut start = 0;
+    for (range, [r, g, b], width) in pens {
+        draw(start..range.start, ink, base);
+        draw(range.clone(), Color::from_rgb8(*r, *g, *b), *width as f32 * px_per_mm);
+        start = range.end;
+    }
+    draw(start..lines.len(), ink, base);
+}
+
 /// A grid line or a level of a view on its drawing, from `a` to `b` on screen: a dash-dot line;
 /// a grid line with its name in a bubble past both ends, a level with its name past its end.
-pub(super) fn draw_datum(frame: &mut Frame, a: Point, b: Point, name: &str, level: bool, ink: Color, paper: Color) {
+pub(super) fn draw_datum(frame: &mut Frame, a: Point, b: Point, name: &str, level: bool, px_per_mm: f32, ink: Color, paper: Color) {
     let length = a.distance(b);
-    if length < 1.0 {
+    if length < 1.0 || !px_per_mm.is_finite() || px_per_mm <= 0.0 {
         return;
     }
     let (ux, uy) = ((b.x - a.x) / length, (b.y - a.y) / length);
     let at = |d: f32| Point::new(a.x + ux * d, a.y + uy * d);
-    // a long dash, a gap, a dot, a gap (logical pixels)
-    let line = Path::new(|path| {
-        let mut d = 0.0;
-        while d < length {
-            path.move_to(at(d));
-            path.line_to(at((d + 14.0).min(length)));
-            if d + 17.0 < length {
-                path.move_to(at(d + 17.0));
-                path.line_to(at((d + 18.5).min(length)));
-            }
-            d += 21.5;
-        }
-    });
-    frame.stroke(&line, Stroke::default().with_color(Color { a: 0.75, ..ink }).with_width(0.8));
+    let dash = [8.0, 1.5, 0.35, 1.5].map(|mm| mm * px_per_mm);
+    let weight = crate::drawing2d::Pen::Grids.weight_mm() as f32 * px_per_mm;
+    let mut stroke = Stroke::default().with_color(ink).with_width(weight);
+    stroke.line_dash = canvas::LineDash { segments: &dash, offset: 0 };
+    frame.stroke(&Path::line(a, b), stroke);
     let label = |frame: &mut Frame, position: Point, align: alignment::Horizontal| {
         frame.fill_text(canvas::Text {
             content: name.to_string(),
             position,
             align_x: align.into(),
             align_y: alignment::Vertical::Center,
-            size: iced::Pixels(11.0),
+            size: iced::Pixels(2.5 * px_per_mm / 0.72),
             color: ink,
             font: openaec_ui::fonts::MEDIUM,
             ..canvas::Text::default()
@@ -1589,14 +1701,14 @@ pub(super) fn draw_datum(frame: &mut Frame, a: Point, b: Point, name: &str, leve
     if level {
         // the level's name past the end on the right
         let end = if a.x >= b.x { a } else { b };
-        label(frame, Point::new(end.x + 6.0, end.y), alignment::Horizontal::Left);
+        label(frame, Point::new(end.x + 1.5 * px_per_mm, end.y), alignment::Horizontal::Left);
         return;
     }
-    const BUBBLE: f32 = 10.0;
-    for centre in [at(-BUBBLE), at(length + BUBBLE)] {
-        let circle = Path::circle(centre, BUBBLE);
+    let bubble = 4.0 * px_per_mm;
+    for centre in [at(-bubble), at(length + bubble)] {
+        let circle = Path::circle(centre, bubble);
         frame.fill(&circle, paper);
-        frame.stroke(&circle, Stroke::default().with_color(ink).with_width(1.0));
+        frame.stroke(&circle, Stroke::default().with_color(ink).with_width(weight));
         label(frame, centre, alignment::Horizontal::Center);
     }
 }
@@ -1625,6 +1737,14 @@ pub(super) fn draw_note(frame: &mut Frame, at: Point, wording: &str, size: f32, 
 
 /// A text as [`draw_note`] draws it, set in the typeface its file names.
 #[allow(clippy::too_many_arguments)]
+pub(super) fn draw_paper_note(frame: &mut Frame, at: Point, note: &crate::document::Note, size: f32, color: Color, angle: f32) {
+    let face = note.paper_face();
+    let descent = face.baseline_to_bottom(&note.text, size);
+    let (sin, cos) = angle.sin_cos();
+    let bottom = Point::new(at.x + sin * descent, at.y + cos * descent);
+    draw_note_in(frame, bottom, &note.text, size, color, note.align, angle, &face);
+}
+
 pub(super) fn draw_note_in(frame: &mut Frame, at: Point, wording: &str, size: f32, color: Color, align: Align, angle: f32, face: &crate::typeface::Face) {
     let align_x = match align {
         Align::Left => alignment::Horizontal::Left,
@@ -1711,7 +1831,8 @@ mod tests {
     fn standard_dimensions_give_a_view_its_overall_size_and_its_grids() {
         let (mut app, plan) = plan_shown();
         let lengths = |app: &App, view: &str| -> Vec<f64> {
-            app.document.view_marks(view).unwrap().0.iter().map(|d| (d.length() * 1000.0).round()).collect()
+            app.document.view_marks(view).unwrap().0.iter().flat_map(|d| d.intervals())
+                .map(|(_, [a,b])| ((b[0]-a[0]).hypot(b[1]-a[1]) * 1000.).round()).collect()
         };
         let _ = app.update(Message::StandardDimensions(plan.clone()));
         assert_eq!(lengths(&app, &plan), [8000.0, 5000.0]);
@@ -1726,10 +1847,10 @@ mod tests {
         let grids = vec![grid("1", [0.0, -1.0], [0.0, 6.0]), grid("2", [3.0, -1.0], [3.0, 6.0]), grid("3", [8.0, -1.0], [8.0, 6.0]), grid("A", [-1.0, 0.0], [9.0, 0.0]), grid("B", [-1.0, 5.0], [9.0, 5.0])];
         let (mut app, plan2) = plan_shown_with(grids);
         let _ = app.update(Message::StandardDimensions(plan2.clone()));
-        assert_eq!(lengths(&app, &plan2), [3000.0, 5000.0, 8000.0, 5000.0]);
+        assert_eq!(lengths(&app, &plan2), [5000.0, 3000.0, 8000.0, 5000.0]);
         let d = &app.document.plan(&plan2).unwrap().dimensions;
-        assert_eq!(d[2].from[1], -1.0, "the overall width 1 m below the chain");
-        assert_eq!(d[3].from[0], 0.0, "on the left only the overall: the grids are its ends");
+        assert_eq!(d[1].from[1], -1.0, "the overall width 1 m below the chain");
+        assert_eq!(d[2].from[0], 0.0, "on the left only the overall: the grids are its ends");
         // a section across the room: its width, and its height between the levels
         let section = app.document.add_section("Section A", [-1.0, 2.5], [9.0, 2.5], 20.0).unwrap();
         let _ = app.update(Message::StandardDimensions(Arc::from(section.as_str())));
