@@ -2069,6 +2069,7 @@
     "fittings": "Formstücke",
     "appliances": "Geräte",
     "Network length": "Netzlänge",
-    "Select network": "Netz auswählen"
+    "Select network": "Netz auswählen",
+    "Fall (1:n)": "Gefälle (1:n)"
   }
 }
