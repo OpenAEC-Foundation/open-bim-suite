@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "open-bim-suite-dev": {
+      "command": "target/release/open-3d-viewer-mcp.exe",
+      "args": [],
+      "env": {
+        "O3V_INSTANCE": "dev",
+        "O3V_VIEWER": "target/release/open-3d-viewer.exe"
+      }
+    }
+  }
+}

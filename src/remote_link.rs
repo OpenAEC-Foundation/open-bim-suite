@@ -33,9 +33,20 @@ pub fn settings_dir() -> Option<PathBuf> {
     Some(dir)
 }
 
-/// `remote.json` in the settings folder, next to the preferences.
+/// `remote.json` in the settings folder, next to the preferences; for a viewer started with
+/// `O3V_INSTANCE` (a name of letters, digits and dashes, `dev` say) `remote-<name>.json`, so an
+/// MCP server started with the same name drives that viewer and leaves one opened by hand alone.
 pub fn announcement_path() -> Option<PathBuf> {
-    Some(settings_dir()?.join("remote.json"))
+    Some(settings_dir()?.join(announcement_file(std::env::var("O3V_INSTANCE").ok().as_deref())))
+}
+
+/// The announcement file's name for an instance name, if any (one with other characters counts as
+/// none).
+fn announcement_file(instance: Option<&str>) -> String {
+    match instance.map(str::trim).filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')) {
+        Some(name) => format!("remote-{name}.json"),
+        None => "remote.json".to_string(),
+    }
 }
 
 #[allow(dead_code)] // the viewer writes, the MCP server reads
@@ -57,4 +68,17 @@ pub fn read_announcement() -> Option<Announcement> {
         token: v["token"].as_str()?.to_string(),
         pid: u32::try_from(v["pid"].as_u64().unwrap_or(0)).unwrap_or(0),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::announcement_file;
+
+    #[test]
+    fn an_instance_of_its_own_announces_in_a_file_of_its_own() {
+        assert_eq!(announcement_file(None), "remote.json");
+        assert_eq!(announcement_file(Some("dev")), "remote-dev.json");
+        assert_eq!(announcement_file(Some(" ")), "remote.json");
+        assert_eq!(announcement_file(Some("../x")), "remote.json", "no way out of the settings folder");
+    }
 }
