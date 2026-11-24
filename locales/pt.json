@@ -2058,6 +2058,9 @@
     "Line style per line": "Estilo de linha por linha",
     "by the pens above": "pelas canetas acima",
     "Grid and level": "Grelha e nível",
-    "Section line": "Linha de corte"
+    "Section line": "Linha de corte",
+    "Export STEP": "Exportar STEP",
+    "Export STEP…": "Exportar STEP…",
+    "Writes the modelled elements as exact solids for CAD: round columns and bowed edges as true cylinders and arcs": "Escreve os elementos modelados como sólidos exatos para CAD: pilares redondos e bordas curvas como cilindros e arcos verdadeiros"
   }
 }

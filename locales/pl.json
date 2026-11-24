@@ -2058,6 +2058,9 @@
     "Line style per line": "Styl linii dla każdej linii",
     "by the pens above": "według pisaków powyżej",
     "Grid and level": "Siatka i poziom",
-    "Section line": "Linia przekroju"
+    "Section line": "Linia przekroju",
+    "Export STEP": "Eksportuj STEP",
+    "Export STEP…": "Eksportuj STEP…",
+    "Writes the modelled elements as exact solids for CAD: round columns and bowed edges as true cylinders and arcs": "Zapisuje modelowane elementy jako dokładne bryły dla CAD: okrągłe słupy i łukowe krawędzie jako prawdziwe walce i łuki"
   }
 }

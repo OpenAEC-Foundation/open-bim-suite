@@ -18,6 +18,7 @@
 pub mod boolean;
 pub mod datum;
 pub mod element;
+pub mod exact;
 pub mod join;
 mod joins;
 pub mod mesh;

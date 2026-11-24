@@ -2058,6 +2058,9 @@
     "Line style per line": "Style de ligne par trait",
     "by the pens above": "selon les plumes ci-dessus",
     "Grid and level": "Trame et niveau",
-    "Section line": "Ligne de coupe"
+    "Section line": "Ligne de coupe",
+    "Export STEP": "Exporter en STEP",
+    "Export STEP…": "Exporter en STEP…",
+    "Writes the modelled elements as exact solids for CAD: round columns and bowed edges as true cylinders and arcs": "Écrit les éléments modélisés en solides exacts pour la CAO : poteaux ronds et bords courbes en vrais cylindres et arcs"
   }
 }

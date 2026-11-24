@@ -1328,6 +1328,11 @@ impl Studio {
                 .enabled(loaded && cfg!(not(target_arch = "wasm32")))
                 .detail(l.text("Schrijft een film waarin het model wordt opgebouwd (Blender rendert hem)", "Writes a film in which the model is built up (Blender renders it)"))
                 .dialog(),
+            Command::new("file.export-step", l.text("Exporteren als STEP…", "Export STEP…"), go(Message::ExportStep))
+                .icon(small("file.save-as"), large("file.save-as"))
+                .enabled(self.product() == Product::Modeller && !self.app.modeller.model.is_empty())
+                .detail(l.text("Schrijft de gemodelleerde elementen als exacte solids voor CAD: ronde kolommen en gebogen randen als echte cilinders en bogen", "Writes the modelled elements as exact solids for CAD: round columns and bowed edges as true cylinders and arcs"))
+                .dialog(),
             Command::new("file.export-ifc4x3", l.text("Exporteren als IFC 4x3…", "Export IFC 4x3…"), go(Message::SaveIfcDialog(crate::export::IfcSchema::Ifc4x3)))
                 .icon(small("file.save-as"), large("file.save-as"))
                 .enabled(loaded)
@@ -2984,7 +2989,6 @@ impl Studio {
         let c = look.color;
         let writable = self.product() != Product::Viewer;
         let loaded = writable && self.app.model.is_some();
-        #[allow(unused_mut)]
         let mut nav = column![
             t::file_nav_row(look, small("file.new"), l.text("Nieuw", "New"), false, writable.then_some(Msg::App(Message::NewModel(l.text("Niveau 0", "Level 0"))))),
             t::file_nav_row(look, small("file.open"), l.text("Openen", "Open"), false, Some(Msg::App(Message::OpenDialog))),
@@ -2993,9 +2997,13 @@ impl Studio {
             t::file_nav_row(look, small("file.save-as"), l.text("Opslaan als", "Save as"), false, loaded.then_some(Msg::App(Message::SaveDialog))),
             t::file_nav_row(look, small("file.save-as"), l.text("Project opslaan", "Save project"), false, loaded.then_some(Msg::App(Message::SaveProjectDialog))),
             t::file_nav_row(look, small("file.save-as"), l.text("Exporteren als IFC 4x3", "Export IFC 4x3"), false, loaded.then_some(Msg::App(Message::SaveIfcDialog(crate::export::IfcSchema::Ifc4x3)))),
-            t::file_nav_row(look, small("ui.settings"), l.text("Instellingen", "Settings"), false, Some(Msg::Dialog(Some(Dialog::Settings)))),
         ]
         .width(260);
+        // the Modeller's elements out to CAD, as exact solids
+        if self.product() == Product::Modeller {
+            nav = nav.push(t::file_nav_row(look, small("file.save-as"), l.text("Exporteren als STEP", "Export STEP"), false, (!self.app.modeller.model.is_empty()).then_some(Msg::App(Message::ExportStep))));
+        }
+        nav = nav.push(t::file_nav_row(look, small("ui.settings"), l.text("Instellingen", "Settings"), false, Some(Msg::Dialog(Some(Dialog::Settings)))));
         #[cfg(target_arch = "wasm32")]
         if crate::host::renders() {
             nav = nav.push(t::file_nav_row(look, small("mesh.surface"), l.text("Renderen met Blender", "Render with Blender"), false, crate::host::can_render().then_some(Msg::App(Message::BlenderRender))));
