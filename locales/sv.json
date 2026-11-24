@@ -2063,6 +2063,12 @@
     "aluminium": "aluminium",
     "masonry mortar": "murbruk",
     "Exposure classes": "Exponeringsklasser",
-    "Too weak for": "För svag för"
+    "Too weak for": "För svag för",
+    "Connector": "Anslutning",
+    "Network": "Nät",
+    "fittings": "rördelar",
+    "appliances": "apparater",
+    "Network length": "Nätets längd",
+    "Select network": "Markera nät"
   }
 }

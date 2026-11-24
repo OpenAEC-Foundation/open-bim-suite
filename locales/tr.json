@@ -2063,6 +2063,12 @@
     "aluminium": "alüminyum",
     "masonry mortar": "duvar harcı",
     "Exposure classes": "Çevresel etki sınıfları",
-    "Too weak for": "Şunun için fazla zayıf:"
+    "Too weak for": "Şunun için fazla zayıf:",
+    "Connector": "Bağlantı ucu",
+    "Network": "Ağ",
+    "fittings": "bağlantı parçası",
+    "appliances": "cihaz",
+    "Network length": "Ağ uzunluğu",
+    "Select network": "Ağı seç"
   }
 }

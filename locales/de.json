@@ -2063,6 +2063,12 @@
     "aluminium": "Aluminium",
     "masonry mortar": "Mauermörtel",
     "Exposure classes": "Expositionsklassen",
-    "Too weak for": "Zu schwach für"
+    "Too weak for": "Zu schwach für",
+    "Connector": "Anschluss",
+    "Network": "Netz",
+    "fittings": "Formstücke",
+    "appliances": "Geräte",
+    "Network length": "Netzlänge",
+    "Select network": "Netz auswählen"
   }
 }

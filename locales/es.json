@@ -2063,6 +2063,12 @@
     "aluminium": "aluminio",
     "masonry mortar": "mortero de albañilería",
     "Exposure classes": "Clases de exposición",
-    "Too weak for": "Demasiado débil para"
+    "Too weak for": "Demasiado débil para",
+    "Connector": "Conexión",
+    "Network": "Red",
+    "fittings": "accesorios",
+    "appliances": "aparatos",
+    "Network length": "Longitud de la red",
+    "Select network": "Seleccionar red"
   }
 }
