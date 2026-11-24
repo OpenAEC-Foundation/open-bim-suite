@@ -1363,6 +1363,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "dgn-export"
+version = "0.1.0"
+source = "git+https://github.com/OpenAEC-Foundation/microstation-dll?rev=4740c4fb140917699e8cf52e893f922410693542#4740c4fb140917699e8cf52e893f922410693542"
+dependencies = [
+ "dgn-model",
+ "earcutr",
+ "glam 0.30.10",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "dgn-model"
+version = "0.1.0"
+source = "git+https://github.com/OpenAEC-Foundation/microstation-dll?rev=4740c4fb140917699e8cf52e893f922410693542#4740c4fb140917699e8cf52e893f922410693542"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "dgn-read"
+version = "0.1.0"
+source = "git+https://github.com/OpenAEC-Foundation/microstation-dll?rev=4740c4fb140917699e8cf52e893f922410693542#4740c4fb140917699e8cf52e893f922410693542"
+dependencies = [
+ "dgn-model",
+ "flate2",
+ "glam 0.30.10",
+]
+
+[[package]]
 name = "dicom-core"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4361,6 +4391,8 @@ dependencies = [
  "chrono",
  "console_error_panic_hook",
  "dcm-read",
+ "dgn-export",
+ "dgn-read",
  "e57",
  "earcutr",
  "fem-read",

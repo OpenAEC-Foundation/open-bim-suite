@@ -60,7 +60,7 @@ Lines of Rust in `src/loaders/` per format, tests included.
 | Archicad (`.pln`, `.pla`) | 5,995 | none | | New repository; the whole reader moves. |
 | Allplan (`.ndw`) | 4,006 | none | | New repository; the whole reader moves. |
 | Coordination model (`.smc`) | 2,674 in 3 files | none | | New repository; the whole reader moves. |
-| MicroStation (`.dgn`) | 2,644 | `microstation-dll` | no `dgn-core` | The repository's reader is older than the app's: bring it level first, then replace the app's reader (pull request #85 did this on 5 November and no longer merges). |
+| MicroStation (`.dgn`) | 613 (the adapter, its tests included) | `microstation-dll` | no `dgn-core` | Switched to the library (pull request #85). Left: the container (`cfb.rs`, `zlib.rs`) into a crate `dgn-core` of its own. |
 | Rhino (`.3dm`) | 1,600 | `rhino-dll` | yes | The adapter still decides and converts too much: move that into the reader. |
 | FreeCAD (`.FCStd`) | 1,088 in 2 files | none | | New repository. |
 | FBX (`.fbx`) | 949 | none | | New repository. |
@@ -99,6 +99,10 @@ Together this is some 30,000 lines of format knowledge in the app.
 
 ## Moved so far
 
+- 2026-11-24, MicroStation: the whole reader (`dgn_read::read`, drawn by `dgn_export::draw`;
+  2,031 lines left the app). The library already held every test of the app's reader; on six
+  V7 sample files both gave the same layers, elements, geometry bounds, properties and project
+  information.
 - 2026-11-18, Revit: which elements are joined with which (`rvt_read::joins`; 48 lines and one
   test left the app).
 - 2026-11-18, Revit: the images of a family and the image a parameter names (`rvt_read::images`),
@@ -122,7 +126,7 @@ Together this is some 30,000 lines of format knowledge in the app.
    a pull request in `revit-dll` and one here that moves the pinned revision and deletes the
    moved code.
 2. **Archicad** and **Allplan**: whole readers that only need a neutral model to return.
-3. **MicroStation**: bring `microstation-dll` level with the app's reader, then switch.
+3. **MicroStation**: done on 2026-11-24 (see below); only `dgn-core` is left.
 4. **Rhino**, **Tekla Structures**, **Vectorworks**: slim the adapters.
 5. The coordination model, FreeCAD, FBX, Blender and the smaller ones.
 6. `sketchup-dll`, `ply-dll` and `vertex.dll`: lay them out as the model.
