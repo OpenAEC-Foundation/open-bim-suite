@@ -355,6 +355,7 @@ impl App {
 
     /// The Definition section for the one space selected: its name, typed in.
     pub(in crate::app) fn space_properties(&self, p: crate::theme::Palette, l: openaec_ui::Language) -> Option<iced::Element<'_, crate::app::Message>> {
+        if !self.annotates { return None; }
         use iced::widget::{row, text, text_input};
         let k = self.selected_space()?;
         let space = self.spaces().into_iter().nth(k)?;
@@ -403,11 +404,39 @@ impl App {
         let levels: Vec<(String, f64)> = self.document.levels().iter().map(|l| (l.path.clone(), l.elevation)).collect();
         let top_word = if self.modeller.top_word.is_empty() { "top" } else { self.modeller.top_word };
         let model = &self.modeller.model;
+        let source = self.models.iter().position(|m| Some(m.model.id) == self.modeller.shown && m.visible).map(|i| i as u32);
+        let office_style = self.house.key.eq_ignore_ascii_case("3bm");
+        let pile_types: Vec<_> = self.document.plans().iter().filter(|p| super::structure::is_pile_legend(p))
+            .flat_map(|p| {
+                let legend = &p.presentation["legend"];
+                let imported = (p.drawing.as_deref() != Some("pile-schedule")).then_some(&legend["rows"]);
+                let rows = imported.into_iter().filter_map(|v| v.as_array()).flatten().filter_map(|row| row["type"].as_str());
+                rows.chain(legend["typeAliases"].as_array().into_iter().flatten().filter_map(|v| v.as_str()))
+            }).map(str::to_owned).collect();
+        let registered: Vec<_> = self.document.plans().iter().filter(|p| p.drawing.as_deref() != Some("pile-schedule") && super::structure::is_pile_legend(p))
+            .flat_map(|p| p.presentation["legend"]["elementIds"].as_array().into_iter().flatten())
+            .filter_map(|id| id.as_u64().map(bim_core::ElementId)).collect();
         let library = &self.library;
         self.document.set_plan_tags(|plan| {
+            if office_style && !registered.is_empty() && !plan.pile_symbols && plan.kind.looks_up() && plan.drawing.as_deref() == Some("pile-plan") {
+                super::pile_symbols::adopt_registered_symbols(model, &registered, plan);
+            }
+            if super::structure::is_pile_legend(plan) {
+                return super::structure::schedule_table(model, plan, &self.house, &pile_types);
+            }
             if plan.kind.structural() {
                 let elevation = levels.iter().find(|(path, _)| *path == plan.level).map_or(0.0, |(_, e)| *e);
-                return (super::structure::tags(model, library, &plan.level, elevation, plan.scale, top_word), Vec::new());
+                let visible = |e: &bim_core::Element| {
+                    plan.layers.get(e.class()) != Some(&false) && !source.is_some_and(|model| {
+                        plan.hidden.contains(&crate::units::UnitKey::Element(crate::model::ElementKey { model, source: e.id.0 }))
+                    })
+                };
+                let mut tags = super::structure::member_tags(model, library, &plan.level, elevation, plan.scale, top_word, !plan.pile_symbols, visible);
+                let mut symbols = Vec::new();
+                if let Some(source) = source.filter(|_| plan.pile_symbols && plan.layers.get("IfcPile") != Some(&false)) {
+                    super::pile_symbols::draw(model, plan, elevation, source, office_style, &mut tags, &mut symbols);
+                }
+                return (tags, symbols);
             }
             let on = |level: &Option<String>| level.as_deref().is_none_or(|l| l == plan.level);
             let line = plan.scale * NOTE_HEIGHT * 1.6;

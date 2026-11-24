@@ -22,6 +22,7 @@ use openaec_ui::Language;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElementField {
     Name,
+    PileMark,
     /// A member's strength class (S235, C30/37), as text; empty: not given.
     Grade,
     /// A wall's, curtain wall's or object's height.
@@ -453,6 +454,7 @@ impl App {
         if field == ElementField::Name {
             return e.name.clone();
         }
+        if field == ElementField::PileMark { return e.pile_mark.clone().unwrap_or_default(); }
         if field == ElementField::Grade {
             return e.grade.clone().unwrap_or_default();
         }
@@ -482,6 +484,14 @@ impl App {
                 let mut renamed = e.clone();
                 renamed.name = name.to_string();
                 self.change_element(renamed);
+            }
+        } else if field == ElementField::PileMark && e.pile_number.is_some() {
+            let mark = typed.trim();
+            let value = (!mark.is_empty()).then(|| mark.to_string());
+            if value != e.pile_mark {
+                let mut changed = e.clone();
+                changed.pile_mark = value;
+                self.change_element(changed);
             }
         } else if field == ElementField::Grade {
             let grade = Some(typed.trim().to_string()).filter(|g| !g.is_empty());
@@ -837,6 +847,7 @@ impl App {
     /// The Definition section: the selected modelled element's values to type in, and the openings
     /// of a wall or a timber frame.
     pub(super) fn element_properties(&self, p: Palette, l: Language) -> Option<Widget<'_, Message>> {
+        if !self.annotates { return None; }
         let e = self.defined()?;
         let shape = e.shape_in_project(&self.modeller.model.grid);
         let field = |label: &str, f: ElementField| field_row(p, label, self.element_field_text(e, f), f);
@@ -846,6 +857,16 @@ impl App {
         if super::element_drawing::frame(&shape).is_some() {
             let word = if e.reinforcement.is_some() || e.nets.is_some() { l.text("Wapeningstekening", "Reinforcement drawing") } else { l.text("Elementtekening", "Element drawing") };
             rows = rows.push(button(text(word).size(12)).padding([3, 10]).style(move |_, s| p.row_button(s)).on_press(Message::ElementDrawing(l)));
+        }
+        if let Some(number) = e.pile_number {
+            rows = rows.push(text(format!("{} {number:02}", l.text("Paalnummer", "Pile number"))).size(12))
+                .push(field(l.text("Paalmerk", "Pile mark"), F::PileMark));
+        }
+        if e.class() == "IfcColumn" && e.pile_number.is_none() {
+            rows = rows.push(button(text(l.text("Opnemen in paalstaat", "Register as pile")).size(12)).on_press(Message::DesignatePiles));
+        }
+        if matches!(shape, Shape::Linear(_)) && e.pile_number.is_none() && !e.reinforcing_bar {
+            rows = rows.push(button(text(l.text("Markeren als wapeningsstaaf", "Mark as reinforcing bar")).size(12)).on_press(Message::DesignateReinforcement));
         }
         let has = |f: F| value(&shape, f).is_some();
         let fields: [(F, &str); 11] = [
@@ -986,6 +1007,8 @@ impl App {
                         ]
                         .spacing(6),
                     )
+                    // its type from the project's library: the recipe with its sizes
+                    .push(self.join_type_picker(p, l, &c.kind))
                     .push(
                         row![
                             choice(l.text("Stuik", "Splice"), ConnectionKind::Splice(bim_core::join::EndPlate::default())),
@@ -1170,7 +1193,7 @@ mod tests {
     fn a_member_shows_its_ends_and_its_length() {
         let mut app = App::default();
         app.new_model("Level 0");
-        let beam = Shape::Linear(LinearDef { start: DVec3::new(0.0, 1.0, 2.8), end: DVec3::new(3.0, 5.0, 2.8), profile: ProfileDef::Rectangle { width: 0.2, height: 0.4 }, roll: 0.0 });
+        let beam = Shape::Linear(LinearDef { start: DVec3::new(0.0, 1.0, 2.8), end: DVec3::new(3.0, 5.0, 2.8), profile: ProfileDef::Rectangle { width: 0.2, height: 0.4 }, roll: 0.0, role: Default::default() });
         let id = app.add_element("Beam", None, beam).unwrap();
         app.select_modelled(id);
         let rows = app.member_rows(app.defined().unwrap(), openaec_ui::Language::English);
@@ -1233,10 +1256,10 @@ mod tests {
         let mut app = App::default();
         app.new_model("Level 0");
         let column = app
-            .add_element("Column", None, Shape::Linear(LinearDef { start: DVec3::ZERO, end: DVec3::new(0.0, 0.0, 4.0), profile: ProfileDef::Rectangle { width: 0.3, height: 0.3 }, roll: 0.0 }))
+            .add_element("Column", None, Shape::Linear(LinearDef { start: DVec3::ZERO, end: DVec3::new(0.0, 0.0, 4.0), profile: ProfileDef::Rectangle { width: 0.3, height: 0.3 }, roll: 0.0, role: Default::default() }))
             .unwrap();
         let beam = app
-            .add_element("Beam", None, Shape::Linear(LinearDef { start: DVec3::new(0.0, 0.0, 2.5), end: DVec3::new(5.0, 0.0, 2.5), profile: ProfileDef::Rectangle { width: 0.2, height: 0.4 }, roll: 0.0 }))
+            .add_element("Beam", None, Shape::Linear(LinearDef { start: DVec3::new(0.0, 0.0, 2.5), end: DVec3::new(5.0, 0.0, 2.5), profile: ProfileDef::Rectangle { width: 0.2, height: 0.4 }, roll: 0.0, role: Default::default() }))
             .unwrap();
         let joint = app.add_element("Joint", None, Shape::Connection(ConnectionDef { kind: ConnectionKind::Butt, primary: column, secondary: beam })).unwrap();
         let kind = |app: &App| match &app.modeller.model.get(joint).unwrap().shape {
@@ -1409,7 +1432,7 @@ mod tests {
     fn a_grade_typed_is_kept_with_the_member_and_shown_in_its_properties() {
         let mut app = App::default();
         app.new_model("Level 0");
-        let beam = Shape::Linear(LinearDef { start: DVec3::new(0.0, 0.0, 2.8), end: DVec3::new(4.0, 0.0, 2.8), profile: ProfileDef::Rectangle { width: 0.2, height: 0.4 }, roll: 0.0 });
+        let beam = Shape::Linear(LinearDef { start: DVec3::new(0.0, 0.0, 2.8), end: DVec3::new(4.0, 0.0, 2.8), profile: ProfileDef::Rectangle { width: 0.2, height: 0.4 }, roll: 0.0, role: Default::default() });
         let id = app.add_element("Beam", None, beam).unwrap();
         app.select_modelled(id);
         type_in(&mut app, ElementField::Grade, " S355 ");
@@ -1433,8 +1456,8 @@ mod tests {
         use ElementField as F;
         let shapes = [
             Shape::Point(PointDef { at: DVec3::new(1.0, 2.0, 0.5), rotation: 0.3, size: DVec3::ONE, opening: None }),
-            Shape::Linear(LinearDef { start: DVec3::ZERO, end: DVec3::new(4.0, 0.0, 0.0), profile: ProfileDef::Rectangle { width: 0.2, height: 0.4 }, roll: 0.1 }),
-            Shape::Linear(LinearDef { start: DVec3::ZERO, end: DVec3::new(4.0, 0.0, 0.0), profile: ProfileDef::Circle { diameter: 0.3 }, roll: 0.0 }),
+            Shape::Linear(LinearDef { start: DVec3::ZERO, end: DVec3::new(4.0, 0.0, 0.0), profile: ProfileDef::Rectangle { width: 0.2, height: 0.4 }, roll: 0.1, role: Default::default() }),
+            Shape::Linear(LinearDef { start: DVec3::ZERO, end: DVec3::new(4.0, 0.0, 0.0), profile: ProfileDef::Circle { diameter: 0.3 }, roll: 0.0, role: Default::default() }),
             wall_selected().modeller.model.get(ElementId(1)).unwrap().shape.clone(),
         ];
         for shape in shapes {

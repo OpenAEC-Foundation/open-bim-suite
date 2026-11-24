@@ -22,12 +22,13 @@ pub enum Snap {
     Line,
     /// Straight on from the last point clicked, along the axes.
     Ortho,
+    Polar,
     /// Whole centimetres.
     Round,
 }
 
 impl Snap {
-    pub const ALL: [Snap; 6] = [Snap::End, Snap::Middle, Snap::Grid, Snap::Line, Snap::Ortho, Snap::Round];
+    pub const ALL: [Snap; 7] = [Snap::End, Snap::Middle, Snap::Grid, Snap::Line, Snap::Ortho, Snap::Polar, Snap::Round];
 
     /// Its name on its switch.
     pub fn label(self, l: Language) -> &'static str {
@@ -37,6 +38,7 @@ impl Snap {
             Snap::Grid => l.text("Stramien", "Grid"),
             Snap::Line => l.text("Op lijn", "On line"),
             Snap::Ortho => l.text("Ortho", "Ortho"),
+            Snap::Polar => l.text("Polair", "Polar"),
             Snap::Round => l.text("Hele cm", "Whole cm"),
         }
     }
@@ -49,6 +51,7 @@ impl Snap {
             Snap::Grid => l.text("Snap op stramienlijnen: hun einden en kruisingen", "Snap to grid lines: their ends and crossings"),
             Snap::Line => l.text("Snap op het dichtstbijzijnde punt van een lijn", "Snap to the nearest point on a line"),
             Snap::Ortho => l.text("Trek recht door vanaf het vorige punt", "Go straight on from the last point"),
+            Snap::Polar => l.text("Volg een richting om de 45 graden", "Track directions at 45 degree intervals"),
             Snap::Round => l.text("Rond af op hele centimeters", "Round to whole centimetres"),
         }
     }
@@ -62,12 +65,13 @@ pub struct Snaps {
     pub grid: bool,
     pub line: bool,
     pub ortho: bool,
+    pub polar: bool,
     pub round: bool,
 }
 
 impl Default for Snaps {
     fn default() -> Self {
-        Self { end: true, middle: true, grid: true, line: true, ortho: true, round: true }
+        Self { end: true, middle: true, grid: true, line: true, ortho: true, polar: false, round: true }
     }
 }
 
@@ -79,6 +83,7 @@ impl Snaps {
             Snap::Grid => &mut self.grid,
             Snap::Line => &mut self.line,
             Snap::Ortho => &mut self.ortho,
+            Snap::Polar => &mut self.polar,
             Snap::Round => &mut self.round,
         }
     }

@@ -33,6 +33,7 @@ const PICK: f32 = 5.0;
 /// What can be picked on a sheet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SheetPick {
+    Paper,
     /// A placed view (its index on the sheet).
     View(usize),
     /// A dimension: the placed view it shows on, its index in the floor plan.
@@ -61,6 +62,8 @@ impl App {
         self.ifc.shown = false;
         self.docs.shown = false;
         if self.active_doc_sheet.as_deref() != Some(path) {
+            self.sheet_zoom = 1.;
+            self.sheet_pan = [0.; 2];
             self.pick_on_sheet(None);
         }
         self.active_doc_sheet = Some(path.to_string());
@@ -76,7 +79,11 @@ impl App {
     /// Picks a placed view or a dimension on the sheet shown; a view's cut height can then be
     /// typed.
     pub(super) fn pick_on_sheet(&mut self, pick: Option<SheetPick>) {
+        self.reference_target = None;
         self.sheet_pick = pick;
+        if pick == Some(SheetPick::Paper) {
+            self.side_tab = super::SideTab::Properties;
+        }
         self.cut_edit = match pick {
             Some(SheetPick::View(i)) => self.placed_plan(i).and_then(|plan| {
                 let cut = self.document.plan(&plan)?.cut;
@@ -108,7 +115,7 @@ impl App {
                     self.document.remove_note(&view, k);
                 }
             }
-            None => return,
+            None | Some(SheetPick::Paper) => return,
         }
         self.pick_on_sheet(None);
     }
@@ -140,8 +147,62 @@ impl App {
 
     /// Places a floor plan on a sheet, in its middle.
     pub(super) fn place_on_sheet(&mut self, sheet: &str, plan: &str) {
-        if self.document.place_plan(sheet, plan).is_some() {
-            self.cut_placed_plans(sheet);
+        if let Some(paper) = self.document.sheet(sheet).map(|s| s.paper) {
+            self.place_view_at(sheet, plan, paper.map(|side| side / 2.0));
+        }
+    }
+
+    pub(super) fn place_pile_legend(&mut self, sheet: &str, name: &str) {
+        if self.document.sheet(sheet).is_none() { return; }
+        // The legend covers the whole project, so its placed views can share one definition.
+        let existing = self.document.plans().iter()
+            .find(|v| v.drawing.as_deref() == Some("pile-schedule"))
+            .map(|v| v.path.clone());
+        let path = existing.or_else(|| {
+            let level = self.document.levels().first()?.path.clone();
+            self.add_pile_legend(&level, name)
+        });
+        let Some(path) = path else { return };
+        let Some(centre) = self.pile_legend_centre(sheet, &path) else { return };
+        if let Some(index) = self.place_view_at(sheet, &path, centre) {
+            self.pick_on_sheet(Some(SheetPick::View(index)));
+        }
+    }
+
+    /// Centre for placing a legend with 15 mm between its actual crop and the upper and right sheet edges.
+    pub(super) fn pile_legend_centre(&self, sheet: &str, legend: &str) -> Option<[f64; 2]> {
+        let paper = self.document.sheet(sheet)?.paper;
+        let plan = self.document.plan(legend)?;
+        let (lo, hi) = plan.crop?;
+        Some(std::array::from_fn(|i| paper[i] - 0.015 - (hi[i] - lo[i]) / (2.0 * plan.scale)))
+    }
+
+    /// The offset of a cropped drawing's visible centre from its placement anchor, in model metres.
+    fn crop_offset(&self, path: &str) -> [f64; 2] {
+        let Some((_, Some((lo, hi)))) = self.document.view_marks(path) else { return [0.0; 2] };
+        let bounds = self.cuts.get(path).and_then(|c| c.extent);
+        let origin = self.document.view_origin(path).or_else(|| bounds.map(|(a, b)| [(a[0] + b[0]) as f64 / 2.0, (a[1] + b[1]) as f64 / 2.0])).unwrap_or_default();
+        [(lo[0] + hi[0]) / 2.0 - origin[0], (lo[1] + hi[1]) / 2.0 - origin[1]]
+    }
+
+    fn place_view_at(&mut self, sheet: &str, path: &str, centre: [f64; 2]) -> Option<usize> {
+        let index = self.document.place_plan(sheet, path)?;
+        self.cut_view(path);
+        let delta = self.crop_offset(path);
+        let scale = self.document.sheet(sheet)?.views[index].scale;
+        self.document.put_placed(sheet, index, [centre[0] - delta[0] / scale, centre[1] - delta[1] / scale]);
+        Some(index)
+    }
+
+    /// Rescaling keeps the visible centre fixed, including crops far from their model origin.
+    pub(super) fn scale_placed_view(&mut self, sheet: &str, index: usize, scale: f64) {
+        let Some(view) = self.document.sheet(sheet).and_then(|s| s.views.get(index)) else { return };
+        let delta = self.crop_offset(&view.plan);
+        let at = view.at;
+        let old = view.scale;
+        if self.document.set_scale(sheet, index, scale) {
+            let factor = 1.0 / old - 1.0 / scale;
+            self.document.put_placed(sheet, index, [at[0] + delta[0] * factor, at[1] + delta[1] * factor]);
         }
     }
 
@@ -158,9 +219,7 @@ impl App {
     pub(super) fn drop_on_sheet(&mut self, view: &str, at: [f64; 2]) {
         self.dragging_view = None;
         let Some(sheet) = self.active_doc_sheet.clone() else { return };
-        let Some(i) = self.document.place_plan(&sheet, view) else { return };
-        self.document.move_placed(&sheet, i, at);
-        self.cut_placed_plans(&sheet);
+        let Some(i) = self.place_view_at(&sheet, view, at) else { return };
         self.pick_on_sheet(Some(SheetPick::View(i)));
     }
 
@@ -190,7 +249,13 @@ impl App {
     pub(super) fn cut_job(&mut self, path: &str) -> Option<super::precut::CutJob> {
         use super::precut::{CutJob, CutKind};
         let model = self.model.clone()?;
-        let layers = self.view_visibility(path);
+        let mut layers = self.view_visibility(path);
+        // Pile heads are projected independently of the cut depth on these plans.
+        if self.document.plan(path).is_some_and(|plan| plan.pile_symbols && plan.kind.structural()) {
+            for (shown, layer) in layers.iter_mut().zip(&model.layers) {
+                if layer.name == "IfcPile" { *shown = false; }
+            }
+        }
         // the elements hidden in the view, by the unit of a triangle's first vertex
         let mut units = self.document.view_hidden(path).map(|h| self.hidden_units(h)).unwrap_or_default();
         // a structural plan leaves out what carries nothing
@@ -243,12 +308,31 @@ impl App {
             let (low, high) = self.document.plan_range(view)?;
             CutKind::Plan { kind: view.kind, low, high }
         };
+        let mut axes = Vec::new();
+        if let (Some(source), Some(index)) = (self.modeller.shown, self.explode_index.as_ref()) {
+            units.resize(index.len().max(units.len()), false);
+            for (layer_index, layer) in model.layers.iter().enumerate().filter(|(i, l)| layers[*i] && l.name.ends_with("IfcReinforcingBar")) {
+                for &(id, first, _) in &layer.elements {
+                    let Some(&vertex) = layer.indices.get(first as usize) else { continue };
+                    let unit = index.unit(layer_index, vertex);
+                    if units[unit] { continue; }
+                    let key = model.keys.get(&id);
+                    let slot = key.map_or(0, |k| k.model as usize);
+                    if self.models.get(slot).is_none_or(|entry| entry.model.id != source) { continue; }
+                    let Some(element) = self.modeller.model.get(bim_core::ElementId(key.map_or(id, |k| k.source))) else { continue };
+                    let bim_core::Shape::Linear(bar) = element.shape_in_project(&self.modeller.model.grid) else { continue };
+                    let shift = model.origins.get(slot).map_or(glam::DVec3::ZERO, |o| o.shift);
+                    axes.push([bar.start + shift, bar.end + shift]);
+                    units[unit] = true;
+                }
+            }
+        }
         let scale = self.document.view_scale(path).unwrap_or(crate::document::SHEET_SCALE);
         let signs = match kind {
             CutKind::Section { from, to, depth } => self.rebar_signs(from, to, depth),
             CutKind::Plan { .. } => Vec::new(),
         };
-        Some(CutJob { model, layers, units, halftone, index: self.explode_index.clone(), kind, scale, looks, signs })
+        Some(CutJob { axes, model, layers, units, halftone, index: self.explode_index.clone(), kind, scale, looks, signs })
     }
 
     /// The drawings of views as the sheet layout takes them (`crate::sheet_layout`): the crop, or
@@ -262,7 +346,7 @@ impl App {
             .iter()
             .map(|view| {
                 let extent = self.cuts.get(view).and_then(|c| c.extent).map(|(lo, hi)| (lo.map(f64::from), hi.map(f64::from)));
-                let middle = extent.map_or([0.0, 0.0], |(lo, hi)| [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0]);
+                let middle = self.document.view_origin(view).or_else(|| extent.map(|(lo, hi)| [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0])).unwrap_or_default();
                 let marks = self.document.view_marks(view);
                 let (mut lo, mut hi) = match (marks.and_then(|(_, crop)| crop), extent) {
                     (Some(crop), _) => crop,
@@ -280,6 +364,12 @@ impl App {
             .collect()
     }
 
+    fn placement_area(&self, paper: [f64; 2]) -> ([f64; 2], [f64; 2]) {
+        let (mut lo, hi) = sheet_layout::area(paper);
+        lo[1] = lo[1].max(crate::title_block::reserved_bottom(paper, &self.house));
+        (lo, hi)
+    }
+
     /// Lays the views of a sheet out: one scale for all, the largest drawing at which they fit,
     /// in rows, centred on the paper.
     pub(super) fn arrange_sheet(&mut self, path: &str) {
@@ -290,10 +380,10 @@ impl App {
             return;
         }
         let items = self.layout_items(&views);
-        let (scale, places) = sheet_layout::arrange(&items, sheet_layout::area(paper), &SCALES);
+        let (scale, places) = sheet_layout::arrange(&items, self.placement_area(paper), &SCALES);
         for (i, at) in places.into_iter().enumerate() {
             self.document.set_scale(path, i, scale);
-            self.document.move_placed(path, i, at);
+            self.document.put_placed(path, i, at);
         }
     }
 
@@ -320,14 +410,14 @@ impl App {
                 continue;
             }
             let items = self.layout_items(&views);
-            let (scale, sheets) = sheet_layout::fill(&items, sheet_layout::area(A3_LANDSCAPE), &SCALES);
+            let (scale, sheets) = sheet_layout::fill(&items, self.placement_area(A3_LANDSCAPE), &SCALES);
             for group in sheets {
                 let sheet = self.document.add_sheet(name);
                 first.get_or_insert_with(|| sheet.clone());
                 for (k, at) in group {
                     if let Some(i) = self.document.place_plan(&sheet, &views[k]) {
                         self.document.set_scale(&sheet, i, scale);
-                        self.document.move_placed(&sheet, i, at);
+                        self.document.put_placed(&sheet, i, at);
                     }
                 }
             }
@@ -383,29 +473,43 @@ impl App {
                     name: self.document.view_name(&v.plan).unwrap_or_default().to_string(),
                     plan: Arc::from(v.plan.as_str()),
                     cut: self.cuts.get(&v.plan).cloned(),
+                    origin: self.document.view_origin(&v.plan),
+                    fills: crate::drawing2d::view_polygons(&self.document, &v.plan),
+                    image: self.document.plan(&v.plan).and_then(|p| p.orthophoto.as_ref()).and_then(|p| p.image.placed(marks.and_then(|(_, c)| c), |q| q)),
                     dimensions: marks.map_or(Vec::new(), |(d, _)| d.to_vec()),
                     notes: self.document.view_notes(&v.plan).unwrap_or(&[]).iter().chain(self.document.view_tags(&v.plan)).cloned().collect(),
+                    pens: self.document.detail_pens(&v.plan),
                     lines: self.document.view_lines(&v.plan).iter().chain(self.document.view_symbols(&v.plan)).copied().collect(),
                     crop: marks.and_then(|(_, c)| c),
                     datums: self.view_datums(&v.plan),
+                    frame: self.document.view_has_sheet_caption(&v.plan),
+                    caption: self.document.placed_view_has_title(v),
                     is_plan: self.document.plan(&v.plan).is_some(),
+                    sections: crate::drawing2d::plan_sections(&self.document, &v.plan),
                     rules: self.view_rules(&v.plan),
                 }
             })
             .collect();
-        let sections = self.document.sections().iter().map(|s| (s.mark(), s.from, s.to)).collect();
         let carrying = self.dragging_view.as_ref().and_then(|v| {
             let name = self.document.view_name(v)?.to_string();
             Some((v.clone(), name, self.cuts.get(&**v).and_then(|c| c.extent)))
         });
         Some(PaperDrawing {
+            zoom: self.sheet_zoom,
+            pan: self.sheet_pan,
+            block: crate::title_block::title_block(&self.document, sheet, &self.house),
             sheet: sheet.clone(),
+            styles: self.document.dimension_styles().to_vec(),
             placed,
             palette: p,
             key: Arc::from(path.as_str()),
             tool: self.dimension_tool,
+            reference_pick: match (self.sheet_pick, &self.reference_target) {
+                (Some(SheetPick::Dimension(i, k)), Some((path, index)))
+                    if k == *index && sheet.views.get(i).is_some_and(|v| v.plan == path.as_ref()) => Some((i, k)),
+                _ => None,
+            },
             section_tool: self.section_tool,
-            sections,
             word: l.text("Doorsnede", "Section"),
             pick: self.sheet_pick,
             empty: l.text("niets gesneden", "nothing cut").to_string(),
@@ -419,8 +523,30 @@ impl App {
     pub(super) fn doc_sheet_workspace(&self, p: Palette, l: Language) -> Option<Element<'_, Message>> {
         let path = self.active_doc_sheet.as_ref()?;
         self.document.sheet(path)?;
-        let drawing = self.paper_drawing(p, l)?;
-        Some(canvas_widget(drawing).width(Fill).height(Fill).into())
+        let mut drawing = self.paper_drawing(p, l)?;
+        let mut images: Vec<_> = drawing.placed.iter().enumerate().filter_map(|(i, placed)| {
+            placed.image.as_ref()?.placed(None, |q| drawing.to_paper(i, q))
+        }).collect();
+        if drawing.sheet.background.is_some() {
+            if let Some(background) = drawing.block.logo.take() { images.insert(0, background); }
+        }
+        let fit_button = || container(button(text(l.text("Passend", "Fit sheet")).size(11)).padding([3, 7]).on_press(Message::Fit))
+            .padding(8).align_right(Fill).align_top(Fill);
+        if images.is_empty() {
+            return Some(iced::widget::stack![canvas_widget(drawing).width(Fill).height(Fill), fit_button()].into());
+        }
+        let paper = drawing.sheet.paper;
+        let (zoom, pan) = (drawing.zoom, drawing.pan);
+        let background = crate::raster::Backdrop(move |frame: &mut Frame, bounds: Rectangle| {
+            let fit = Fit::of(paper, bounds.size()).navigated(bounds.size(), zoom, pan);
+            let at = fit.point([0.0, paper[1]]);
+            let end = fit.point([paper[0], 0.0]);
+            let size = Size::new(end.x - at.x, end.y - at.y);
+            frame.fill_rectangle(Point::new(at.x + 3.0, at.y + 3.0), size, Color { a: 0.12, ..Color::BLACK });
+            frame.fill_rectangle(at, size, if p.dark { Color::from_rgb(0.16, 0.16, 0.18) } else { Color::WHITE });
+            for image in &images { image.draw(frame, |q| Some(fit.point(q))); }
+        });
+        Some(iced::widget::stack![canvas_widget(background).width(Fill).height(Fill), canvas_widget(drawing).width(Fill).height(Fill), fit_button()].into())
     }
 
     /// The Sheet section of the right pane while a sheet is shown: its paper, its arranging, its
@@ -428,6 +554,7 @@ impl App {
     /// that (a view's scale and crop, a text's wording, a dimension's side).
     pub(super) fn sheet_properties(&self, p: Palette, l: Language) -> Option<Element<'_, Message>> {
         let path = self.active_doc_sheet.as_ref()?;
+        if !self.annotates { return Some(self.export_control(p, l)); }
         let sheet = self.document.sheet(path)?;
         let key: Arc<str> = Arc::from(path.as_str());
         let small = |label: String, active: bool, message: Message| -> Element<'static, Message> {
@@ -464,6 +591,11 @@ impl App {
                 scales.push(view.scale);
             }
             rows = rows.push(choices(scales.iter().map(|&scale| small(format!("1:{scale}"), view.scale == scale, Message::SetScale(key.clone(), i, scale))).collect()));
+            rows = rows.push(label(l.text("Viewporttitel", "Viewport title")));
+            let titles = [(None, l.text("Standaard", "Default")), (Some(true), l.text("Aan", "On")), (Some(false), l.text("Uit", "Off"))];
+            rows = rows.push(choices(titles.into_iter().map(|(setting, word)| {
+                small(word.to_string(), view.show_title == setting, Message::SetPlacedTitle(key.clone(), i, setting))
+            }).collect()));
             if let Some((_, typed)) = &self.cut_edit {
                 rows = rows.push(
                     row![
@@ -487,12 +619,37 @@ impl App {
         } else if let Some(SheetPick::Note(..)) = self.sheet_pick {
             rows = rows.push(iced::widget::text_input(l.text("Tekst", "Text"), &self.note_text).on_input(Message::NoteText).size(12).padding([3, 6]));
             rows = rows.push(small(l.text("Tekst verwijderen", "Remove text").to_string(), false, Message::RemovePicked));
-        } else if let Some(SheetPick::Dimension(..)) = self.sheet_pick {
+        } else if let Some(SheetPick::Dimension(i,k)) = self.sheet_pick {
+            if let Some(v) = sheet.views.get(i) { rows = rows.push(self.reference_controls(&v.plan, k, l)); }
             rows = rows.push(choices(vec![
                 small(l.text("Andere kant", "Other side").to_string(), false, Message::FlipDimension),
                 small(l.text("Maat verwijderen", "Remove dimension").to_string(), false, Message::RemovePicked),
             ]));
         } else {
+            use bim_library::house::Field;
+            for (heading, fields) in [
+                (l.text("Projectgegevens", "Project information"), &[Field::Project, Field::ProjectNumber, Field::Client][..]),
+                (l.text("Bladgegevens", "Sheet information"), &[Field::Title, Field::Number, Field::Revision, Field::Date, Field::Phase, Field::Status, Field::DrawnBy, Field::CheckedBy][..]),
+            ] {
+                rows = rows.push(text(heading).size(13).font(FONT_BOLD));
+                for &field in fields {
+                    let (nl, en) = field.label()?;
+                    let path = key.clone();
+                    let input = iced::widget::text_input("", self.document.title_value(sheet, field))
+                        .on_input(move |value| Message::SheetField(path.clone(), field, value)).size(12).padding([3, 6]);
+                    rows = rows.push(row![container(label(l.text(nl, en))).width(92), input].align_y(Center).spacing(4));
+                }
+            }
+            rows = rows.push(row![container(label(l.text("Projectadres", "Project address"))).width(92),
+                    iced::widget::text_input("", &self.document.project_address).on_input(Message::ProjectAddress).size(12).padding([3,6])].align_y(Center).spacing(4));
+                rows = rows.push(label(l.text("Revisies", "Revisions")));
+                for (i, revision) in sheet.revisions.iter().enumerate() {
+                    let (a,b) = (key.clone(),key.clone());
+                    rows = rows.push(row![text(format!("{}.", (b'A'+i as u8) as char)).size(12),
+                        iced::widget::text_input(l.text("Datum", "Date"), &revision.date).on_input(move |v| Message::SheetRevision(a.clone(),i,true,v)).width(76).size(12),
+                        iced::widget::text_input(l.text("Wijziging", "Change"), &revision.description).on_input(move |v| Message::SheetRevision(b.clone(),i,false,v)).size(12)].align_y(Center).spacing(4));
+                }
+            }
             rows = rows.push(label(l.text("Papier", "Paper")));
             rows = rows.push(choices(PAPERS.iter().map(|&(name, size)| small(name.to_string(), sheet.paper == size, Message::SetPaper(key.clone(), size))).collect()));
             if !sheet.views.is_empty() {
@@ -500,7 +657,13 @@ impl App {
             }
             rows = rows.push(self.export_control(p, l));
             rows = rows.push(label(l.text("Plaats op dit blad:", "Place on this sheet:")));
+            let has_legend = sheet.views.iter().any(|v| self.document.view_drawing(&v.plan) == Some("pile-schedule"));
+            if !has_legend && !self.document.levels().is_empty() {
+                let name = l.text("Paallegenda", "Pile legend");
+                rows = rows.push(small(name.into(), false, Message::PlacePileLegend(key.clone(), name)));
+            }
             if self.document.plans().is_empty() {
+            if self.house.key.eq_ignore_ascii_case("3bm") {
                 rows = rows.push(text(l.text("maak eerst een plattegrond in Weergaven", "make a floor plan in Views first")).size(12).color(p.text_muted));
             }
             let views = self.document.plans().iter().map(|v| (&v.name, &v.path)).chain(self.document.sections().iter().map(|s| (&s.name, &s.path)));
@@ -521,28 +684,34 @@ impl App {
 /// A floor plan on the sheet as the canvas draws it.
 #[derive(Debug, Clone, Default)]
 struct Placed {
+    fills: Vec<crate::drawing2d::Polygon2d>,
+    image: Option<crate::raster::PlacedImage>,
     name: String,
     /// The floor plan's path.
     plan: Arc<str>,
     cut: Option<Arc<Cut>>,
+    origin: Option<[f64; 2]>,
     dimensions: Vec<Dimension>,
     notes: Vec<crate::document::Note>,
     /// The lines of the view's tags: their shapes and leaders.
     lines: Vec<[[f64; 2]; 2]>,
+    pens: Vec<(std::ops::Range<usize>, [u8; 3], f64)>,
     crop: Option<([f64; 2], [f64; 2])>,
     /// The grid lines and levels of the view, as its own tab shows them.
     datums: Vec<crate::drawing2d::Datum2>,
     /// A floor plan (sections are drawn on these), not a section or elevation.
     is_plan: bool,
+    frame: bool,
+    caption: bool,
+    sections: Vec<(String, [f64; 2], [f64; 2])>,
     /// How its kind of drawing draws it: the widths of its lines, and whether what is cut is
     /// hatched.
     rules: crate::drawing2d::Rules,
 }
 
-/// A line's width on the sheet's canvas (pixels) for its width on paper (millimetres): 0.5 mm as
-/// 1.2 pixels, so the weights of a drawing can be told apart at any zoom.
-fn on_screen(millimetres: f64) -> f32 {
-    (millimetres as f32 * 2.4).max(0.4)
+/// Converts a paper line weight in millimetres to logical canvas pixels.
+fn on_screen(scale: f64, millimetres: f64) -> f32 {
+    (millimetres * scale / 1000.0) as f32
 }
 
 /// A side of a crop: left, right, bottom, top.
@@ -555,6 +724,10 @@ enum Side {
 }
 
 struct PaperDrawing {
+    zoom: f64,
+    pan: [f64; 2],
+    block: crate::title_block::TitleBlock,
+    styles: Vec<crate::document::DimensionStyle>,
     sheet: Sheet,
     /// Per placed view, in the order of the sheet's views.
     placed: Vec<Placed>,
@@ -563,10 +736,9 @@ struct PaperDrawing {
     key: Arc<str>,
     /// The dimension tool is on: clicks measure instead of dragging.
     tool: bool,
+    reference_pick: Option<(usize, usize)>,
     /// The section tool is on: two clicks on a floor plan draw a section.
     section_tool: bool,
-    /// The sections, drawn on the floor plans: name, line (plan).
-    sections: Vec<(String, [f64; 2], [f64; 2])>,
     /// What a new section is called before its letter.
     word: &'static str,
     /// What is picked.
@@ -594,6 +766,14 @@ impl Fit {
         Fit { scale, left, top }
     }
 
+    fn navigated(mut self, size: Size, zoom: f64, pan: [f64; 2]) -> Self {
+        let (cx,cy) = (f64::from(size.width)/2., f64::from(size.height)/2.);
+        self.left = cx + (self.left-cx)*zoom + pan[0];
+        self.top = cy + (self.top-cy)*zoom + pan[1];
+        self.scale *= zoom;
+        self
+    }
+
     fn point(&self, p: [f64; 2]) -> Point {
         Point::new((self.left + p[0] * self.scale) as f32, (self.top - p[1] * self.scale) as f32)
     }
@@ -614,16 +794,16 @@ impl PaperDrawing {
             return (self.to_paper(i, lo), self.to_paper(i, hi), middle);
         }
         let extent = self.placed.get(i).and_then(|p| p.cut.as_ref()?.extent);
-        let half = match extent {
-            Some((lo, hi)) => [(hi[0] - lo[0]) as f64 / 2.0 / view.scale + FRAME, (hi[1] - lo[1]) as f64 / 2.0 / view.scale + FRAME],
-            None => [0.02, 0.015],
-        };
-        ([view.at[0] - half[0], view.at[1] - half[1]], [view.at[0] + half[0], view.at[1] + half[1]], middle)
+        if let Some((lo, hi)) = extent {
+            return (self.to_paper(i, lo.map(f64::from)).map(|x| x - FRAME), self.to_paper(i, hi.map(f64::from)).map(|x| x + FRAME), middle);
+        }
+        ([view.at[0] - 0.02, view.at[1] - 0.015], [view.at[0] + 0.02, view.at[1] + 0.015], middle)
     }
 
     /// The model point that placed view `i`'s position on the paper stands for: the middle of
     /// its whole cut, so cropping never moves what is drawn.
     fn middle(&self, i: usize) -> [f64; 2] {
+        if let Some(origin) = self.placed.get(i).and_then(|p| p.origin) { return origin; }
         match self.placed.get(i).and_then(|p| p.cut.as_ref()?.extent) {
             Some((lo, hi)) => [(lo[0] + hi[0]) as f64 / 2.0, (lo[1] + hi[1]) as f64 / 2.0],
             None => [0.0, 0.0],
@@ -634,14 +814,14 @@ impl PaperDrawing {
     fn to_paper(&self, i: usize, q: [f64; 2]) -> [f64; 2] {
         let view = &self.sheet.views[i];
         let middle = self.middle(i);
-        [view.at[0] + (q[0] - middle[0]) / view.scale, view.at[1] + (q[1] - middle[1]) / view.scale]
+        view.to_paper(middle, q)
     }
 
     /// A paper point in the model of placed view `i`.
     fn to_model(&self, i: usize, at: [f64; 2]) -> [f64; 2] {
         let view = &self.sheet.views[i];
         let middle = self.middle(i);
-        [middle[0] + (at[0] - view.at[0]) * view.scale, middle[1] + (at[1] - view.at[1]) * view.scale]
+        view.to_model(middle, at)
     }
 
     /// The crop handles of placed view `i`: the middles of its frame's sides (paper).
@@ -688,10 +868,10 @@ impl PaperDrawing {
     /// The paper ends of the dimension line of dimension `k` on placed view `i`.
     fn dimension_line(&self, i: usize, k: usize) -> Option<([f64; 2], [f64; 2])> {
         let d = self.placed.get(i)?.dimensions.get(k)?;
-        let (from, to) = (self.to_paper(i, d.from), self.to_paper(i, d.to));
+        let [from,to] = d.measured_ends().map(|q| self.to_paper(i,q));
         let run = (to[0] - from[0]).hypot(to[1] - from[1]);
         (run > 0.0).then(|| {
-            let n = [-(to[1] - from[1]) / run * DIMENSION_OFFSET, (to[0] - from[0]) / run * DIMENSION_OFFSET];
+            let n = [-(to[1] - from[1]) / run * d.paper_offset(), (to[0] - from[0]) / run * d.paper_offset()];
             ([from[0] + n[0], from[1] + n[1]], [to[0] + n[0], to[1] + n[1]])
         })
     }
@@ -716,18 +896,23 @@ impl PaperDrawing {
         self.tool || self.section_tool || self.noting.is_some()
     }
 
-    /// The size of a text on the paper (logical pixels): 3.5 mm, readable at least.
-    fn note_size(fit: &Fit) -> f32 {
-        ((0.0035 * fit.scale) as f32).max(9.0)
+    /// The text's paper capitals in canvas font pixels.
+    fn note_size(fit: &Fit, note: &crate::document::Note) -> f32 {
+        (note.size * fit.scale) as f32
     }
 
     /// Where text `k` of placed view `i` is on the canvas.
     fn note_box(&self, fit: &Fit, i: usize, k: usize) -> Option<Rectangle> {
         let note = self.placed.get(i)?.notes.get(k)?;
-        let size = Self::note_size(fit);
+        let size = Self::note_size(fit, note);
         let at = fit.point(self.to_paper(i, note.at));
-        let width = note.text.chars().count() as f32 * size * 0.56;
-        Some(Rectangle::new(Point::new(at.x, at.y - size * 1.2), Size::new(width, size * 1.2)))
+        let width = note.paper_face().measure(&note.text, size);
+        let x = match note.align { crate::document::Align::Left => 0., crate::document::Align::Center => -width/2., crate::document::Align::Right => -width };
+        let (sin, cos) = (note.angle as f32).sin_cos();
+        let points = [[x,0.], [x+width,0.], [x,-size], [x+width,-size]].map(|[x,y]| Point::new(at.x+x*cos+y*sin, at.y-x*sin+y*cos));
+        let (mut lo, mut hi) = (points[0], points[0]);
+        for q in points { lo.x=lo.x.min(q.x); lo.y=lo.y.min(q.y); hi.x=hi.x.max(q.x); hi.y=hi.y.max(q.y); }
+        Some(Rectangle::new(lo, Size::new(hi.x-lo.x, hi.y-lo.y)))
     }
 
     /// The text under `pointer`, the topmost view first.
@@ -751,6 +936,9 @@ impl PaperDrawing {
 /// the point the pointer snaps to now.
 #[derive(Default)]
 struct PaperState {
+    last_view_click: Option<(Arc<str>, usize, iced::advanced::mouse::Click)>,
+    panning: Option<(Point, [f64; 2])>,
+    note_drag: Option<(usize, usize, [f64; 2])>,
     hover: Option<usize>,
     drag: Option<(usize, [f64; 2])>,
     first: Option<(usize, [f64; 2])>,
@@ -765,7 +953,7 @@ impl canvas::Program<Message> for PaperDrawing {
     type State = PaperState;
 
     fn update(&self, state: &mut PaperState, event: &iced::Event, bounds: Rectangle, cursor: mouse::Cursor) -> Option<canvas::Action<Message>> {
-        let fit = Fit::of(self.sheet.paper, bounds.size());
+        let fit = Fit::of(self.sheet.paper, bounds.size()).navigated(bounds.size(), self.zoom, self.pan);
         if !self.busy() {
             state.first = None;
             state.aim = None;
@@ -775,6 +963,29 @@ impl canvas::Program<Message> for PaperDrawing {
             state.carry = None;
         }
         match event {
+            iced::Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
+                let at = cursor.position_in(bounds)?;
+                let steps = match delta { mouse::ScrollDelta::Lines { y, .. } => *y, mouse::ScrollDelta::Pixels { y, .. } => *y/50. };
+                let zoom = (self.zoom * 1.2_f64.powf(f64::from(steps))).clamp(0.2, 400.);
+                let anchor = fit.paper(at);
+                let next = Fit::of(self.sheet.paper, bounds.size()).navigated(bounds.size(), zoom, [0.;2]).point(anchor);
+                Some(canvas::Action::publish(Message::NavigateSheet { zoom, pan: [f64::from(at.x-next.x), f64::from(at.y-next.y)] }).and_capture())
+            }
+            iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Middle)) => {
+                state.panning = Some((cursor.position_in(bounds)?, self.pan));
+                Some(canvas::Action::request_redraw().and_capture())
+            }
+            iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Middle)) => {
+                state.panning.take().map(|_| canvas::Action::request_redraw().and_capture())
+            }
+            iced::Event::Mouse(mouse::Event::CursorMoved { .. }) if state.panning.is_some() => {
+                let (start, original) = state.panning?;
+                let at = cursor.position_from(bounds.position())?;
+                Some(canvas::Action::publish(Message::NavigateSheet { zoom: self.zoom, pan: [original[0]+f64::from(at.x-start.x), original[1]+f64::from(at.y-start.y)] }).and_capture())
+            }
+            iced::Event::Keyboard(keyboard::Event::KeyPressed { key: keyboard::Key::Character(c), .. }) if c.eq_ignore_ascii_case("f") && cursor.is_over(bounds) => {
+                Some(canvas::Action::publish(Message::Fit).and_capture())
+            }
             iced::Event::Mouse(mouse::Event::CursorMoved { .. }) if self.carrying.is_some() => {
                 state.carry = cursor.position_in(bounds);
                 Some(canvas::Action::request_redraw())
@@ -786,6 +997,11 @@ impl canvas::Program<Message> for PaperDrawing {
             }
             iced::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
                 let at = cursor.position_in(bounds).map(|p| fit.paper(p));
+                if let (Some((i, k, grip)), Some(at)) = (state.note_drag, at) {
+                    let q = self.to_model(i, at);
+                    let target = [q[0] + grip[0], q[1] + grip[1]];
+                    return Some(canvas::Action::publish(Message::MoveNote(self.placed[i].plan.clone(), k, target)).and_capture());
+                }
                 if let (Some((i, side)), Some(at)) = (state.crop, at) {
                     let plan = self.placed.get(i)?.plan.clone();
                     return Some(canvas::Action::publish(Message::CropPlan(plan, Some(self.crop_to(i, side, at)))).and_capture());
@@ -809,6 +1025,10 @@ impl canvas::Program<Message> for PaperDrawing {
             }
             iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 let at = fit.paper(cursor.position_in(bounds)?);
+                if let Some((i, k)) = self.reference_pick {
+                    if self.view_at(at) != Some(i) { return Some(canvas::Action::request_redraw().and_capture()); }
+                    return Some(canvas::Action::publish(Message::InsertDimensionReference(self.placed[i].plan.clone(), k, self.snap(i, at, &fit))).and_capture());
+                }
                 if let Some(wording) = &self.noting {
                     let i = self.view_at(at)?;
                     let view = self.placed.get(i)?.plan.clone();
@@ -839,24 +1059,42 @@ impl canvas::Program<Message> for PaperDrawing {
                     state.crop = Some(handle);
                     return Some(canvas::Action::request_redraw().and_capture());
                 }
+                let previous = state.last_view_click.take();
+                if let Some(i) = self.view_at(at) {
+                    let last = previous.filter(|(sheet, index, _)| sheet == &self.key && *index == i);
+                    let click = iced::advanced::mouse::Click::new(cursor.position_in(bounds)?, mouse::Button::Left, last.map(|(_, _, click)| click));
+                    if click.kind() == iced::advanced::mouse::click::Kind::Double {
+                        state.drag = None;
+                        state.note_drag = None;
+                        return Some(canvas::Action::publish(Message::OpenPlan(self.placed[i].plan.clone())).and_capture());
+                    }
+                    state.last_view_click = Some((self.key.clone(), i, click));
+                }
                 if let Some((i, k)) = self.note_at(&fit, fit.point(at)) {
+                    let q = self.to_model(i, at);
+                    let pos = self.placed[i].notes[k].at;
+                    state.note_drag = Some((i, k, [pos[0] - q[0], pos[1] - q[1]]));
                     return Some(canvas::Action::publish(Message::PickOnSheet(Some(SheetPick::Note(i, k)))).and_capture());
                 }
                 if let Some((i, k)) = self.dimension_at(&fit, fit.point(at)) {
                     return Some(canvas::Action::publish(Message::PickOnSheet(Some(SheetPick::Dimension(i, k)))).and_capture());
                 }
                 let Some(i) = self.view_at(at) else {
-                    return self.pick.is_some().then(|| canvas::Action::publish(Message::PickOnSheet(None)));
+                    let inside = at[0] >= 0. && at[1] >= 0. && at[0] <= self.sheet.paper[0] && at[1] <= self.sheet.paper[1];
+                    let pick = inside.then_some(SheetPick::Paper);
+                    return (pick != self.pick).then(|| canvas::Action::publish(Message::PickOnSheet(pick)).and_capture());
                 };
                 let middle = self.sheet.views[i].at;
                 state.drag = Some((i, [middle[0] - at[0], middle[1] - at[1]]));
                 Some(canvas::Action::publish(Message::PickOnSheet(Some(SheetPick::View(i)))).and_capture())
             }
             iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                state.note_drag = None;
                 let crop = state.crop.take();
                 state.drag.take().or(crop.map(|(i, _)| (i, [0.0; 2]))).map(|_| canvas::Action::request_redraw())
             }
             iced::Event::Keyboard(keyboard::Event::KeyPressed { key: keyboard::Key::Named(keyboard::key::Named::Escape), .. }) => {
+                if self.reference_pick.is_some() { return Some(canvas::Action::publish(Message::ArmDimensionReference(None)).and_capture()); }
                 if state.first.take().is_some() {
                     return Some(canvas::Action::request_redraw().and_capture());
                 }
@@ -874,7 +1112,7 @@ impl canvas::Program<Message> for PaperDrawing {
 
     fn draw(&self, state: &PaperState, renderer: &iced::Renderer, _theme: &iced::Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<canvas::Geometry> {
         let p = self.palette;
-        let fit = Fit::of(self.sheet.paper, bounds.size());
+        let fit = Fit::of(self.sheet.paper, bounds.size()).navigated(bounds.size(), self.zoom, self.pan);
         let mut frame = Frame::new(renderer, bounds.size());
         let label = |frame: &mut Frame, content: String, position: Point, size: f32, color: Color, align: alignment::Horizontal| {
             frame.fill_text(canvas::Text {
@@ -900,13 +1138,58 @@ impl canvas::Program<Message> for PaperDrawing {
         // the paper and its frame (10 mm, 20 mm on the binding side), the title at the lower right
         let [w, h] = self.sheet.paper;
         let (at, size) = rect([0.0, 0.0], [w, h]);
-        frame.fill_rectangle(Point::new(at.x + 3.0, at.y + 3.0), size, Color { a: 0.12, ..Color::BLACK });
-        frame.fill_rectangle(at, size, paper);
-        frame.stroke(&Path::rectangle(at, size), Stroke::default().with_color(faint).with_width(1.0));
+        if self.sheet.background.is_none() && self.placed.iter().all(|v| v.image.is_none()) {
+            frame.fill_rectangle(Point::new(at.x + 3.0, at.y + 3.0), size, Color { a: 0.12, ..Color::BLACK });
+            frame.fill_rectangle(at, size, paper);
+        }
+        let border = if self.pick == Some(SheetPick::Paper) { p.accent } else { faint };
+        frame.stroke(&Path::rectangle(at, size), Stroke::default().with_color(border).with_width(1.0));
         let (inner, inner_size) = rect([0.02, 0.01], [w - 0.01, h - 0.01]);
-        frame.stroke(&Path::rectangle(inner, inner_size), Stroke::default().with_color(ink).with_width(1.4));
-        let corner = Point::new(inner.x + inner_size.width - 8.0, inner.y + inner_size.height - 8.0);
-        label(&mut frame, format!("{}  {}", self.sheet.number, self.sheet.name), corner, 14.0, ink, alignment::Horizontal::Right);
+        if !self.block.owns_frame {
+            frame.stroke(&Path::rectangle(inner, inner_size), Stroke::default().with_color(ink).with_width(1.4));
+        }
+        if self.sheet.background.is_none() && !self.block.polygons.is_empty() {
+            let [a,b] = self.block.bounds;
+            let (at, size) = rect(a,b);
+            frame.fill_rectangle(at,size,Color::WHITE);
+        }
+        if let Some(logo) = &self.block.logo {
+            logo.draw(&mut frame, |point| Some(fit.point(point)));
+        }
+        for polygon in &self.block.polygons {
+            let path = Path::new(|builder| {
+                if let Some((first, rest)) = polygon.points.split_first() {
+                    builder.move_to(fit.point(*first));
+                    for &p in rest { builder.line_to(fit.point(p)); }
+                    builder.close();
+                }
+            });
+            let [r,g,b] = polygon.color;
+            frame.fill(&path, Color::from_rgb8(r,g,b));
+        }
+        for line in &self.block.lines {
+            let color = line.color.map_or(ink, |[r,g,b]| Color::from_rgb8(r,g,b));
+            frame.stroke(&Path::line(fit.point(line.a), fit.point(line.b)), Stroke::default().with_color(color).with_width((line.width * fit.scale / 1000.0).max(0.25) as f32));
+        }
+        for t in &self.block.texts {
+            let align = match t.align {
+                crate::drawing2d::Align::Left => alignment::Horizontal::Left,
+                crate::drawing2d::Align::Right => alignment::Horizontal::Right,
+                crate::drawing2d::Align::Center => alignment::Horizontal::Center,
+            };
+            let font = t.family.as_deref().map_or_else(|| if t.bold { FONT_BOLD } else { openaec_ui::fonts::MEDIUM }, |name| {
+                let mut face = crate::typeface::Face::of(name);
+                face.bold = t.bold;
+                face.font()
+            });
+            let size = t.height * fit.scale / if t.family.is_some() {1.0} else {0.72};
+            frame.fill_text(canvas::Text {
+                content: t.text.clone(), position: fit.point(t.at), size: iced::Pixels(size as f32),
+                font, align_x: align.into(),
+                align_y: alignment::Vertical::Bottom, color: t.color.map_or(ink, |[r,g,b]| Color::from_rgb8(r,g,b)),
+                ..canvas::Text::default()
+            });
+        }
 
         // the placed floor plans: their cut lines and dimensions, a frame when hovered or
         // dragged, the title under it
@@ -920,6 +1203,18 @@ impl canvas::Program<Message> for PaperDrawing {
                 frame.stroke(&Path::rectangle(at, size), Stroke::default().with_color(p.accent).with_width(1.5));
             }
             let placed = self.placed.get(i).cloned().unwrap_or_default();
+            for fill in &placed.fills {
+                let path = Path::new(|p| {
+                    let mut points = fill.points.iter().map(|&q| fit.point(self.to_paper(i, q)));
+                    if let Some(first) = points.next() {
+                        p.move_to(first);
+                        for point in points { p.line_to(point); }
+                        p.close();
+                    }
+                });
+                let [r, g, b] = fill.color;
+                frame.fill(&path, Color::from_rgb8(r, g, b));
+            }
             match placed.cut.filter(|c| crate::drawing::drawn(c).next().is_some()) {
                 Some(cut) => {
                     // what is seen below the cut, thin and grey, then the cut itself
@@ -942,14 +1237,14 @@ impl canvas::Program<Message> for PaperDrawing {
                             b.line_to(fit.point(self.to_paper(i, z)));
                         }
                     });
-                    frame.stroke(&below, Stroke::default().with_color(Color { a: 0.55, ..ink }).with_width(on_screen(placed.rules.beyond)));
+                    frame.stroke(&below, Stroke::default().with_color(Color { a: 0.55, ..ink }).with_width(on_screen(fit.scale, placed.rules.beyond)));
                     let lines = Path::new(|b| {
                         for (a, z) in cut.segments.iter().filter_map(|[a, z]| piece(a, z)) {
                             b.move_to(fit.point(self.to_paper(i, a)));
                             b.line_to(fit.point(self.to_paper(i, z)));
                         }
                     });
-                    frame.stroke(&lines, Stroke::default().with_color(ink).with_width(on_screen(placed.rules.cut)));
+                    frame.stroke(&lines, Stroke::default().with_color(ink).with_width(on_screen(fit.scale, placed.rules.cut)));
                     // the lines the view's filters give a pen of their own
                     for inked in &cut.inked {
                         let lines = Path::new(|b| {
@@ -958,55 +1253,57 @@ impl canvas::Program<Message> for PaperDrawing {
                                 b.line_to(fit.point(self.to_paper(i, z)));
                             }
                         });
-                        let (plain, width) = if inked.cut { (ink, on_screen(placed.rules.cut)) } else { (Color { a: 0.55, ..ink }, on_screen(placed.rules.beyond)) };
+                        let (plain, width) = if inked.cut { (ink, on_screen(fit.scale, placed.rules.cut)) } else { (Color { a: 0.55, ..ink }, on_screen(fit.scale, placed.rules.beyond)) };
                         let color = inked.ink.color.map_or(plain, |c| Color::from_rgb8(c[0], c[1], c[2]));
                         frame.stroke(&lines, Stroke::default().with_color(color).with_width(inked.ink.wide(width, inked.cut)));
                     }
-                    if crop.is_some() {
+                    if placed.frame && crop.is_some() {
                         frame.stroke(&Path::rectangle(at, size), Stroke::default().with_color(faint).with_width(0.8));
                     }
                 }
                 None => {
-                    frame.stroke(&Path::rectangle(at, size), Stroke::default().with_color(faint).with_width(1.0));
-                    label(&mut frame, self.empty.clone(), Point::new(at.x + size.width / 2.0, at.y + size.height / 2.0), 11.0, p.text_muted, alignment::Horizontal::Center);
+                    if placed.frame {
+                        frame.stroke(&Path::rectangle(at, size), Stroke::default().with_color(faint).with_width(1.0));
+                    }
+                    if placed.frame && placed.lines.is_empty() && placed.notes.is_empty() && placed.dimensions.is_empty() {
+                        label(&mut frame, self.empty.clone(), Point::new(at.x + size.width / 2.0, at.y + size.height / 2.0), 11.0, p.text_muted, alignment::Horizontal::Center);
+                    }
                 }
             }
             for (k, d) in placed.dimensions.iter().enumerate() {
                 let color = if self.pick == Some(SheetPick::Dimension(i, k)) { p.accent } else { ink };
-                draw_dimension(&mut frame, &fit, self.to_paper(i, d.from), self.to_paper(i, d.to), d.length(), color);
+                let style = &self.styles[d.style.min(self.styles.len() - 1)];
+                let screen = |q| fit.point(self.to_paper(i, q));
+                for (interval, (actual, [a,b])) in d.intervals().enumerate() {
+                    let mut look = dimension_look(&fit, style);
+                    look.offset = (fit.scale * d.paper_offset()) as f32;
+                    super::marks::draw_interval_px(&mut frame, screen(a), screen(b), actual.map(screen), interval == 0,
+                        d.interval_value(a,b,style), color, look);
+                }
             }
-            if !placed.lines.is_empty() {
-                let lines = Path::new(|path| {
-                    for line in &placed.lines {
-                        path.move_to(fit.point(self.to_paper(i, line[0])));
-                        path.line_to(fit.point(self.to_paper(i, line[1])));
-                    }
-                });
-                frame.stroke(&lines, Stroke::default().with_color(ink).with_width(0.8));
-            }
+            super::marks::draw_detail_lines(&mut frame, &placed.lines, &placed.pens, placed.crop, ink, &|q| Some(fit.point(self.to_paper(i, q))), (fit.scale / 1000.0) as f32);
             for d in &placed.datums {
                 let (a, b) = (fit.point(self.to_paper(i, d.a)), fit.point(self.to_paper(i, d.b)));
-                super::marks::draw_datum(&mut frame, a, b, &d.name, d.level.is_some(), ink, Color::WHITE);
+                super::marks::draw_datum(&mut frame, a, b, &d.name, d.level.is_some(), (fit.scale / 1000.0) as f32, ink, Color::WHITE);
             }
             for (k, note) in placed.notes.iter().enumerate() {
+                if crate::drawing2d::crop_segment(note.at, note.at, placed.crop).is_none() { continue; }
                 let picked = self.pick == Some(SheetPick::Note(i, k));
                 let at = fit.point(self.to_paper(i, note.at));
-                let at = if note.level { super::marks::draw_level_mark(&mut frame, at, Self::note_size(&fit), if picked { p.accent } else { ink }) } else { at };
-                super::marks::draw_note_in(&mut frame, at, &note.text, Self::note_size(&fit), if picked { p.accent } else { ink }, note.align, note.angle as f32, &note.face);
+                let at = if note.level { super::marks::draw_level_mark(&mut frame, at, Self::note_size(&fit, note), if picked { p.accent } else { ink }) } else { at };
+                super::marks::draw_paper_note(&mut frame, at, note, Self::note_size(&fit, note), if picked { p.accent } else { ink }, note.angle as f32);
                 if let Some(b) = self.note_box(&fit, i, k).filter(|_| picked) {
                     frame.stroke(&Path::rectangle(b.position(), b.size()), Stroke::default().with_color(p.accent).with_width(1.0));
                 }
             }
             // the sections drawn on this floor plan
-            if placed.is_plan {
-                for (name, from, to) in &self.sections {
-                    let letter = name.rsplit(' ').next().unwrap_or(name).to_string();
-                    draw_section_mark(&mut frame, &fit, self.to_paper(i, *from), self.to_paper(i, *to), letter, ink);
-                }
+            for (label, from, to) in &placed.sections {
+                draw_section_mark(&mut frame, &fit, self.to_paper(i, *from), self.to_paper(i, *to), label.clone(), ink);
             }
-            let under = Point::new(at.x, at.y + size.height + 16.0);
-            label(&mut frame, placed.name, under, 12.0, if hot && !self.busy() { p.accent } else { ink }, alignment::Horizontal::Left);
-            label(&mut frame, format!("1:{}", view.scale.round()), Point::new(at.x, under.y + 14.0), 10.0, p.text_secondary, alignment::Horizontal::Left);
+            if !placed.caption { continue; }
+            let under = fit.point([lo[0], lo[1] - 0.009]);
+            label(&mut frame, placed.name, under, (0.003 * fit.scale / 0.72) as f32, if hot && !self.busy() { p.accent } else { ink }, alignment::Horizontal::Left);
+            label(&mut frame, format!("1:{}", view.scale), fit.point([lo[0], lo[1] - 0.0135]), (0.0022 * fit.scale / 0.72) as f32, p.text_secondary, alignment::Horizontal::Left);
         }
 
         // the crop handles of the picked view
@@ -1044,8 +1341,8 @@ impl canvas::Program<Message> for PaperDrawing {
                     if self.section_tool {
                         draw_section_mark(&mut frame, &fit, self.to_paper(j, from), self.to_paper(i, q), String::new(), p.accent);
                     } else {
-                        let length = Dimension { from, to: q, style: 0, anchors: [None, None] }.length();
-                        draw_dimension(&mut frame, &fit, self.to_paper(j, from), self.to_paper(i, q), length, p.accent);
+                        let length = Dimension { from, to: q, style: 0, anchors: [None, None], chain: None }.length();
+                        draw_dimension(&mut frame, &fit, self.to_paper(j, from), self.to_paper(i, q), length, p.accent, &self.styles[0]);
                     }
                 }
             }
@@ -1057,7 +1354,8 @@ impl canvas::Program<Message> for PaperDrawing {
     }
 
     fn mouse_interaction(&self, state: &PaperState, bounds: Rectangle, cursor: mouse::Cursor) -> mouse::Interaction {
-        let fit = Fit::of(self.sheet.paper, bounds.size());
+        let fit = Fit::of(self.sheet.paper, bounds.size()).navigated(bounds.size(), self.zoom, self.pan);
+        if state.panning.is_some() { return mouse::Interaction::Grabbing; }
         let handle = state.crop.map(|(_, side)| side).or_else(|| cursor.position_in(bounds).and_then(|p| self.handle_at(&fit, p)).map(|(_, side)| side));
         match handle.filter(|_| !self.busy()) {
             Some(Side::Left | Side::Right) => return mouse::Interaction::ResizingHorizontally,
@@ -1111,11 +1409,13 @@ fn draw_section_mark(frame: &mut Frame, fit: &Fit, from: [f64; 2], to: [f64; 2],
 /// A dimension between two paper points: the dimension line [`DIMENSION_OFFSET`] to the left of
 /// from → to, extension lines from the points to just past it, a slash at each end, and the
 /// length in millimetres over the middle.
-fn draw_dimension(frame: &mut Frame, fit: &Fit, from: [f64; 2], to: [f64; 2], length: f64, color: Color) {
+fn draw_dimension(frame: &mut Frame, fit: &Fit, from: [f64; 2], to: [f64; 2], length: f64, color: Color, style: &crate::document::DimensionStyle) {
+    super::marks::draw_dimension_px(frame, fit.point(from), fit.point(to), length, color, dimension_look(fit, style));
+}
+
+fn dimension_look<'a>(fit: &Fit, style: &'a crate::document::DimensionStyle) -> super::marks::DimensionLook<'a> {
     let px = |m: f64| (m * fit.scale) as f32;
-    let style = crate::document::DimensionStyle::standard();
-    let look = super::marks::DimensionLook { offset: px(DIMENSION_OFFSET), paper: fit.scale as f32, size: 10.0, style: &style };
-    super::marks::draw_dimension_px(frame, fit.point(from), fit.point(to), length, color, look);
+    super::marks::DimensionLook { offset: px(DIMENSION_OFFSET), paper: fit.scale as f32, size: px(style.paper_font_size()), style }
 }
 
 /// The sheets of the document in the explorer's Views tab: each opens in its tab; New sheet.
@@ -1142,7 +1442,7 @@ pub(super) fn sheets_list<'a>(app: &'a App, p: Palette, l: Language, mut body: i
             .padding([4, 8])
             .width(Fill)
             .style(move |_, s| p.row_button(s))
-            .on_press(Message::NewSheet(l.text("Tekening", "Drawing"))),
+            .on_press(Message::NewSheet(l.text("Tekenblad", "Sheet"))),
     );
     // the views on no sheet yet, on new sheets
     let (plans, sections) = app.unplaced_views();
@@ -1197,6 +1497,294 @@ mod tests {
         app.dimension_tool = tool;
         let drawing = app.paper_drawing(app.theme.palette(), Language::English).unwrap();
         (app, sheet, plan, drawing)
+    }
+
+    #[test]
+    fn pile_legend_can_be_placed_on_two_sheets_from_the_sheet_panel() {
+        let (mut app, first, _, _) = sheet_with_plan(false);
+        let _ = app.update(Message::PlacePileLegend(first.clone(), "Pile legend"));
+        let legend = app.document.sheet(&first).unwrap().views[1].plan.clone();
+        assert_eq!(app.document.view_drawing(&legend), Some("pile-schedule"));
+        assert_eq!(app.active_doc_sheet.as_deref(), Some(first.as_ref()));
+        assert_eq!(app.sheet_pick, Some(SheetPick::View(1)));
+        let _ = app.update(Message::NewSheet("Second sheet"));
+        let second = Arc::<str>::from(app.active_doc_sheet.as_deref().unwrap());
+        let _ = app.update(Message::PlacePileLegend(second.clone(), "Pile legend"));
+        assert_eq!(app.document.sheet(&second).unwrap().views[0].plan, legend);
+        assert_eq!(app.sheet_pick, Some(SheetPick::View(0)));
+    }
+
+    #[test]
+    #[ignore = "requires a local IFCX fixture with a placed pile legend and a new output directory"]
+    fn an_imported_pile_legend_reopens_and_exports_on_its_sheet() {
+        let input = PathBuf::from(std::env::var_os("PILE_LEGEND_IFCX").unwrap());
+        let output = PathBuf::from(std::env::var_os("PILE_LEGEND_OUTPUT").unwrap());
+        std::fs::create_dir(&output).unwrap();
+        let open = |path: &std::path::Path| {
+            let mut app = App::default();
+            app.set_model(Arc::new(crate::loaders::load(path).unwrap()));
+            app
+        };
+        let inspect = |app: &mut App| {
+            let plan = app.document.plans().iter().find(|p| p.drawing.as_deref() == Some("pile-schedule")).unwrap();
+            let path = plan.path.clone();
+            let tags: Vec<_> = plan.tags.iter().map(|n| n.text.clone()).collect();
+            assert!(!tags.is_empty());
+            assert!(!tags.iter().any(|t| matches!(t.as_str(), "X (m)" | "Y (m)")));
+            let sheet = app.document.sheets().iter().find(|s| s.views.iter().any(|v| v.plan == path)).unwrap();
+            let sheet_path = sheet.path.clone();
+            app.open_doc_sheet(&sheet_path);
+            let drawing = app.drawing_to_export().unwrap();
+            assert!(tags.iter().all(|tag| drawing.texts.iter().any(|t| &t.text == tag)));
+            tags
+        };
+        let mut current = open(&input);
+        let tags = inspect(&mut current);
+        current.export_shown_to(&output.join("legend.pdf")).unwrap();
+        let saved = output.join("roundtrip.ifcx");
+        let bytes = crate::export::to_bytes(current.model.as_ref().unwrap(), &current.document_now(), "roundtrip.ifcx").unwrap();
+        std::fs::write(&saved, bytes).unwrap();
+        assert_eq!(inspect(&mut open(&saved)), tags);
+    }
+
+    #[test]
+    #[ignore = "requires a structural sheet IFCX fixture with a plan, axon and linked section"]
+    fn linked_section_on_structural_sheet_exports_without_unrelated_section_marks() {
+        let input = PathBuf::from(std::env::var_os("STRUCTURAL_SHEET_IFCX").unwrap());
+        let mut app = App::default();
+        app.set_model(Arc::new(crate::loaders::load(&input).unwrap()));
+        let sheet = app.document.sheets().iter().find(|s| s.number == "CP-21").unwrap();
+        assert!(sheet.views.len() >= 4);
+        for placement in &sheet.views {
+            let name = app.document.view_name(&placement.plan).unwrap_or_default();
+            if name.starts_with("P1 ·") || name.starts_with("P2 ·") {
+                assert_eq!(Some(placement.scale), app.document.view_scale(&placement.plan));
+                assert!(app.document.view_notes(&placement.plan).unwrap().iter().any(|n| n.text.contains("constructief te bepalen")));
+            }
+        }
+        let plan = &sheet.views[0].plan;
+        let sections = crate::drawing2d::plan_sections(&app.document, plan);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].0, "A");
+        assert!(crate::drawing2d::plan_sections(&app.document, &sheet.views[1].plan).is_empty());
+        assert_eq!(app.document.plan(plan).unwrap().dimensions.len(), 4);
+        let path = sheet.path.clone();
+        app.open_doc_sheet(&path);
+        let drawing = app.drawing_to_export().unwrap();
+        for pitch in ["Ø12-200", "Ø12-150"] {
+            assert!(drawing.texts.iter().any(|n| n.text.contains(pitch)));
+        }
+        let path = PathBuf::from(std::env::var_os("STRUCTURAL_SHEET_PDF").unwrap());
+        app.export_shown_to(&path).unwrap();
+    }
+
+    #[test]
+    fn a_picked_sheet_dimension_accepts_and_removes_an_individual_reference() {
+        let (mut app, sheet, view, _) = sheet_with_plan(false);
+        let _ = app.update(Message::AddDimension(view.clone(), [0., 0.], [8., 0.]));
+        app.pick_on_sheet(Some(SheetPick::Dimension(0, 0)));
+        let _ = app.update(Message::ArmDimensionReference(Some((view.clone(), 0))));
+        let paper = app.paper_drawing(app.theme.palette(), Language::English).unwrap();
+        assert_eq!(paper.reference_pick, Some((0, 0)));
+        let _ = app.update(Message::InsertDimensionReference(view.clone(), 0, [3., 0.]));
+        let points = |app: &App| app.document.view_marks(&view).unwrap().0[0].references()
+            .map(|(at, _)| at).collect::<Vec<_>>();
+        assert_eq!(points(&app), [[0., 0.], [3., 0.], [8., 0.]]);
+        assert!(app.reference_target.is_none());
+        let _ = app.update(Message::RemoveDimensionReference(view.clone(), 0, 1));
+        assert_eq!(points(&app), [[0., 0.], [8., 0.]]);
+        assert_eq!(app.active_doc_sheet.as_deref(), Some(sheet.as_ref()));
+    }
+
+    #[test]
+    fn a_remote_crop_keeps_its_paper_position_when_scaled_and_dragged() {
+        let (mut app, sheet, plan, _) = sheet_with_plan(false);
+        let mut nodes = app.document.ifcx_drawing_nodes();
+        let view = nodes.iter_mut().find(|n| n["path"] == &*plan).unwrap();
+        view["attributes"]["o3v::view::plan"]["presentation"]["origin"] = serde_json::json!([0.0, 0.0]);
+        view["attributes"]["o3v::view::plan"]["crop"] = serde_json::json!([[1000.0, 1000.0], [1010.0, 1008.0]]);
+        let nodes = nodes.into_iter().map(|n| (n["path"].as_str().unwrap().to_owned(), n["attributes"].clone())).collect::<Vec<_>>();
+        app.document = crate::document::Document::from_model(&room());
+        app.document.adopt_ifcx(&nodes);
+        app.drop_on_sheet(&plan, [0.2, 0.14]);
+        let centre = |app: &App| {
+            let d = app.paper_drawing(app.theme.palette(), Language::English).unwrap();
+            let (lo, hi, _) = d.frame(1);
+            [(lo[0]+hi[0])/2.0, (lo[1]+hi[1])/2.0]
+        };
+        let _ = app.update(Message::SetScale(sheet.clone(), 1, 200.0));
+        let at = centre(&app);
+        assert!((at[0]-0.2).abs() < 1e-9 && (at[1]-0.14).abs() < 1e-9);
+        let old = app.document.sheet(&sheet).unwrap().views[1].at;
+        let _ = app.update(Message::MoveOnSheet(sheet.clone(), 1, [old[0]+0.03, old[1]-0.01]));
+        let at = centre(&app);
+        assert!((at[0]-0.23).abs() < 1e-9 && (at[1]-0.13).abs() < 1e-9);
+        let nodes = app.document.ifcx_drawing_nodes();
+        let v = nodes.iter().find(|n| n["path"] == &*plan).unwrap();
+        assert_eq!(v["attributes"]["o3v::view::plan"]["presentation"]["origin"], serde_json::json!([0.0,0.0]));
+    }
+
+    #[test]
+    fn the_office_stamp_keeps_its_physical_size_on_a_landscape_a1_at_one_to_one_hundred() {
+        let (mut app, path, _, _) = sheet_with_plan(false);
+        app.house.key = "3bm".into();
+        app.scale_placed_view(&path, 0, 100.0);
+        let stamp = |app: &App| crate::title_block::title_block(&app.document, app.document.sheet(&path).unwrap(), &app.house);
+        let _ = app.update(Message::SetPaper(path.clone(), [1.189, 0.841]));
+        let a0 = stamp(&app);
+        let _ = app.update(Message::SetPaper(path.clone(), [0.841, 0.594]));
+        let a1 = stamp(&app);
+        assert!(a1.texts.iter().any(|t| t.text == "A1"));
+        assert!(a1.texts.iter().any(|t| t.text == "1:100"));
+        for (small, large) in a1.polygons.iter().zip(&a0.polygons) {
+            for (p,q) in small.points.iter().zip(&large.points) {
+                assert!((p[0] + 0.348 - q[0]).abs()<1e-9 && (p[1]-q[1]).abs()<1e-9);
+            }
+        }
+        for name in ["Sheet", "Tekeningnr:", "A.", "F."] {
+            let positions = [&a1,&a0].map(|s| s.texts.iter().find(|t| t.text == name).unwrap());
+            assert_eq!(positions[0].height, positions[1].height);
+            assert!((positions[0].at[0]+0.348-positions[1].at[0]).abs()<1e-9);
+            assert_eq!(positions[0].at[1],positions[1].at[1]);
+        }
+    }
+
+    #[test]
+    fn office_frame_and_revision_entries_reopen_at_their_paper_coordinates() {
+        let (mut app, path, _, _) = sheet_with_plan(false);
+        let _ = app.update(Message::ProjectAddress("Projectadres".into()));
+        let _ = app.update(Message::SheetRevision(path.clone(), 0, true, "20-11-2026".into()));
+        let _ = app.update(Message::SheetRevision(path.clone(), 0, false, "Paalnummers gewijzigd".into()));
+        let nodes = app.document.ifcx_drawing_nodes().into_iter().map(|n| (n["path"].as_str().unwrap().to_owned(), n["attributes"].clone())).collect::<Vec<_>>();
+        let mut doc = crate::document::Document::from_model(&room());
+        doc.adopt_ifcx(&nodes);
+        let sheet = doc.sheet(&path).unwrap();
+        let mut style = app.house.clone();
+        style.key = "3bm".into();
+        let block = crate::title_block::title_block(&doc,sheet,&style);
+        assert!(block.owns_frame);
+        let text_at = |value: &str| block.texts.iter().find(|t| t.text == value).unwrap().at;
+        for (value, dx, y) in [("Projectadres",-0.19075,0.06607), ("A.",-0.20622,0.09224), ("F.",-0.20622,0.01724),
+                ("20-11-2026",-0.2085,0.09224), ("Paalnummers gewijzigd",-0.2085,0.08754)] {
+            let p = text_at(value);
+            assert!((p[0]-sheet.paper[0]-dx).abs()<1e-8 && (p[1]-y).abs()<1e-8, "{value}: {p:?}");
+        }
+    }
+
+    #[test]
+    fn branded_stamp_exports_vector_titles_house_colours_and_the_embedded_logo() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let (mut app, _, _, _) = sheet_with_plan(false);
+        app.house.key = "3bm".into();
+        app.house.logo = Some(format!("data:image/png;base64,{}", STANDARD.encode(include_bytes!("../../assets/icons/128x128.png"))));
+        let drawing = app.drawing_to_export().unwrap();
+        let block = app.paper_drawing(app.theme.palette(), Language::English).unwrap().block;
+        assert_eq!(drawing.images.first(), block.logo.as_ref());
+        assert!(block.logo.is_some());
+        assert_eq!(drawing.polygons, block.polygons);
+        let header = drawing.texts.iter().find(|t| t.text == "Sheet").unwrap();
+        assert_eq!(header.color, Some([255,255,255]));
+        let pdf = crate::export::pdf::pdf(&drawing);
+        let pdf = String::from_utf8_lossy(&pdf);
+        assert!(pdf.contains("/Subtype /Image") && pdf.contains("(Sheet) Tj"));
+    }
+
+    #[test]
+    fn edited_title_fields_survive_reopening_and_match_the_export() {
+        use bim_library::house::Field;
+        let (mut app, sheet, _, _) = sheet_with_plan(false);
+        app.scale_placed_view(&sheet, 0, 100.0);
+        let second = app.document.add_sheet("Details");
+        for (field, value) in [(Field::ProjectNumber, "42"), (Field::Title, "Fundering"), (Field::Number, "CP-21"), (Field::Revision, "B")] {
+            let _ = app.update(Message::SheetField(sheet.clone(), field, value.into()));
+        }
+        let nodes = app.document.ifcx_drawing_nodes().into_iter().map(|n| (n["path"].as_str().unwrap().to_owned(), n["attributes"].clone())).collect::<Vec<_>>();
+        let mut reopened = crate::document::Document::from_model(&room());
+        reopened.adopt_ifcx(&nodes);
+        assert_eq!(reopened.title_value(reopened.sheet(&second).unwrap(), Field::ProjectNumber), "42");
+        assert_eq!(reopened.title_value(reopened.sheet(&second).unwrap(), Field::Revision), "");
+        assert_eq!(reopened.sheet(&sheet).unwrap().title, "CP-21 Fundering");
+        app.document = reopened;
+        let drawing = app.drawing_to_export().unwrap();
+        let pdf = crate::export::pdf::pdf(&drawing);
+        for value in ["42", "Fundering", "CP-21", "B", "1:100"] {
+            assert!(drawing.texts.iter().any(|t| t.text == value), "missing {value}: {:?}", drawing.texts.iter().map(|t| &t.text).collect::<Vec<_>>());
+            assert!(String::from_utf8_lossy(&pdf).contains(&format!("({value}) Tj")));
+        }
+    }
+
+    #[test]
+    fn supplied_sheet_frame_is_used_in_exports_and_survives_ifcx_serialization() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let (mut app, key, _, _) = sheet_with_plan(false);
+        app.house.key = "3bm".into();
+        let bytes = include_bytes!("../../assets/icons/128x128.png");
+        let presentation = serde_json::json!({"image": STANDARD.encode(bytes)});
+        let mut nodes = app.document.ifcx_drawing_nodes();
+        let source = nodes.iter_mut().find(|n| n["path"].as_str() == Some(key.as_ref())).unwrap();
+        source["attributes"]["o3v::sheet"]["presentation"] = presentation.clone();
+        let attrs = nodes.iter().map(|n| (n["path"].as_str().unwrap().to_owned(), n["attributes"].clone())).collect::<Vec<_>>();
+        app.document = crate::document::Document::from_model(app.model.as_ref().unwrap());
+        app.document.adopt_ifcx(&attrs);
+        let drawing = app.drawing_to_export().unwrap();
+        assert!(drawing.images.iter().any(|i| i.bytes.as_ref() == bytes));
+        assert!(!drawing.texts.iter().any(|t| t.text == "Opdrachtgever:"));
+        let nodes = app.document.ifcx_drawing_nodes();
+        let saved = nodes.iter().find(|n| n["path"].as_str() == Some(key.as_ref())).unwrap();
+        assert_eq!(saved["attributes"]["o3v::sheet"]["presentation"], presentation);
+        let drawing = app.paper_drawing(app.theme.palette(), Language::English).unwrap();
+        let fit = Fit::of(drawing.sheet.paper, bounds().size());
+        let mut state = PaperState::default();
+        let picked = press_at(&drawing, &mut state, fit.point([0.005,0.005])).unwrap();
+        assert!(matches!(picked, Message::PickOnSheet(Some(SheetPick::Paper))));
+        let _ = app.update(picked);
+        use bim_library::house::Field;
+        let fields = [(Field::ProjectNumber,"3345"),(Field::Project,"Testproject"),(Field::Client,"Opdrachtgever"),
+                      (Field::Phase,"UO"),(Field::Status,"CONCEPT"),(Field::Date,"20-11-2026"),(Field::Number,"CP-21")];
+        for (f, value) in fields {
+            let _ = app.update(Message::SheetField(key.clone(),f,value.into()));
+        }
+        let _ = app.update(Message::ProjectAddress("Projectadres".into()));
+        let nodes = app.document.ifcx_drawing_nodes();
+        let attrs = nodes.into_iter().map(|n| (n["path"].as_str().unwrap().to_owned(), n["attributes"].clone())).collect::<Vec<_>>();
+        let mut restored = crate::document::Document::from_model(app.model.as_ref().unwrap());
+        restored.adopt_ifcx(&attrs);
+        let sheet = restored.sheet(&key).unwrap();
+        assert_eq!(restored.project_address, "Projectadres");
+        for (f,value) in fields { assert_eq!(restored.title_value(sheet,f),value); }
+        let block = crate::title_block::title_block(&restored,sheet,&app.house);
+        assert!(block.logo.is_some());
+        assert!(block.texts.iter().any(|t| t.text == "Projectadres"));
+        assert!(block.texts.iter().any(|t| t.text == "CONCEPT"));
+    }
+
+    #[test]
+    fn sheet_wheel_keeps_cursor_anchor_and_panned_click_picks_the_same_view() {
+        let (mut app, _, _, drawing) = sheet_with_plan(false);
+        let mut state = PaperState::default();
+        let base = Fit::of(drawing.sheet.paper, bounds().size());
+        let target = base.point([0.21, 0.1485]);
+        let at = Point::new(target.x - 31., target.y + 23.);
+        let send = |d: &PaperDrawing, state: &mut PaperState, event, at| {
+            canvas::Program::update(d, state, &event, bounds(), mouse::Cursor::Available(at)).unwrap().into_inner().0
+        };
+        let wheel = iced::Event::Mouse(mouse::Event::WheelScrolled { delta: mouse::ScrollDelta::Lines { x: 0., y: 3. } });
+        let nav = send(&drawing, &mut state, wheel, at).unwrap();
+        let _ = app.update(nav);
+        let zoomed = base.navigated(bounds().size(), app.sheet_zoom, app.sheet_pan);
+        assert!(zoomed.point(base.paper(at)).distance(at) < 0.001);
+        let drawing = app.paper_drawing(app.theme.palette(), Language::English).unwrap();
+        send(&drawing, &mut state, iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Middle)), at);
+        let end = Point::new(at.x+47., at.y-21.);
+        let nav = send(&drawing, &mut state, iced::Event::Mouse(mouse::Event::CursorMoved { position: end }), end).unwrap();
+        let _ = app.update(nav);
+        send(&drawing, &mut state, iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Middle)), end);
+        let drawing = app.paper_drawing(app.theme.palette(), Language::English).unwrap();
+        let shown = base.navigated(bounds().size(), app.sheet_zoom, app.sheet_pan);
+        let click = shown.point(base.paper(target));
+        assert!(matches!(press_at(&drawing, &mut state, click), Some(Message::PickOnSheet(Some(SheetPick::View(0))))));
+        let _ = app.update(Message::Fit);
+        assert_eq!((app.sheet_zoom, app.sheet_pan), (1., [0.;2]));
     }
 
     #[test]
@@ -1301,7 +1889,7 @@ mod tests {
         // and the floor plan on the sheet shows where it is
         let _ = app.update(Message::OpenDocSheet(sheet.clone()));
         let drawing = app.paper_drawing(app.theme.palette(), Language::English).unwrap();
-        assert_eq!(drawing.sections.len(), 1);
+        assert_eq!(drawing.placed[0].sections.len(), 1);
         // the four elevations at once
         let _ = app.update(Message::MakeElevations(["North", "East", "South", "West"]));
         let names: Vec<&str> = app.document.sections().iter().map(|s| s.name.as_str()).collect();
@@ -1479,6 +2067,15 @@ mod tests {
         let count = app.document.sheets().len();
         let _ = app.update(Message::FillSheets(["Floor plans", "Sections and elevations"]));
         assert_eq!(app.document.sheets().len(), count);
+    }
+
+    #[test]
+    fn double_click_activates_a_placed_view() {
+        let (_, _, _, drawing) = sheet_with_plan(false);
+        let at = Fit::of(drawing.sheet.paper, bounds().size()).point([0.20, 0.15]);
+        let mut state = PaperState::default();
+        assert!(matches!(press_at(&drawing, &mut state, at), Some(Message::PickOnSheet(Some(SheetPick::View(0))))));
+        assert!(matches!(press_at(&drawing, &mut state, at), Some(Message::OpenPlan(path)) if path == drawing.placed[0].plan));
     }
 
     #[test]

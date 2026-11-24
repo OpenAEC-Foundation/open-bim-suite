@@ -27,6 +27,7 @@ pub(super) struct CutJob {
     pub halftone: Vec<bool>,
     pub index: Option<Arc<ExplodeIndex>>,
     pub kind: CutKind,
+    pub axes: Vec<[glam::DVec3; 2]>,
     pub scale: f64,
     /// How the view draws its elements otherwise than their materials say (its filters).
     pub looks: Option<Arc<std::collections::HashMap<u64, crate::hatching::Look>>>,
@@ -38,7 +39,7 @@ pub(super) struct CutJob {
 impl CutJob {
     /// The cut, with its cut faces hatched.
     pub(super) fn run(self) -> Cut {
-        let CutJob { model, layers, units, halftone, index, kind, scale, looks, signs } = self;
+        let CutJob { axes, model, layers, units, halftone, index, kind, scale, looks, signs } = self;
         // the pens the view's filters give the lines of elements: the inks, and per unit which
         let (inks, unit_ink) = inks(looks.as_deref(), index.as_deref());
         let inked = |l: usize, v: u32| index.as_ref().and_then(|ix| unit_ink.get(ix.unit(l, v)).copied().flatten());
@@ -60,7 +61,41 @@ impl CutJob {
         // the cut faces in the hatch of what they are made of, or of what the view's filters say
         crate::hatching::hatch_with(&mut cut, &model, bim_library::DrawingStandard::Nen47, scale, looks.as_deref());
         cut.segments.extend(signs);
+        for axis in axes {
+            if let Some(line) = kind.project_axis(axis) {
+                cut.below.push(line);
+            }
+        }
+        cut.extent = crate::drawing::extent(crate::drawing::drawn(&cut));
         cut
+    }
+}
+
+impl CutKind {
+    fn project_axis(self, axis: [glam::DVec3; 2]) -> Option<crate::drawing::Segment> {
+        use glam::{DVec2, DVec3};
+        let (points, low, high) = match self {
+            Self::Plan { low, high, .. } => (axis, low, high),
+            Self::Section { from, to, depth } => {
+                let origin = DVec2::from_array(from);
+                let u = (DVec2::from_array(to) - origin).try_normalize()?;
+                (axis.map(|q| {
+                    let xy = q.truncate() - origin;
+                    DVec3::new(xy.dot(u), q.z, xy.dot(u.perp()))
+                }), 0.0, depth)
+            }
+        };
+        let [a, b] = points;
+        let v = b - a;
+        let (start, end) = if v.z.abs() < 1e-12 {
+            if a.z < low || a.z > high { return None; }
+            (0.0, 1.0)
+        } else {
+            let (p, q) = ((low - a.z) / v.z, (high - a.z) / v.z);
+            (p.min(q).max(0.0), p.max(q).min(1.0))
+        };
+        let projected = [start, end].map(|t| (a + t * v).truncate().as_vec2().to_array());
+        (start <= end && projected[0] != projected[1]).then_some(projected)
     }
 }
 
@@ -176,5 +211,22 @@ mod tests {
         app.cut_epoch += 1;
         let _ = app.take_cut(0, "plan".into(), Some(Arc::new(Cut::default())));
         assert!(!app.cuts.contains_key("plan"));
+    }
+}
+
+#[cfg(test)]
+mod bar_projection_tests {
+    use super::*;
+    use glam::DVec3;
+
+    #[test]
+    fn a_reinforcing_axis_is_clipped_to_each_view_range() {
+        let plan = CutKind::Plan { kind: PlanKind::Structural, low: -1.0, high: 1.0 };
+        let axis = [DVec3::new(-2.0, 0.0, -2.0), DVec3::new(2.0, 0.0, 2.0)];
+        assert_eq!(plan.project_axis(axis), Some([[-1.0, 0.0], [1.0, 0.0]]));
+        let section = CutKind::Section { from: [0.0, 0.0], to: [5.0, 0.0], depth: 1.0 };
+        let axis = [DVec3::new(-2.0, -2.0, -2.0), DVec3::new(2.0, 2.0, 2.0)];
+        assert_eq!(section.project_axis(axis), Some([[0.0, 0.0], [1.0, 1.0]]));
+        assert!(section.project_axis([DVec3::new(0.0, 2.0, -5.0), DVec3::new(3.0, 3.0, 0.0)]).is_none());
     }
 }

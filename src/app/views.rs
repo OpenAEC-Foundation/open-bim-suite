@@ -192,6 +192,7 @@ impl App {
 
     /// Lets the 3D view at `path` (if it is one) keep the camera and section box of `slot`.
     fn keep_view_3d(&mut self, path: &str, slot: &ViewSlot) {
+        if !self.annotates { return; }
         let section = slot.section.filter(|_| slot.section_on).map(|b| view_box(&b));
         self.document.set_view_3d_camera(path, camera_3d(&slot.camera), section);
         // a view that had its say in the loads and results keeps what shows now
@@ -447,29 +448,21 @@ impl App {
     }
 
     /// The Views tab.
+    pub(in crate::app) fn view_group_header(&self, p: Palette, key: &'static str, label: &str) -> Element<'static, Message> {
+        let arrow = if self.collapsed_view_groups.contains(key) { "▸" } else { "▾" };
+        button(row![text(arrow).size(12), text(if key == "view-root" { label.to_owned() } else { label.to_uppercase() }).size(11).font(FONT_BOLD)].spacing(5).align_y(Center))
+            .padding([3, 7]).width(Fill).style(move |_, state| p.row_button(state))
+            .on_press(Message::ToggleViewGroup(key)).into()
+    }
+
     pub(super) fn views_body(&self, p: Palette, l: Language) -> Element<'_, Message> {
         if self.model.is_none() {
             return text(l.text("Geen model geopend", "No model loaded")).size(12).color(p.text_muted).into();
         }
         let document = &self.document;
-        let subheader = |label: &str| -> Element<'static, Message> {
-            container(text(label.to_uppercase()).size(10).font(FONT_BOLD).color(p.group_label))
-                .padding(Padding { top: 8.0, right: 0.0, bottom: 2.0, left: 8.0 })
-                .into()
-        };
         let mut body = Column::new().spacing(1);
-        body = body.push(
-            container(
-                row![
-                    text(l.text("Weergaven", "Views")).size(12).font(FONT_BOLD).width(Fill),
-                    text((document.plans().len() + document.sections().len() + document.views_3d().len()).to_string()).size(11).color(p.text_secondary),
-                ]
-                .spacing(6)
-                .align_y(Center),
-            )
-            .padding([4, 6])
-            .style(move |_| p.panel_header()),
-        );
+        body = body.push(self.view_group_header(p, "view-root", l.text("Weergaven", "Views")));
+        if self.collapsed_view_groups.contains("view-root") { return body.into(); }
 
         // the plans per kind, each by level from high to low; New lists the levels to make one of
         for kind in PlanKind::ALL {
@@ -485,7 +478,8 @@ impl App {
                 .padding([2, 6])
                 .style(move |_, s| if picking { p.ribbon_button(true, s) } else { p.row_button(s) })
                 .on_press(Message::PickLevelFor((!picking).then_some(kind)));
-            body = body.push(row![container(subheader(label)).width(Fill), container(new).padding(Padding { top: 6.0, right: 4.0, bottom: 0.0, left: 0.0 })].align_y(iced::alignment::Vertical::Bottom));
+            body = body.push(row![container(self.view_group_header(p, kind.key(), label)).width(Fill), container(new).padding(Padding { top: 6.0, right: 4.0, bottom: 0.0, left: 0.0 })].align_y(iced::alignment::Vertical::Bottom));
+            if self.collapsed_view_groups.contains(kind.key()) { continue; }
             if picking {
                 body = self.level_picker(p, l, body, kind, word);
             }
@@ -530,9 +524,9 @@ impl App {
             .padding([2, 6])
             .style(move |_, s| p.row_button(s))
             .on_press(Message::NewView3d(l.text("3D-weergave", "3D view")));
-        let header = subheader(l.text("3D-weergaven", "3D views"));
+        let header = self.view_group_header(p, "3d", l.text("3D-weergaven", "3D views"));
         body = body.push(row![container(header).width(Fill), container(new).padding(Padding { top: 6.0, right: 4.0, bottom: 0.0, left: 0.0 })].align_y(iced::alignment::Vertical::Bottom));
-        for view in document.views_3d() {
+        for view in document.views_3d().iter().filter(|_| !self.collapsed_view_groups.contains("3d")) {
             let active = self.active_plan.as_deref() == Some(view.path.as_str());
             let name = text(view.name.clone()).size(12).color(if active { p.accent } else { p.text }).wrapping(Wrapping::WordOrGlyph).width(Fill);
             let open = button(name)
@@ -547,7 +541,7 @@ impl App {
             let remove = button(close).padding(3).style(move |_, s| p.row_button(s)).on_press(Message::RemoveView3d(Arc::from(view.path.as_str())));
             body = body.push(container(row![open, remove].spacing(4).align_y(Center)).padding(Padding { top: 0.0, right: 4.0, bottom: 0.0, left: 8.0 }));
         }
-        if document.views_3d().is_empty() {
+        if !self.collapsed_view_groups.contains("3d") && document.views_3d().is_empty() {
             let none = l.text("Nog geen. Nieuw legt vast wat het tabblad 3D toont.", "None yet. New keeps what the 3D tab shows.");
             body = body.push(container(text(none).size(12).color(p.text_muted).wrapping(Wrapping::WordOrGlyph)).padding([2, 8]));
         }
@@ -555,9 +549,10 @@ impl App {
         // sections, drawn on a sheet; elevations, the four at once
         for kind in [SectionKind::Section, SectionKind::Elevation] {
             body = body.push(match kind {
-                SectionKind::Section => subheader(l.text("Doorsneden", "Sections")),
-                SectionKind::Elevation => subheader(l.text("Aanzichten", "Elevations")),
+                SectionKind::Section => self.view_group_header(p, kind.key(), l.text("Doorsneden", "Sections")),
+                SectionKind::Elevation => self.view_group_header(p, kind.key(), l.text("Aanzichten", "Elevations")),
             });
+            if self.collapsed_view_groups.contains(kind.key()) { continue; }
             body = self.section_rows(p, body, kind);
             body = body.push(match kind {
                 SectionKind::Section => {
@@ -579,8 +574,8 @@ impl App {
         }
 
         // the sheets, then a new one
-        body = body.push(subheader(l.text("Tekeningen", "Drawings")));
-        body = super::paper::sheets_list(self, p, l, body);
+        body = body.push(self.view_group_header(p, "sheets", l.text("Tekenbladen", "Sheets")));
+        if !self.collapsed_view_groups.contains("sheets") { body = super::paper::sheets_list(self, p, l, body); }
         scrollable(body.padding(Padding { top: 0.0, right: 4.0, bottom: 8.0, left: 0.0 })).height(Fill).spacing(4).into()
     }
 
@@ -631,6 +626,10 @@ impl App {
                     .style(move |_, s| p.row_button(s))
                     .on_press(make),
             );
+            if kind == PlanKind::StructuralUp {
+                let name = l.text("Paallegenda", "Pile legend");
+                body = body.push(button(text(name).size(12)).on_press(Message::NewPileSchedule(Arc::from(level.path.as_str()), name)));
+            }
         }
         body
     }

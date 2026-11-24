@@ -566,6 +566,7 @@ pub enum Msg {
     SplitterPress(Side),
     SplitterMove(Point),
     SplitterRelease,
+    ShowModel3d,
     SelectTab(usize),
     CloseTab(usize),
     Key(KeyPress),
@@ -688,6 +689,7 @@ impl Studio {
     /// The time is `now`: a letter that waited too long for its pair does what it does alone.
     pub(crate) fn expire_keys(&mut self, now: Instant) {
         if let Some(step) = self.keys.expire_step(now) {
+            if self.app.modeller.sketch.is_some() { return; }
             let _ = self.key_step(step);
         }
     }
@@ -708,7 +710,8 @@ impl Studio {
         }
     }
 
-    pub fn new(app: App) -> Self {
+    pub fn new(mut app: App) -> Self {
+        app.set_viewer_mode(Prefs::default().product == Product::Viewer);
         Self {
             keys: Default::default(),
             app,
@@ -834,6 +837,7 @@ impl Studio {
             return;
         }
         if product != self.product() {
+            self.keys.clear();
             self.ribbon_tab = 0;
         }
         // GIS works from its tab of the right pane
@@ -842,6 +846,7 @@ impl Studio {
         }
         if product != Product::Modeller {
             for app in std::iter::once(&mut self.app).chain(self.parked.iter_mut().map(|(_, a)| a)) {
+                app.modeller.rebar_edit = None;
                 if app.modeller.tool.is_some() {
                     let _ = app.update(Message::ModelTool(None));
                 }
@@ -849,7 +854,10 @@ impl Studio {
         }
         // the Viewer only looks at a view: its bar has no tools to dimension, write or cut
         for app in std::iter::once(&mut self.app).chain(self.parked.iter_mut().map(|(_, a)| a)) {
-            app.annotates = product != Product::Viewer;
+            app.set_viewer_mode(product == Product::Viewer);
+            if product == Product::Modeller && app.modeller.sketch.is_none() {
+                app.modeller.sketch = app.modeller.parked_sketch.take();
+            }
         }
         // the Modeller's explorer opens on its project browser; elsewhere that tab is not there
         let (browser, model) = (crate::app::ExplorerTab::Project, crate::app::ExplorerTab::Model);
@@ -1345,7 +1353,7 @@ impl Studio {
                 .icon(small("drawing.plan"), large("drawing.plan"))
                 .toggle(app.levels_3d)
                 .enabled(loaded),
-            Command::new("view.3d", "3D", go(Message::SelectTab(0))).icon(small("view.orbit"), large("view.orbit")).enabled(loaded),
+            Command::new("view.3d", "3D", Msg::ShowModel3d).icon(small("view.isometric"), large("view.isometric")).detail(l.text("Open de 3D-weergave van het huidige project.", "Open the current project’s 3D view.")),
             Command::new("view.views-3d", l.text("Weergaven in 3D", "Views in 3D"), go(Message::ToggleViewsIn3d))
                 .icon(small("view.saved"), large("view.saved"))
                 .toggle(app.views_in_3d || !app.projected.is_empty())
@@ -1370,7 +1378,7 @@ impl Studio {
                 .mode(!app.camera.ortho),
             Command::new("camera.ortho", l.text("Orthografisch", "Orthographic"), go(Message::Ortho(true)))
                 .icon(small("view.zoom-out"), large("view.zoom-out"))
-                .shortcut(key('o'))
+                .shortcut(Shortcut { alt: true, ..key('o') })
                 .mode(app.camera.ortho),
             Command::new("section.box", l.text("Doorsnedebox", "Section box"), go(Message::ToggleSection)).icon(small("section.box"), large("section.box")).toggle(app.section_on).enabled(loaded),
             Command::new("section.plane", l.text("Doorsnedevlak", "Section plane"), go(Message::TogglePlane))
@@ -1570,13 +1578,13 @@ impl Studio {
                     .enabled(loaded),
             );
         }
-        list.push(Command::new("project.level", l.text("Niveau", "Level"), go(Message::NewLevel(l.text("Niveau", "Level")))).icon(small("resource.level"), large("resource.level")).enabled(loaded));
+        list.push(Command::new("project.level", l.text("Bouwlaagpeil", "Level datum"), go(Message::NewLevel(l.text("Niveau", "Level")))).icon(small("modeller.level"), large("modeller.level")).enabled(loaded));
         // a grid line of the modelled project: two clicks on the work plane
-        list.push(Command::new("project.grid", l.text("Stramien", "Grid"), go(Message::GridTool)).icon(small("view.grid"), large("view.grid")).mode(app.modeller.grid_tool).enabled(app.modeller.shown.is_some()));
+        list.push(Command::new("project.grid", l.text("Stramienas", "Grid axis"), go(Message::GridTool)).icon(small("modeller.axis"), large("modeller.axis")).mode(app.modeller.grid_tool).enabled(app.modeller.shown.is_some()));
         list.push(plan("project.floor-plan", l.text("Plattegrond", "Floor plan"), PlanKind::Floor));
         list.push(plan("project.structural-plan", l.text("Constructieplan", "Structural plan"), PlanKind::Structural));
         list.push(plan("project.ceiling-plan", l.text("Plafondplan", "Ceiling plan"), PlanKind::Ceiling));
-        list.push(Command::new("project.sheet", l.text("Tekening", "Drawing"), go(Message::NewSheet(l.text("Tekening", "Drawing")))).icon(small("drawing.sheet-new"), large("drawing.sheet-new")).enabled(loaded));
+        list.push(Command::new("project.sheet", l.text("Tekenblad", "Sheet"), go(Message::NewSheet(l.text("Tekenblad", "Sheet")))).icon(small("drawing.sheet-new"), large("drawing.sheet-new")).enabled(loaded));
         list.push(
             Command::new("project.library", l.text("Bibliotheek", "Library"), go(Message::ExplorerTab(crate::app::ExplorerTab::Library)))
                 .icon(small("construction.library"), large("construction.library"))
@@ -1625,7 +1633,7 @@ impl Studio {
                 .toggle(app.section_tool && sections)
                 .enabled(sections),
         );
-        for tool in crate::app::modeller::ModelTool::ALL.into_iter().chain(crate::app::modeller::ModelTool::OPENINGS) {
+        for tool in crate::app::modeller::ModelTool::ALL.into_iter().chain(crate::app::modeller::ModelTool::OPENINGS).chain(crate::app::modeller::ModelTool::SERVICES) {
             let on = app.modeller.tool.is_some_and(|t| t.0 == tool);
             list.push(Command::new(tool.id(), tool.label(l), go(Message::ModelTool(Some((tool, tool.label(l)))))).icon(small(tool.icon()), large(tool.icon())).mode(on).enabled(loaded));
         }
@@ -1771,6 +1779,13 @@ impl Studio {
     /// The commands with the user's own shortcuts.
     fn commands(&self) -> Vec<Command<Msg>> {
         let mut commands = self.default_commands();
+        if self.product() == Product::Viewer {
+            for command in &mut commands {
+                if let Msg::App(message) = &command.message {
+                    command.enabled &= message.allowed_in_viewer();
+                }
+            }
+        }
         self.keymap.apply(&mut commands);
         commands
     }
@@ -1846,7 +1861,7 @@ impl Studio {
 
     pub fn update(&mut self, message: Msg) -> Task<Msg> {
         // the Viewer only looks at a view: its bar has no tools to dimension, write or cut
-        self.app.annotates = self.product() != Product::Viewer;
+        self.app.set_viewer_mode(self.product() == Product::Viewer);
         #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
         {
             self.app.collab.language = self.l();
@@ -1872,6 +1887,7 @@ impl Studio {
             // the window driven as a person drives it: its controls, a click, typing
             #[cfg(not(target_arch = "wasm32"))]
             Msg::App(Message::Remote(call)) if call.cmd.starts_with("ui_") => return self.ui_command(call),
+            Msg::App(message) if self.product() == Product::Viewer && !message.allowed_in_viewer() => return Task::none(),
             Msg::App(message) => {
                 // how the 3D view draws its grids and levels is kept between sessions
                 let kept = (self.app.grid_heads_hidden, self.app.grid_dims, self.app.levels_3d, self.app.ambient);
@@ -1891,6 +1907,7 @@ impl Studio {
                 }
                 // joins made automatically are named in the interface language
                 self.app.modeller.join_word = self.l().text("Verbinding", "Connection");
+                self.app.modeller.fitting_words = [self.l().text("Bocht", "Bend"), self.l().text("T-stuk", "Tee"), self.l().text("Verloop", "Transition")];
                 self.app.modeller.space_word = self.l().text("Ruimte", "Space");
                 self.app.modeller.top_word = self.l().text("b.k.", "top");
                 self.app.modeller.pile_words = [
@@ -2135,6 +2152,14 @@ impl Studio {
                 }
             }
             // document tabs: the 3D view, the open schedules, then the open sheets
+            Msg::ShowModel3d => {
+                if self.product() != Product::Viewer && self.products.contains(&Product::Viewer) {
+                    self.set_product(Product::Viewer);
+                }
+                self.backstage = false;
+                self.compact_panel = None;
+                return self.app.update(Message::SelectTab(0)).map(Msg::App);
+            }
             Msg::SelectTab(i) => return self.update(Msg::App(Message::SelectTab(i))),
             // the 3D view (tab 0) stays open
             Msg::CloseTab(i) => return self.update(Msg::App(Message::CloseTab(i))),
@@ -2178,6 +2203,17 @@ impl Studio {
                 // and in the sketch of a floor L, R, A and T are its tools
                 let sketching = self.app.modeller.sketch.is_some();
                 if self.dialog.is_none() && sketching && !press.modifiers.control() && !press.modifiers.alt() {
+                    if let Key::Character(c) = &press.key {
+                        if c.eq_ignore_ascii_case("c") || (self.keys.pending() == Some('c') && c.eq_ignore_ascii_case("o")) {
+                            use crate::app::modeller::keys::{ModelKey, Step};
+                            let steps = self.keys.steps(c.chars().next().unwrap(), Instant::now());
+                            if steps.contains(&Step::Key(ModelKey::Copy)) {
+                                return self.key_step(Step::Key(ModelKey::Copy));
+                            }
+                            return Task::none();
+                        }
+                    }
+                    self.keys.clear();
                     if let Key::Character(c) = &press.key {
                         if let Some(c) = c.chars().next().filter(|c| "lratLRAT".contains(*c)) {
                             return self.update(Msg::App(Message::EditKey(c)));
@@ -2246,6 +2282,7 @@ impl Studio {
             // Tab on a selected modelled element opens its edit mode, as in Blender; else it moves
             // the focus
             Msg::Navigate(openaec_ui::keyboard::Navigation::Next) if self.dialog.is_none() && !self.backstage && self.app.wants_tab() => {
+                self.keys.clear();
                 return self.update(Msg::App(Message::EditMode));
             }
             Msg::Navigate(step) => return openaec_ui::keyboard::navigate(step),
@@ -2497,7 +2534,8 @@ impl Studio {
                     ..Default::default()
                 })
                 .on_press(Msg::App(Message::SnapToggle(snap)));
-            line = line.push(w::with_tooltip(look, switch.into(), snap.tip(l), None));
+            let switch = openaec_ui::design::a11y::node(switch, openaec_ui::design::a11y::Node::new(openaec_ui::design::a11y::Role::CheckBox, snap.label(l)).checked(on));
+            line = line.push(w::with_tooltip(look, switch, snap.tip(l), None));
         }
         let cell = column![
             w::divider(look),
@@ -2544,8 +2582,9 @@ impl Studio {
     fn title_bar(&self, look: Look) -> Element<'_, Msg> {
         // the Modeller changes the model, so taking a step back or forth is at hand there
         let modelling = self.product() == Product::Modeller;
-        let ids: &[&str] = if modelling { &["file.new", "file.open", "file.save-as", "edit.undo", "edit.redo"] } else { &["file.new", "file.open", "file.save-as"] };
-        let quick: Vec<Element<'_, Msg>> = ids.iter().map(|id| cm::icon_button(look, &self.command(id), 28.0)).collect();
+        let ids: &[&str] = if self.product() == Product::Viewer { &["file.open"] } else if modelling { &["file.new", "file.open", "file.save-as", "edit.undo", "edit.redo"] } else { &["file.new", "file.open", "file.save-as"] };
+        let mut quick = vec![cm::button(look, &self.command("view.3d"), K::Quiet, D::Compact)];
+        quick.extend(ids.iter().map(|id| cm::icon_button(look, &self.command(id), 28.0)));
         let mut extra = Vec::new();
         if let Some(available) = &self.update {
             extra.push(container(upd::notice(look, available, Msg::Update)).padding([0, 8]).into());
@@ -2697,7 +2736,7 @@ impl Studio {
             RibbonPage::Model => vec![
                 (l.text("Selecteren", "Select"), vec![large("model.select")]),
                 // what the building is set out on: its grid lines and its levels
-                (l.text("Stramien", "Grid"), vec![large("project.grid"), large("project.level")]),
+                (l.text("Referenties", "Datums"), vec![large("project.grid"), large("project.level")]),
                 (l.text("Vlak", "Planar"), vec![large("model.wall"), large("model.slab")]),
                 (l.text("Lijnvormig", "Linear"), vec![large("model.column"), large("model.beam")]),
                 (l.text("Systeem", "System"), vec![large("model.system")]),
@@ -2705,6 +2744,17 @@ impl Studio {
                 (l.text("Openingen", "Openings"), vec![large("model.door"), large("model.window")]),
                 (l.text("Verbinding", "Connection"), vec![smalls(&["model.butt", "model.mitre", "model.cut"]), smalls(&["model.end-plate", "model.apart"]), smalls(&["model.fin-plate", "model.splice", "model.base-plate"])]),
                 (l.text("Wapening", "Reinforcement"), vec![large("model.rebar"), smalls(&["model.rebar-stirrups", "model.rebar-extra", "model.rebar-hairpins"])]),
+                (l.text("Wijzigen", "Modify"), vec![large("model.edit"), smalls(&["model.move", "model.copy"]), smalls(&["model.rotate", "model.mirror"]), smalls(&["model.align"]), large("model.delete")]),
+            ],
+            // building services, by discipline as other BIM modellers have them: air, water and
+            // power. Where two runs of one kind meet, their fitting (a bend, a tee) is a connection
+            // made by itself, as a join between beams is.
+            RibbonPage::Mep => vec![
+                (l.text("Selecteren", "Select"), vec![large("model.select")]),
+                (l.text("Ventilatie", "HVAC"), vec![large("mep.duct"), large("mep.round-duct")]),
+                (l.text("Leidingen", "Plumbing"), vec![large("mep.pipe")]),
+                (l.text("Elektra", "Electrical"), vec![large("mep.cable-tray")]),
+                (l.text("Verbinding", "Connection"), vec![smalls(&["model.cut", "model.apart"])]),
                 (l.text("Wijzigen", "Modify"), vec![large("model.edit"), smalls(&["model.move", "model.copy"]), smalls(&["model.rotate", "model.mirror"]), smalls(&["model.align"]), large("model.delete")]),
             ],
             // the project as its IFCX file has it: the ways to look at it, and saving it
@@ -2717,7 +2767,7 @@ impl Studio {
                 (l.text("Niveaus", "Levels"), vec![large("project.level")]),
                 (l.text("Stramien", "Grid"), vec![large("project.grid")]),
                 (l.text("Weergaven", "Views"), vec![large("project.floor-plan"), smalls(&["project.structural-plan", "project.ceiling-plan", "annotate.section"])]),
-                (l.text("Tekeningen", "Drawings"), vec![large("project.sheet")]),
+                (l.text("Tekenbladen", "Sheets"), vec![large("project.sheet")]),
                 (l.text("Bibliotheek", "Library"), vec![large("project.library")]),
             ],
             // drawing in the floor plan, section or sheet shown, in the order of a drawing program's
@@ -2859,10 +2909,11 @@ impl Studio {
     fn backstage_view(&self, look: Look) -> Element<'_, Msg> {
         let l = self.l();
         let c = look.color;
-        let loaded = self.app.model.is_some();
+        let writable = self.product() != Product::Viewer;
+        let loaded = writable && self.app.model.is_some();
         #[allow(unused_mut)]
         let mut nav = column![
-            t::file_nav_row(look, small("file.new"), l.text("Nieuw", "New"), false, Some(Msg::App(Message::NewModel(l.text("Niveau 0", "Level 0"))))),
+            t::file_nav_row(look, small("file.new"), l.text("Nieuw", "New"), false, writable.then_some(Msg::App(Message::NewModel(l.text("Niveau 0", "Level 0"))))),
             t::file_nav_row(look, small("file.open"), l.text("Openen", "Open"), false, Some(Msg::App(Message::OpenDialog))),
             t::file_nav_row(look, small("file.open"), l.text("Map openen", "Open folder"), false, Some(Msg::App(Message::OpenFolderDialog))),
             t::file_nav_row(look, small("file.import"), l.text("Toevoegen", "Add"), false, Some(Msg::App(Message::AddDialog))),
@@ -3092,7 +3143,7 @@ impl Studio {
         if self.product() == Product::Library {
             return Self::pane(app.library_side(p, l));
         }
-        if self.product() != Product::Modeller {
+        if self.product() != Product::Modeller || (app.active_doc_sheet.is_some() && app.sheet_pick.is_some()) {
             return Self::pane(app.properties_body_for(p, l, geo));
         }
         column![
@@ -3470,6 +3521,7 @@ mod tests {
     #[test]
     fn sheets_and_views_are_tabs_of_the_main_window() {
         let mut studio = Studio::new(App::default());
+        studio.set_product(Product::Modeller);
         studio.prefs.language = Language::English;
         let _ = studio.update(Msg::App(Message::Loaded(Ok(triangle("a.rvt")))));
         let _ = studio.update(Msg::App(Message::NewSheet("Sheet")));
@@ -3477,6 +3529,29 @@ mod tests {
         assert_eq!(studio.app.active_doc_tab(), 1);
         let names = accessibility(&studio).summary();
         assert!(names.iter().any(|n| n.contains("A01 Sheet")), "{names:?}");
+    }
+
+    #[test]
+    fn global_3d_button_returns_to_the_current_project_from_every_product() {
+        let mut studio = Studio::new(App::default());
+        studio.set_product(Product::Modeller);
+        let _ = studio.update(Msg::App(Message::Loaded(Ok(triangle("project.ifc")))));
+        let _ = studio.update(Msg::App(Message::NewSheet("Sheet")));
+        for product in studio.products.clone() {
+            let _ = studio.update(Msg::Product(product));
+            let _ = studio.update(Msg::SelectTab(1));
+            studio.backstage = true;
+            studio.compact_panel = Some(Side::Left);
+            let _ = studio.update(Msg::ShowModel3d);
+            assert_eq!(studio.app.active_doc_tab(), 0, "{product:?}");
+            assert!(studio.app.doc_tabs().contains(&DocTab::DocSheet(0)));
+            assert!(!studio.backstage && studio.compact_panel.is_none());
+            assert_eq!(studio.product(), Product::Viewer);
+            let tabs = studio.app.doc_tabs();
+            let _ = studio.update(Msg::App(Message::NewSheet("Forbidden")));
+            assert_eq!(studio.app.doc_tabs(), tabs);
+            assert!(!studio.command("model.edit").enabled);
+        }
     }
 
     #[test]
@@ -3561,6 +3636,9 @@ mod tests {
         let ctrl_n = Msg::Key(KeyPress { key: Key::Character("n".into()), modifiers: Modifiers::CTRL });
         let mut studio = Studio::new(App::default());
         studio.prefs.language = Language::English;
+        let _ = studio.update(ctrl_n.clone());
+        assert!(studio.app.model.is_none(), "Viewer cannot create models");
+        studio.set_product(Product::Modeller);
         let _ = studio.update(ctrl_n.clone());
         assert_eq!(studio.tabs.len(), 1, "in the empty project");
         let model = studio.app.model.clone().expect("an empty model");
@@ -4405,6 +4483,15 @@ mod tests {
         let mut app = App::default();
         app.add_demo_building();
         let mut studio = Studio::new(app);
+        studio.app.select_modelled(bim_core::ElementId(2));
+        let before = studio.app.modeller.model.clone();
+        let _ = studio.update(Msg::Navigate(Navigation::Next));
+        let _ = studio.update(Msg::App(Message::DeletePicked));
+        let _ = studio.update(Msg::App(Message::Undo));
+        assert!(studio.app.modeller.edit.is_none() && studio.app.handles_shown().is_none());
+        assert_eq!(studio.app.modeller.model, before);
+        studio.set_product(Product::Modeller);
+        let _ = studio.update(Msg::App(Message::ContextMenu(crate::app::MenuItem::ClearSelection)));
         // nothing selected: Tab moves the focus, edit mode stays shut
         let _ = studio.update(Msg::Navigate(Navigation::Next));
         assert!(studio.app.modeller.edit.is_none());

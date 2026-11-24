@@ -352,6 +352,10 @@ impl App {
     /// Runs a remote command. Most answer at once; `open_file` answers when the model is in and
     /// `screenshot` when the window is captured.
     pub fn remote(&mut self, call: RemoteCall) -> Task<Message> {
+        if !self.annotates && (matches!(call.cmd.as_str(), "save_file" | "place_model_point" | "drag_handle" | "tool_type" | "click_drawing" | "element_drawings") || call.cmd.starts_with("collab_")) {
+            call.answer(Err("The Viewer is read-only.".into()));
+            return Task::none();
+        }
         match call.cmd.as_str() {
             "open_file" => return self.remote_open(call),
             "save_file" => return self.remote_save(call),
@@ -368,6 +372,12 @@ impl App {
             #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
             "collab_export" if matches!(call.args.get("kind").and_then(|v| v.as_str()), Some("pdf" | "issues_pdf")) => {
                 let (answer, task) = self.collab_pdf_remote(&call.args);
+                call.answer(answer);
+                return task;
+            }
+            #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
+            "collab_clashes" if matches!(call.args.get("action").and_then(|v| v.as_str()), None | Some("run" | "")) && call.args.get("selection").and_then(|v| v.as_bool()) == Some(true) => {
+                let (answer, task) = self.collab_selection_run();
                 call.answer(answer);
                 return task;
             }
@@ -445,6 +455,7 @@ impl App {
                 let _ = self.update(Message::Redo);
                 Ok(self.visibility_json())
             }
+            "place_model_point" => self.place_model_point(a.get("x").and_then(Value::as_f64).ok_or("x in metres required")?, a.get("y").and_then(Value::as_f64).ok_or("y in metres required")?),
             "pick" => self.remote_pick(a),
             "place_cursor" => {
                 let (x, y) = (num(a, "x").ok_or("x is required")?, num(a, "y").ok_or("y is required")?);
@@ -1039,11 +1050,18 @@ impl App {
             "level": r.level,
             "parameters": Value::Object(r.extra.iter().map(|(k, v)| (k.clone(), json!(v))).collect()),
         })).collect();
-        let truncated = p.levels.len() > MAX_LIST || p.grids.len() > MAX_LIST || offset.saturating_add(rooms.len()) < p.rooms.len();
+        let authored = self.modeller.in_modeller && self.modeller.shown.is_some();
+        let (level_count, levels): (usize, Vec<Value>) = if authored {
+            let levels = self.document.levels();
+            (levels.len(), levels.iter().take(MAX_LIST).map(|l| json!({"name": l.name, "elevation": l.elevation})).collect())
+        } else {
+            (p.levels.len(), p.levels.iter().take(MAX_LIST).map(|(n,z)| json!({"name":n, "elevation":round(*z)})).collect())
+        };
+        let truncated = level_count > MAX_LIST || p.grids.len() > MAX_LIST || offset.saturating_add(rooms.len()) < p.rooms.len();
         Ok(json!({
             "info": Value::Object(p.info.iter().map(|(k, v)| (k.clone(), json!(v))).collect()),
-            "levels": p.levels.iter().take(MAX_LIST).map(|(n, z)| json!({ "name": n, "elevation": round(*z) })).collect::<Vec<_>>(),
-            "level_count": p.levels.len(),
+            "levels": levels,
+            "level_count": level_count,
             "phases": p.phases,
             "grids": p.grids.iter().take(MAX_LIST).map(|g| json!({ "name": g.name, "a": g.a, "b": g.b })).collect::<Vec<_>>(),
             "grid_count": p.grids.len(),

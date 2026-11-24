@@ -406,9 +406,9 @@ impl App {
             at.extend(frame.across.iter().map(|a| lo.x + a));
             at.push(hi.x);
             at.sort_by(f64::total_cmp);
-            for pair in at.windows(2) {
-                self.document.add_dimension(&view, [pair[1], lo.y], [pair[0], lo.y]);
-            }
+            at.dedup_by(|a,b| (*a-*b).abs() < 0.001);
+            let points = at.into_iter().rev().map(|x| [x,lo.y]).collect::<Vec<_>>();
+            self.document.add_dimension_chain(&view, &points);
             rows = 2.0;
         }
         self.document.add_dimension(&view, [hi.x, lo.y - (rows - 1.0) * step], [lo.x, lo.y - (rows - 1.0) * step]);
@@ -418,9 +418,9 @@ impl App {
             let mut at = vec![lo.y, hi.y];
             at.extend(&frame.up);
             at.sort_by(f64::total_cmp);
-            for pair in at.windows(2) {
-                self.document.add_dimension(&view, [lo.x, pair[0]], [lo.x, pair[1]]);
-            }
+            at.dedup_by(|a,b| (*a-*b).abs() < 0.001);
+            let points = at.into_iter().map(|y| [lo.x,y]).collect::<Vec<_>>();
+            self.document.add_dimension_chain(&view, &points);
             columns = 2.0;
         }
         self.document.add_dimension(&view, [lo.x - (columns - 1.0) * step, lo.y], [lo.x - (columns - 1.0) * step, hi.y]);
@@ -484,10 +484,10 @@ mod tests {
 
     #[test]
     fn a_beam_a_column_and_a_slab_have_frames_and_an_object_none() {
-        let beam = Shape::Linear(LinearDef { start: DVec3::new(0.0, 0.0, 2.8), end: DVec3::new(0.0, 5.0, 2.8), profile: ProfileDef::Rectangle { width: 0.2, height: 0.4 }, roll: 0.0 });
+        let beam = Shape::Linear(LinearDef { start: DVec3::new(0.0, 0.0, 2.8), end: DVec3::new(0.0, 5.0, 2.8), profile: ProfileDef::Rectangle { width: 0.2, height: 0.4 }, roll: 0.0, role: Default::default() });
         let f = frame(&beam).unwrap();
         assert!((f.lo - DVec2::new(0.0, 2.6)).length() < 1e-9 && (f.hi - DVec2::new(5.0, 3.0)).length() < 1e-9 && (f.volume - 0.4).abs() < 1e-9, "{f:?}");
-        let column = Shape::Linear(LinearDef { start: DVec3::new(4.0, 4.0, 0.0), end: DVec3::new(4.0, 4.0, 3.0), profile: ProfileDef::Rectangle { width: 0.3, height: 0.5 }, roll: 0.0 });
+        let column = Shape::Linear(LinearDef { start: DVec3::new(4.0, 4.0, 0.0), end: DVec3::new(4.0, 4.0, 3.0), profile: ProfileDef::Rectangle { width: 0.3, height: 0.5 }, roll: 0.0, role: Default::default() });
         let f = frame(&column).unwrap();
         assert!((f.hi.x - f.lo.x - 0.3).abs() < 1e-9 && (f.lo.y, f.hi.y) == (0.0, 3.0) && f.sizes == [0.3, 3.0, 0.5], "{f:?}");
         let slab = Shape::Planar(PlanarDef {
@@ -506,7 +506,7 @@ mod tests {
     fn a_reinforced_beam_is_drawn_with_its_bars_its_stirrups_and_its_section() {
         let mut app = App::default();
         app.new_model("Level 0");
-        let beam = Shape::Linear(LinearDef { start: DVec3::new(0.0, 0.0, 3.0), end: DVec3::new(6.0, 0.0, 3.0), profile: ProfileDef::Rectangle { width: 0.3, height: 0.5 }, roll: 0.0 });
+        let beam = Shape::Linear(LinearDef { role: Default::default(), start: DVec3::new(0.0, 0.0, 3.0), end: DVec3::new(6.0, 0.0, 3.0), profile: ProfileDef::Rectangle { width: 0.3, height: 0.5 }, roll: 0.0 });
         let id = app.add_element("Beam", None, beam).unwrap();
         app.select_modelled(id);
         let _ = app.update(Message::Reinforce(true));
@@ -540,7 +540,7 @@ mod tests {
 
     #[test]
     fn a_reinforced_column_has_its_bars_upright_and_its_stirrups_across() {
-        let column = Shape::Linear(LinearDef { start: DVec3::new(4.0, 4.0, 0.0), end: DVec3::new(4.0, 4.0, 3.0), profile: ProfileDef::Rectangle { width: 0.3, height: 0.5 }, roll: 0.0 });
+        let column = Shape::Linear(LinearDef { role: Default::default(), start: DVec3::new(4.0, 4.0, 0.0), end: DVec3::new(4.0, 4.0, 3.0), profile: ProfileDef::Rectangle { width: 0.3, height: 0.5 }, roll: 0.0 });
         let mut e = Element::in_project(&bim_core::TileGrid::default(), "Column", None, column.clone());
         e.reinforcement = Some(Default::default());
         let f = frame(&column).unwrap();
@@ -551,7 +551,7 @@ mod tests {
         assert!(upright.iter().all(|l| (l[0][1] - 0.03).abs() < 1e-9 && (l[1][1] - 2.97).abs() < 1e-9));
         assert_eq!(b.lines.len() - 5, 20, "a stirrup every 150 over 2.94");
         // a sloping member has none drawn, nor one without reinforcement
-        let rafter = Shape::Linear(LinearDef { start: DVec3::ZERO, end: DVec3::new(4.0, 0.0, 2.0), profile: ProfileDef::Rectangle { width: 0.3, height: 0.5 }, roll: 0.0 });
+        let rafter = Shape::Linear(LinearDef { role: Default::default(), start: DVec3::ZERO, end: DVec3::new(4.0, 0.0, 2.0), profile: ProfileDef::Rectangle { width: 0.3, height: 0.5 }, roll: 0.0 });
         assert!(bar_drawing(&e, &rafter, &frame(&rafter).unwrap(), 20.0, 0.1, 1).is_none());
         e.reinforcement = None;
         assert!(bar_drawing(&e, &column, &f, 20.0, 0.1, 1).is_none());
@@ -573,8 +573,8 @@ mod tests {
         assert!(view.dimensions.iter().all(|d| d.from[1] <= 1e-9 || d.from[0] <= 1e-9), "{:?}", view.dimensions);
         assert_eq!((view.name.as_str(), view.kind, view.scale), ("Element drawing Wall 1", SectionKind::Elevation, 20.0));
         // three along its foot through the opening and its length; three up and its height
-        let lengths: Vec<i64> = view.dimensions.iter().map(|d| (d.length() * 1000.0).round() as i64).collect();
-        assert_eq!(lengths, [2000, 1200, 2800, 6000, 900, 1500, 600, 3000]);
+        let lengths: Vec<i64> = view.dimensions.iter().flat_map(|d| d.intervals()).map(|(_, [a,b])| ((b[0]-a[0]).hypot(b[1]-a[1]) * 1000.).round() as i64).collect();
+        assert_eq!(lengths, [2800, 1200, 2000, 6000, 900, 1500, 600, 3000]);
         let text: Vec<&str> = view.notes.iter().map(|n| n.text.as_str()).collect();
         assert_eq!(text, ["Wall 1", "6000 × 3000 × 140 mm", "Volume: 2.268 m³"]);
         assert!(view.crop.is_some());

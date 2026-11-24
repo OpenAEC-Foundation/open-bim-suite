@@ -41,33 +41,32 @@ pub fn svg(d: &Drawing2d) -> String {
     let (w, h) = page_mm(d);
     let at = |q: [f64; 2]| (num((q[0] - lo[0]) * k), num((hi[1] - q[1]) * k));
     let mut s = String::new();
-    let _ = write!(s, r#"<svg xmlns="http://www.w3.org/2000/svg" xml:space="preserve" width="{w}mm" height="{h}mm" viewBox="0 0 {w} {h}">"#, w = num(w), h = num(h));
+    let _ = write!(s, r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" width="{w}mm" height="{h}mm" viewBox="0 0 {w} {h}">"#, w = num(w), h = num(h));
     let _ = write!(s, r##"<rect width="{}" height="{}" fill="#fff"/>"##, num(w), num(h));
+    for (i, image) in d.images.iter().enumerate() {
+        let rect = |[lo, hi]: [[f64; 2]; 2]| {
+            let (x, y) = at([lo[0], hi[1]]);
+            format!(r#"x="{x}" y="{y}" width="{}" height="{}""#, num((hi[0]-lo[0])*k), num((hi[1]-lo[1])*k))
+        };
+        let mime = image.format.to_mime_type();
+        let _ = write!(s, r##"<defs><clipPath id="img{i}"><rect {}/></clipPath></defs><image {} preserveAspectRatio="none" clip-path="url(#img{i})" xlink:href="data:{mime};base64,{}"/>"##, rect(image.clip), rect(image.bounds), image.encoded());
+    }
+    for polygon in &d.polygons {
+        let points = polygon.points.iter().map(|&p| { let (x, y) = at(p); format!("{x},{y}") }).collect::<Vec<_>>().join(" ");
+        let [r, g, b] = polygon.color;
+        let _ = write!(s, r##"<polygon points="{points}" fill="#{r:02x}{g:02x}{b:02x}"/>"##);
+    }
     for pen in Pen::ALL {
         // the lines of a pen a width at a time: a view's kind of drawing gives what is cut and
         // what is seen beyond it a width of its own
-        let mut widths = d.widths(pen);
-        let plain = |width: f64| (width - pen.weight_mm()).abs() < 1e-9;
-        if pen == Pen::Dimension && !d.dimensions.is_empty() && !widths.iter().any(|w| plain(*w)) {
-            widths.push(pen.weight_mm());
-        }
-        for width in widths {
+        for (width, [r, g, b], segments) in d.strokes(pen) {
             let mut path = String::new();
-            let mut segment = |a: [f64; 2], b: [f64; 2]| {
+            for [a, b] in segments {
                 let ((ax, ay), (bx, by)) = (at(a), at(b));
                 let _ = write!(path, "M{ax} {ay}L{bx} {by}");
-            };
-            for l in d.lines.iter().filter(|l| l.pen == pen && (l.width - width).abs() < 1e-9) {
-                segment(l.a, l.b);
             }
-            if pen == Pen::Dimension && plain(width) {
-                for [a, b] in d.dimensions.iter().flat_map(|dim| dim.lines()) {
-                    segment(a, b);
-                }
-            }
-            if !path.is_empty() {
-                let _ = write!(s, r##"<path d="{path}" fill="none" stroke="#000" stroke-width="{}" stroke-linecap="round"/>"##, num(width));
-            }
+            let color = if [r,g,b] == [0; 3] { "#000".to_string() } else { format!("#{r:02x}{g:02x}{b:02x}") };
+            let _ = write!(s, r##"<path d="{path}" fill="none" stroke="{color}" stroke-width="{}" stroke-linecap="round"/>"##, num(width));
         }
     }
     let labels: Vec<Text2d> = d.dimensions.iter().map(|dim| dim.label()).collect();
@@ -78,10 +77,13 @@ pub fn svg(d: &Drawing2d) -> String {
             Align::Center => "middle",
             Align::Right => "end",
         };
-        let size = num(t.height * k / CAPITALS);
+        let color = t.color.map_or_else(|| "#000".to_owned(), |[r,g,b]| format!("#{r:02x}{g:02x}{b:02x}"));
+        let weight = if t.bold { "bold" } else { "normal" };
+        let size = num(t.height * k / if t.family.is_some() { 1.0 } else { CAPITALS });
+        let family = escape(t.family.as_deref().unwrap_or("Inter, sans-serif"));
         // the page's y runs down: a turn counter-clockwise is a negative one there
         let turn = if t.angle == 0.0 { String::new() } else { format!(r#" transform="rotate({} {x} {y})""#, num(-t.angle.to_degrees())) };
-        let _ = write!(s, r##"<text x="{x}" y="{y}" font-family="Inter, sans-serif" font-size="{size}" text-anchor="{anchor}" fill="#000"{turn}>{}</text>"##, escape(&t.text));
+        let _ = write!(s, r##"<text x="{x}" y="{y}" font-family="{family}" font-size="{size}" text-anchor="{anchor}" font-weight="{weight}" fill="{color}"{turn}>{}</text>"##, escape(&t.text));
     }
     s.push_str("</svg>");
     s
@@ -93,6 +95,19 @@ pub fn png(d: &Drawing2d, dpi: f64) -> Result<Vec<u8>, String> {
     let mut fonts = usvg::fontdb::Database::new();
     for bytes in openaec_ui::fonts::FILES {
         fonts.load_font_data(bytes.to_vec());
+    }
+    let used = |family: &str, bold: bool| d.texts.iter().any(|t| t.family.as_deref() == Some(family) && t.bold == bold)
+        || (!bold && d.dimensions.iter().any(|dim| dim.style.label_family().as_deref() == Some(family)));
+    if used(crate::typeface::ARIAL_NARROW, false) {
+        if let Some(font) = crate::typeface::arial_narrow() { fonts.load_font_data(font.to_vec()); }
+    }
+    if used(crate::typeface::SWISS_CONDENSED, false) {
+        if let Some(font) = crate::typeface::swiss_condensed() { fonts.load_font_data(font.to_vec()); }
+    }
+    for bold in [false, true] {
+        if used("Segoe UI", bold) {
+            if let Some(font) = crate::typeface::segoe_ui(bold) { fonts.load_font_data(font.to_vec()); }
+        }
     }
     let options = usvg::Options { fontdb: Arc::new(fonts), ..usvg::Options::default() };
     let tree = usvg::Tree::from_str(&svg(d), &options).map_err(|e| format!("Cannot draw the drawing: {e}"))?;
@@ -130,11 +145,13 @@ mod tests {
 
     fn sheet(paper: [f64; 2]) -> Drawing2d {
         Drawing2d {
+            polygons: Vec::new(),
+            images: Vec::new(),
             name: "A01 Plattegronden".into(),
             space: Space::Paper,
             paper: Some(paper),
             lines: vec![Line2d::new(Pen::Cut, [0.05, 0.05], [0.30, 0.05]), Line2d::new(Pen::Beyond, [0.05, 0.10], [0.30, 0.10])],
-            texts: vec![Text2d { pen: Pen::Text, at: [0.05, 0.2], height: 0.005, text: "A & <B> ë".into(), align: Align::Left, angle: 0.0 }],
+            texts: vec![Text2d { family: None, bold: false, color: None, pen: Pen::Text, at: [0.05, 0.2], height: 0.005, text: "A & <B> ë".into(), align: Align::Left, angle: 0.0 }],
             dimensions: Vec::new(),
         }
     }
