@@ -911,6 +911,11 @@ impl PaperDrawing {
         self.tool || self.section_tool || self.noting.is_some()
     }
 
+    /// The field of the title block at paper point `at`, with what it says.
+    fn field_at(&self, at: [f64; 2]) -> Option<(bim_library::house::Field, &str)> {
+        self.block.fields.iter().find(|(_, [lo, hi], _)| (lo[0]..=hi[0]).contains(&at[0]) && (lo[1]..=hi[1]).contains(&at[1])).map(|(f, _, v)| (*f, v.as_str()))
+    }
+
     /// The text's paper capitals in canvas font pixels.
     fn note_size(fit: &Fit, note: &crate::document::Note) -> f32 {
         (note.size * fit.scale) as f32
@@ -962,6 +967,10 @@ struct PaperState {
     crop: Option<(usize, Side)>,
     /// Where the view carried from the Views list is over the paper (canvas pixels).
     carry: Option<Point>,
+    /// The field of the title block being typed into, and what it says so far.
+    typing: Option<(bim_library::house::Field, String)>,
+    /// The field of the title block under the pointer.
+    over_field: Option<bim_library::house::Field>,
 }
 
 impl canvas::Program<Message> for PaperDrawing {
@@ -976,6 +985,46 @@ impl canvas::Program<Message> for PaperDrawing {
         // a view carried from the Views list: drawn under the pointer, placed where let go
         if self.carrying.is_none() {
             state.carry = None;
+        }
+        // a field of the title block being typed into takes the keys: Enter keeps what was typed,
+        // Escape leaves the field as it was; a press elsewhere keeps it too
+        if let Some((field, typed)) = state.typing.as_mut() {
+            match event {
+                iced::Event::Keyboard(keyboard::Event::KeyPressed { key, text, .. }) => {
+                    use keyboard::key::Named;
+                    match key {
+                        keyboard::Key::Named(Named::Enter) => {
+                            let (field, value) = (*field, std::mem::take(typed));
+                            state.typing = None;
+                            return Some(canvas::Action::publish(Message::SheetField(self.key.clone(), field, value)).and_capture());
+                        }
+                        keyboard::Key::Named(Named::Escape) => {
+                            state.typing = None;
+                        }
+                        keyboard::Key::Named(Named::Backspace) => {
+                            typed.pop();
+                        }
+                        _ => {
+                            if let Some(t) = text.as_deref().filter(|t| t.chars().all(|c| !c.is_control())) {
+                                typed.push_str(t);
+                            }
+                        }
+                    }
+                    return Some(canvas::Action::request_redraw().and_capture());
+                }
+                iced::Event::Keyboard(_) => return Some(canvas::Action::capture()),
+                iced::Event::Mouse(mouse::Event::ButtonPressed(_)) => {
+                    let at = cursor.position_in(bounds).map(|p| fit.paper(p));
+                    let same = at.and_then(|a| self.field_at(a)).is_some_and(|(f, _)| f == *field);
+                    if !same {
+                        let (field, value) = (*field, std::mem::take(typed));
+                        state.typing = None;
+                        return Some(canvas::Action::publish(Message::SheetField(self.key.clone(), field, value)).and_capture());
+                    }
+                    return Some(canvas::Action::capture());
+                }
+                _ => {}
+            }
         }
         match event {
             iced::Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
@@ -1025,6 +1074,11 @@ impl canvas::Program<Message> for PaperDrawing {
                     let to = [at[0] + grip[0], at[1] + grip[1]];
                     return Some(canvas::Action::publish(Message::MoveOnSheet(self.key.clone(), i, to)).and_capture());
                 }
+                let over = at.filter(|_| !self.busy()).and_then(|a| self.field_at(a)).map(|(f, _)| f);
+                if over != state.over_field {
+                    state.over_field = over;
+                    return Some(canvas::Action::request_redraw());
+                }
                 let hover = at.and_then(|a| self.view_at(a));
                 if self.busy() {
                     // on the view of the first point, else on the view under the pointer
@@ -1067,6 +1121,11 @@ impl canvas::Program<Message> for PaperDrawing {
                             Some(canvas::Action::publish(Message::AddDimension(plan, from, point)).and_capture())
                         }
                     };
+                }
+                // a field of the title block: typed into from what it says
+                if let Some((field, value)) = self.field_at(at) {
+                    state.typing = Some((field, value.to_owned()));
+                    return Some(canvas::Action::request_redraw().and_capture());
                 }
                 // a crop handle of the picked view, a dimension, else a view (which a drag then
                 // moves), else nothing
@@ -1365,6 +1424,31 @@ impl canvas::Program<Message> for PaperDrawing {
             }
             if let Some((i, from)) = state.first {
                 frame.fill(&Path::circle(fit.point(self.to_paper(i, from)), 3.0), p.accent);
+            }
+        }
+        // the field of the title block under the pointer, and the one being typed into: what is
+        // typed so far, with a caret
+        let shown = |field| self.block.fields.iter().find(|(f, _, _)| *f == field);
+        if let Some((_, [lo, hi], _)) = state.over_field.filter(|f| state.typing.as_ref().is_none_or(|(t, _)| t != f)).and_then(shown) {
+            let (at, size) = rect(*lo, *hi);
+            frame.stroke(&Path::rectangle(at, size), Stroke::default().with_color(Color { a: 0.6, ..p.accent }).with_width(1.0));
+        }
+        if let Some((field, typed)) = &state.typing {
+            if let Some((_, [lo, hi], _)) = shown(*field) {
+                let (at, size) = rect(*lo, *hi);
+                frame.fill_rectangle(at, size, paper);
+                frame.stroke(&Path::rectangle(at, size), Stroke::default().with_color(p.accent).with_width(1.5));
+                let height = (size.height * 0.7).clamp(6.0, 28.0);
+                let left = Point::new(at.x + 3.0, at.y + size.height / 2.0 + height / 2.0);
+                frame.fill_text(canvas::Text {
+                    content: format!("{typed}|"),
+                    position: left,
+                    align_y: alignment::Vertical::Bottom,
+                    size: iced::Pixels(height),
+                    color: ink,
+                    font: openaec_ui::fonts::BODY,
+                    ..canvas::Text::default()
+                });
             }
         }
         vec![frame.into_geometry()]
@@ -2008,6 +2092,47 @@ mod tests {
     /// The canvas at 2 pixels per paper millimetre.
     fn bounds() -> Rectangle {
         Rectangle::new(Point::ORIGIN, Size::new(420.0 * 2.0 + 2.0 * MARGIN, 297.0 * 2.0 + 2.0 * MARGIN))
+    }
+
+    #[test]
+    fn a_field_of_the_title_block_is_typed_into_on_the_sheet() {
+        use bim_library::house::Field;
+        let (mut app, _) = app_with_plan();
+        let _ = app.update(Message::NewSheet("Sheet"));
+        let drawing = app.paper_drawing(app.theme.palette(), Language::English).unwrap();
+        let (_, [lo, hi], value) = drawing.block.fields.iter().find(|(f, _, _)| *f == Field::Title).expect("the title can be typed into").clone();
+        assert_eq!(value, "Sheet");
+        let fit = Fit::of(drawing.sheet.paper, bounds().size());
+        let mut state = PaperState::default();
+        // a click in the field starts typing there, from what it says
+        let middle = fit.point([(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0]);
+        assert!(press_at(&drawing, &mut state, middle).is_none());
+        assert_eq!(state.typing, Some((Field::Title, "Sheet".to_string())));
+        let key = |key: keyboard::Key, text: Option<&str>| iced::Event::Keyboard(keyboard::Event::KeyPressed {
+            key: key.clone(), modified_key: key, physical_key: keyboard::key::Physical::Unidentified(keyboard::key::NativeCode::Unidentified),
+            location: keyboard::Location::Standard, modifiers: keyboard::Modifiers::empty(), text: text.map(Into::into), repeat: false,
+        });
+        let send = |state: &mut PaperState, event: iced::Event| canvas::Program::update(&drawing, state, &event, bounds(), mouse::Cursor::Unavailable).and_then(|a| a.into_inner().0);
+        for _ in 0.."Sheet".len() {
+            assert!(send(&mut state, key(keyboard::Key::Named(keyboard::key::Named::Backspace), None)).is_none());
+        }
+        for c in ["P", "l", "a", "n"] {
+            assert!(send(&mut state, key(keyboard::Key::Character(c.into()), Some(c))).is_none(), "a letter goes into the field, not to a shortcut");
+        }
+        // Enter keeps it: the sheet is called that now
+        let message = send(&mut state, key(keyboard::Key::Named(keyboard::key::Named::Enter), None)).expect("the field is set");
+        let _ = app.update(message);
+        assert_eq!(app.document.sheets()[0].name, "Plan");
+        assert!(state.typing.is_none());
+        // Escape leaves a field as it was
+        let drawing = app.paper_drawing(app.theme.palette(), Language::English).unwrap();
+        let mut state = PaperState::default();
+        let _ = press_at(&drawing, &mut state, middle);
+        let send = |state: &mut PaperState, event: iced::Event| canvas::Program::update(&drawing, state, &event, bounds(), mouse::Cursor::Unavailable).and_then(|a| a.into_inner().0);
+        let _ = send(&mut state, key(keyboard::Key::Character("x".into()), Some("x")));
+        assert!(send(&mut state, key(keyboard::Key::Named(keyboard::key::Named::Escape), None)).is_none());
+        assert!(state.typing.is_none());
+        assert_eq!(app.document.sheets()[0].name, "Plan");
     }
 
     fn press_at(drawing: &PaperDrawing, state: &mut PaperState, at: Point) -> Option<Message> {
