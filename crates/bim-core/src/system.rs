@@ -1024,8 +1024,10 @@ impl Line {
                 .filter_map(|o| {
                     let head = o.sill.max(0.0) + o.height;
                     let courses = ((rule.height + w) / row).ceil().max(1.0);
-                    // up to where the bricks of its last course would end: the joint over it stays
-                    let high = courses * row - w / 2.0;
+                    // up to where the bricks of its last course would end: the joint over it stays.
+                    // In courses far higher than a lintel (elements) it is as high as its rule
+                    // says, and the elements over it are cut to fit on it.
+                    let high = if row > 2.0 * rule.height { rule.height } else { courses * row - w / 2.0 };
                     let (from, to) = ((o.along - rule.bearing).max(0.0), (o.along + o.width + rule.bearing).min(self.length));
                     (head + high < self.height - LINEAR_TOLERANCE && to - from > LINEAR_TOLERANCE).then_some(Opening { along: from, sill: head, width: to - from, height: high, framing: None })
                 })
@@ -1722,15 +1724,17 @@ mod tests {
                 let inside = p.solid.positions.iter().all(|q| q.x > 1.5 + 1e-6 && q.x < 2.5 - 1e-6 && q.z > 0.9 + 1e-6 && q.z < 2.1 - 1e-6);
                 assert!(!inside, "{id}: a part in the window at {c}");
             }
-            // over it in brickwork a concrete lintel: two courses high less half a joint, bearing 100
-            // either side, and no brick or joint where it lies; sand-lime elements have none
+            // over it a concrete lintel bearing 100 either side, and no brick or joint where it
+            // lies: in brickwork two courses high less half a joint, in sand-lime elements 100
+            // high, the elements over it cut to fit on it
             let lintels: Vec<&PartSolid> = made.iter().filter(|p| p.class == "IfcBeam").collect();
-            assert_eq!(lintels.len(), usize::from(id.contains("waal")), "{id}");
+            assert_eq!(lintels.len(), 1, "{id}");
+            let top = if id.contains("waal") { 2.22 } else { 2.2 };
             for l in &lintels {
                 let (lo, hi) = l.solid.bounds();
-                assert!(l.material.as_deref() == Some("concrete") && (lo.x - 1.4).abs() < 1e-6 && (hi.x - 2.6).abs() < 1e-6 && (lo.z - 2.1).abs() < 1e-6 && (hi.z - 2.22).abs() < 1e-6, "{id}: {lo} {hi}");
+                assert!(l.material.as_deref() == Some("concrete") && (lo.x - 1.4).abs() < 1e-6 && (hi.x - 2.6).abs() < 1e-6 && (lo.z - 2.1).abs() < 1e-6 && (hi.z - top).abs() < 1e-6, "{id}: {lo} {hi}");
                 for p in made.iter().filter(|p| p.class != "IfcBeam") {
-                    let within = p.solid.positions.iter().all(|q| q.x > 1.4 + 1e-6 && q.x < 2.6 - 1e-6 && q.z > 2.1 + 1e-6 && q.z < 2.22 - 1e-6);
+                    let within = p.solid.positions.iter().all(|q| q.x > 1.4 + 1e-6 && q.x < 2.6 - 1e-6 && q.z > 2.1 + 1e-6 && q.z < top - 1e-6);
                     assert!(!within, "{id}: a part in the lintel");
                 }
             }

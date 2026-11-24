@@ -661,7 +661,8 @@ impl App {
                 s.breaks = s.breaks.iter().map(|b| b - lo.x).filter(|b| *b > 0.0 && *b < hi.x - lo.x).collect();
                 // in brickwork an opening stands on a course and ends under one: its sill and
                 // its head go to the nearest course, so no sliver of brick is left at them
-                if s.system_type.as_ref().is_some_and(|t| t.lintel.is_some()) && s.spacing.y > 0.0 {
+                // (elements are cut to fit an opening: only courses of bricks hold one)
+                if s.system_type.as_ref().is_some_and(|t| t.lintel.is_some()) && s.spacing.y > 0.0 && s.spacing.y <= 0.2 {
                     let rows = (s.height / s.spacing.y).round().max(1.0);
                     let course = s.height / rows;
                     for o in openings.iter_mut() {
