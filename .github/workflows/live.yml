@@ -33,6 +33,8 @@ jobs:
         with:
           keys: |
             ${{ secrets.SSH_KEY_3DM_DLL }}
+            ${{ secrets.SSH_KEY_INVENTOR_DLL }}
+            ${{ secrets.SSH_KEY_MICROSTATION_DLL }}
             ${{ secrets.SSH_KEY_PLY_DLL }}
             ${{ secrets.SSH_KEY_PLY_READER }}
             ${{ secrets.SSH_KEY_REVIT_DLL }}
