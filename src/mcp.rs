@@ -205,7 +205,7 @@ pub fn tools() -> Vec<Value> {
                 "distance": { "type": "number" }, "fov_deg": { "type": "number" },
                 "projection": { "type": "string", "enum": ["perspective", "orthographic"] }
             }), &[], false),
-        tool("navigate", "Move the camera relative to where it is, as dragging and the wheel do: orbit around the target (degrees), pan (metres, screen right/up), move forward (metres) and zoom (factor, 2 = twice as close).",
+        tool("navigate", "Move the camera relative to where it is, as dragging and the wheel do: orbit around the target (degrees), pan (metres, screen right/up), move forward (metres) and zoom (factor, 2 = twice as close). With a sheet open in its tab, zooms that sheet (factor) and pans it (pixels) instead.",
             json!({
                 "orbit_yaw_deg": { "type": "number" }, "orbit_pitch_deg": { "type": "number" },
                 "pan_right": { "type": "number" }, "pan_up": { "type": "number" },
