@@ -371,6 +371,26 @@ pub struct Step {
     pub drawn: Arc<crate::document::Drawn>,
 }
 
+impl Modeller {
+    /// An empty one for another model: the product shown stays the one it was, and so do the
+    /// words of the interface language (what a space, a join or a schedule's columns are called),
+    /// which a file opened names its spaces with before anything else happens.
+    pub(super) fn anew(&self) -> Modeller {
+        Modeller {
+            in_modeller: self.in_modeller,
+            join_word: self.join_word,
+            fitting_words: self.fitting_words,
+            top_word: self.top_word,
+            pile_words: self.pile_words,
+            bar_words: self.bar_words,
+            plank_words: self.plank_words,
+            space_word: self.space_word,
+            snap_words: self.snap_words,
+            ..Modeller::default()
+        }
+    }
+}
+
 impl App {
     /// Takes over the elements an IFCX file this viewer wrote defines (`model` was just loaded),
     /// and shows them; a definition that cannot be read is left out.
@@ -416,7 +436,7 @@ impl App {
     pub(super) fn new_model(&mut self, level: &str) {
         let empty = Arc::new(Model::new(PathBuf::from("model.ifcx"), "IFCX", Vec::new()));
         self.set_model(empty.clone());
-        self.modeller = Modeller { shown: Some(empty.id), in_modeller: self.modeller.in_modeller, ..Modeller::default() };
+        self.modeller = Modeller { shown: Some(empty.id), ..self.modeller.anew() };
         let _ = self.document.add_level(level, 0.0);
         // the empty project with its first level is where its history starts
         self.settle_modelled();

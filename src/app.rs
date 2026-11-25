@@ -1930,7 +1930,7 @@ impl App {
         // a simulation file opens coloured by its first field, at its first step
         self.field = fields::FieldView::of(&model);
         // the product shown stays the one it was
-        self.modeller = modeller::Modeller { in_modeller: self.modeller.in_modeller, ..modeller::Modeller::default() };
+        self.modeller = self.modeller.anew();
         self.set_scene(model.clone());
         // the cut the file opens with (Rhino: the clipping plane of its perspective view)
         self.plane = model.project.section;

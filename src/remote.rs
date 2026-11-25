@@ -542,6 +542,18 @@ impl App {
                 self.pick_tool_type(found.0.clone());
                 Ok(json!({ "picked": found.0, "name": found.1 }))
             }
+            "hatch_standard" => {
+                // the hatch standard the project's drawings hatch by: listed, or chosen as the
+                // house style's list does
+                if let Some(wanted) = a.get("standard").and_then(|v| v.as_str()) {
+                    let key = self.library.hatch_standards.iter().find(|s| s.key.eq_ignore_ascii_case(wanted) || s.name(bim_library::Lang::En).eq_ignore_ascii_case(wanted)).map(|s| s.key.clone())
+                        .ok_or_else(|| format!("no hatch standard '{wanted}'; call hatch_standard without one to list them"))?;
+                    let _ = self.update(Message::House(crate::app::house::HouseMessage::HatchStandard(Some(key))));
+                }
+                let chosen = self.library.hatch_standard().map(|s| s.key.clone());
+                let standards: Vec<_> = self.library.hatch_standards.iter().map(|s| json!({ "key": s.key, "name": s.name(bim_library::Lang::En) })).collect();
+                Ok(json!({ "chosen": chosen, "standards": standards }))
+            }
             "tool_option" => {
                 let language = a.get("language").and_then(|v| v.as_str()).and_then(openaec_ui::Language::from_code).unwrap_or(openaec_ui::Language::English);
                 let lists = self.tool_options(language);

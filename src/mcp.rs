@@ -277,6 +277,8 @@ pub fn tools() -> Vec<Value> {
                 "value": { "type": "string", "description": "What to pick: its name" },
                 "language": { "type": "string", "description": "The language of the names shown: en, nl, de or fr" }
             }), &[], false),
+        tool("hatch_standard", "The Modeller: the hatch standard the project's drawings hatch what is cut by: NEN 47 (the Netherlands: its signs in black on the paper) or OpenAEC (the same signs on a colour, and more kinds of material). Without a standard it lists them and says which is chosen; with one (its key or its name) it chooses that, as the list of the house style does, and the drawings follow.",
+            json!({ "standard": { "type": "string", "description": "The standard to choose: nen47, openaec, or one of the project's own" } }), &[], false),
         tool("element_drawings", "The Modeller: write the element drawings of the framed systems (timber frames, steel frames, metal stud walls) into a folder, as the Element drawings button of the properties panel does: for every prefab unit the drawing of its frame with its dimensions and the list of its members, then one of every layer with boards or battens. Of every framed system, or of the selected ones with selection: true. Returns the files written.",
             json!({
                 "folder": { "type": "string", "description": "The folder to write into (absolute); made when it is not there" },
