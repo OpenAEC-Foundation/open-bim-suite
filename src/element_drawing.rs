@@ -846,6 +846,7 @@ fn write_list(d: &mut Drawing2d, mut y: f64, text: f64, title: String, parts: &[
     list.into_iter().map(|(key, _)| key).collect()
 }
 
+/// No number stands through another: one that would is put a step higher.
 /// Writes at every one of `parts` (drawn from `lo` along) its number in the list `numbers` of
 /// [`write_list`]: in the middle of a board, beside a member that stands (those that follow one
 /// another a step higher each, so their numbers stay apart), inside the frame along a member
@@ -854,6 +855,8 @@ fn number(d: &mut Drawing2d, parts: &[Member], numbers: &[(i64, i64)], lo: f64, 
     let top = parts.iter().map(|m| m.v.1).fold(f64::NEG_INFINITY, f64::max);
     let foot = parts.iter().map(|m| m.v.0).fold(f64::INFINITY, f64::min);
     let mut standing = 0usize;
+    // where a number already stands: from where to where along and up
+    let mut taken: Vec<[f64; 4]> = Vec::new();
     for m in parts {
         let key = (mm(m.section().0), mm(m.section().1));
         let Some(n) = numbers.iter().position(|k| *k == key) else { continue };
@@ -874,6 +877,18 @@ fn number(d: &mut Drawing2d, parts: &[Member], numbers: &[(i64, i64)], lo: f64, 
             Some(s) => format!("{} · {:.0}°", n + 1, s.angle),
             None => (n + 1).to_string(),
         };
+        // clear of the numbers put before it: a step higher until it is (members standing
+        // against one another have their numbers over one another, not through one another)
+        let wide = label.chars().count() as f64 * text * 0.7;
+        let mut at = at;
+        for _ in 0..12 {
+            let hit = taken.iter().any(|r| at[0] < r[2] + 0.2 * text && at[0] + wide > r[0] - 0.2 * text && at[1] < r[3] + 0.3 * text && at[1] + text > r[1] - 0.3 * text);
+            if !hit {
+                break;
+            }
+            at[1] += 1.6 * text;
+        }
+        taken.push([at[0], at[1], at[0] + wide, at[1] + text]);
         d.texts.push(Text2d { family: None, bold: false, color: None, pen: Pen::Text, at, height: text, text: label, align: Align::Left, angle: 0.0 });
     }
 }
@@ -1029,6 +1044,25 @@ mod tests {
             assert!(lo > -0.3 && hi < units[unit] + 0.3, "{}: {lo} to {hi} in a unit of {}", d.name, units[unit]);
         }
     }
+    #[test]
+    fn the_numbers_of_members_standing_against_one_another_stay_apart() {
+        // a door with two king studs and two trimmers either side: studs side by side
+        let doubled = bim_core::OpeningFraming { header: None, kings: Some(2), trimmers: Some(2), round: false };
+        let (m, id) = frame(3.0, vec![Opening { along: 1.0, sill: 0.0, width: 0.9, height: 2.1, framing: Some(doubled) }]);
+        let all = element_drawings(&m, m.get(id).unwrap(), &|key| key.to_string());
+        let d = all.iter().find(|d| is_frame(d)).unwrap();
+        // the numbers beside the members: short texts over the foot of the frame
+        let marks: Vec<&Text2d> = d.texts.iter().filter(|t| t.at[1] > 0.0 && t.text.chars().count() <= 3 && t.text.chars().all(|c| c.is_ascii_digit())).collect();
+        assert!(marks.len() >= 8, "{}", marks.len());
+        for (i, a) in marks.iter().enumerate() {
+            for b in &marks[i + 1..] {
+                let (wa, wb) = (a.text.chars().count() as f64 * a.height * 0.7, b.text.chars().count() as f64 * b.height * 0.7);
+                let apart = a.at[0] + wa <= b.at[0] || b.at[0] + wb <= a.at[0] || a.at[1] + a.height <= b.at[1] || b.at[1] + b.height <= a.at[1];
+                assert!(apart, "{} at {:?} and {} at {:?}", a.text, a.at, b.text, b.at);
+            }
+        }
+    }
+
     #[test]
     fn a_frame_with_a_corner_off_is_drawn_as_it_is_cut() {
         // 3 m of frame, 1.2 by 0.9 off its top at its end
