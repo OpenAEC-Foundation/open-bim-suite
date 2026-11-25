@@ -400,6 +400,7 @@ dependencies = [
  "robust",
  "serde",
  "serde_json",
+ "springrep",
 ]
 
 [[package]]
@@ -2572,7 +2573,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.58.0",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
@@ -6200,6 +6201,12 @@ dependencies = [
  "ruzstd 0.9.1",
  "serde_json",
 ]
+
+[[package]]
+name = "springrep"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "39bf794647f9bb3471416b8bb2c8541959e6425758e72283416e13d303e1d7dd"
 
 [[package]]
 name = "stable_deref_trait"

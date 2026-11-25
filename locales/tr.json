@@ -2063,6 +2063,9 @@
     "aluminium": "alüminyum",
     "masonry mortar": "duvar harcı",
     "Exposure classes": "Çevresel etki sınıfları",
-    "Too weak for": "Şunun için fazla zayıf:"
+    "Too weak for": "Şunun için fazla zayıf:",
+    "Export STEP": "STEP olarak dışa aktar",
+    "Export STEP…": "STEP olarak dışa aktar…",
+    "Writes the modelled elements as exact solids for CAD: round columns and bowed edges as true cylinders and arcs": "Modellenen elemanları CAD için kesin katılar olarak yazar: yuvarlak kolonlar ve kavisli kenarlar gerçek silindirler ve yaylar olarak"
   }
 }

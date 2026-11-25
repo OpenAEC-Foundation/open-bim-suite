@@ -2063,6 +2063,9 @@
     "aluminium": "alumínio",
     "masonry mortar": "argamassa de alvenaria",
     "Exposure classes": "Classes de exposição",
-    "Too weak for": "Demasiado fraco para"
+    "Too weak for": "Demasiado fraco para",
+    "Export STEP": "Exportar STEP",
+    "Export STEP…": "Exportar STEP…",
+    "Writes the modelled elements as exact solids for CAD: round columns and bowed edges as true cylinders and arcs": "Escreve os elementos modelados como sólidos exatos para CAD: pilares redondos e bordas curvas como cilindros e arcos verdadeiros"
   }
 }

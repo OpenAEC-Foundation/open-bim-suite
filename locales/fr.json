@@ -2063,6 +2063,9 @@
     "aluminium": "aluminium",
     "masonry mortar": "mortier de maçonnerie",
     "Exposure classes": "Classes d'exposition",
-    "Too weak for": "Trop faible pour"
+    "Too weak for": "Trop faible pour",
+    "Export STEP": "Exporter en STEP",
+    "Export STEP…": "Exporter en STEP…",
+    "Writes the modelled elements as exact solids for CAD: round columns and bowed edges as true cylinders and arcs": "Écrit les éléments modélisés en solides exacts pour la CAO : poteaux ronds et bords courbes en vrais cylindres et arcs"
   }
 }

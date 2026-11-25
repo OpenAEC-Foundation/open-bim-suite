@@ -2063,6 +2063,9 @@
     "aluminium": "alluminio",
     "masonry mortar": "malta da muratura",
     "Exposure classes": "Classi di esposizione",
-    "Too weak for": "Troppo debole per"
+    "Too weak for": "Troppo debole per",
+    "Export STEP": "Esporta STEP",
+    "Export STEP…": "Esporta STEP…",
+    "Writes the modelled elements as exact solids for CAD: round columns and bowed edges as true cylinders and arcs": "Scrive gli elementi modellati come solidi esatti per il CAD: pilastri tondi e bordi curvi come veri cilindri e archi"
   }
 }

@@ -12,7 +12,7 @@ use std::iter::once;
 
 /// What was placed and what the kernel refused.
 #[derive(Default)]
-struct Log {
+pub(super) struct Log {
     placed: usize,
     refused: Vec<String>,
 }
@@ -73,7 +73,7 @@ fn window(along: f64) -> Opening {
 }
 
 /// The project: section `SHOWCASE_ONLY` of it (1 to 6), or all of it.
-fn build() -> (App, Log) {
+pub(super) fn build() -> (App, Log) {
     let mut app = super::tests::modelling();
     let mut log = Log::default();
     let lib = app.library.clone();

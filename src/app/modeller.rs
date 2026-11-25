@@ -22,6 +22,7 @@ pub mod browser;
 pub mod cursor3d;
 pub mod curtain;
 pub mod dim_refs;
+pub mod exchange;
 pub mod explorer;
 pub mod grab;
 pub(super) mod file_types;
@@ -1634,7 +1635,13 @@ fn properties(model: &bim_core::Model, e: &Element, parts: &[bim_core::Part], le
         // of no material told, with bars in it: reinforced concrete, and cut as concrete
         put("Material", "Reinforced concrete".into());
     }
-    let volume: f64 = parts.iter().map(|p| p.solid.volume()).sum();
+    // what is round in it (a round column, a bowed slab edge) measured on its true curves, not
+    // on the chords it is drawn in
+    let exact = bim_core::exact::has_curves(e).then(|| bim_core::exact::parts(model, e.id).ok()).flatten();
+    let volume: f64 = match &exact {
+        Some(exact) => bim_core::exact::volume(exact),
+        None => parts.iter().map(|p| p.solid.volume()).sum(),
+    };
     if volume > 0.0 {
         put("Volume", format!("{volume:.3} m³"));
     }

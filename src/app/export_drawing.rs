@@ -134,7 +134,7 @@ impl App {
     }
 
     /// Where the dialog starts: the model's folder, else the work folder.
-    fn document_folder(&self) -> Option<PathBuf> {
+    pub(crate) fn document_folder(&self) -> Option<PathBuf> {
         #[cfg(not(target_arch = "wasm32"))]
         return crate::managed::dialog_folder(self.model.as_ref().and_then(|m| m.path.parent().map(PathBuf::from)), crate::managed::work_folder());
         #[cfg(target_arch = "wasm32")]
