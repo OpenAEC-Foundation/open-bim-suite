@@ -10,6 +10,7 @@ use crate::measure::Tool;
 use crate::product::{Edition, Product, RibbonPage, PLANNED};
 use crate::theme::{Palette, ThemeKind};
 use crate::viewport::camera::ViewPreset;
+use crate::app::walk::KeyNavigation;
 use crate::viewport::{MouseAction, MouseButtons};
 use crate::viewport::render::RenderMode;
 use openaec_ui::design::chrome::{self as ch, WindowActions, WindowIcons};
@@ -252,6 +253,19 @@ const MOUSE_ACTIONS: [[Named<MouseAction>; 3]; LANGUAGES] = [
     [named(MouseAction::Orbit, "Nokta etrafında döndür"), named(MouseAction::Look, "Etrafa bak"), named(MouseAction::Pan, "Kaydır")],
 ];
 
+const KEY_NAVIGATION: [[Named<KeyNavigation>; 3]; LANGUAGES] = [
+    [named(KeyNavigation::Fly, "Vliegen in de kijkrichting"), named(KeyNavigation::Walk, "Lopen, horizontaal"), named(KeyNavigation::Off, "Uit")],
+    [named(KeyNavigation::Fly, "Fly where you look"), named(KeyNavigation::Walk, "Walk, level"), named(KeyNavigation::Off, "Off")],
+    [named(KeyNavigation::Fly, "In Blickrichtung fliegen"), named(KeyNavigation::Walk, "Gehen, waagerecht"), named(KeyNavigation::Off, "Aus")],
+    [named(KeyNavigation::Fly, "Voler dans la direction du regard"), named(KeyNavigation::Walk, "Marcher, à niveau"), named(KeyNavigation::Off, "Désactivé")],
+    [named(KeyNavigation::Fly, "Volar hacia donde miras"), named(KeyNavigation::Walk, "Caminar, en horizontal"), named(KeyNavigation::Off, "Desactivado")],
+    [named(KeyNavigation::Fly, "Volare dove guardi"), named(KeyNavigation::Walk, "Camminare, in piano"), named(KeyNavigation::Off, "Disattivato")],
+    [named(KeyNavigation::Fly, "Voar para onde olhas"), named(KeyNavigation::Walk, "Andar, na horizontal"), named(KeyNavigation::Off, "Desligado")],
+    [named(KeyNavigation::Fly, "Lot w kierunku patrzenia"), named(KeyNavigation::Walk, "Chodzenie, poziomo"), named(KeyNavigation::Off, "Wyłączone")],
+    [named(KeyNavigation::Fly, "Flyg dit du tittar"), named(KeyNavigation::Walk, "Gå, vågrätt"), named(KeyNavigation::Off, "Av")],
+    [named(KeyNavigation::Fly, "Baktığın yöne uç"), named(KeyNavigation::Walk, "Yürü, yatay"), named(KeyNavigation::Off, "Kapalı")],
+];
+
 /// A row of the settings: what a drag with one mouse button does.
 fn mouse_button_row<'a>(look: Look, l: Language, label: &'a str, chosen: MouseAction, with: impl Fn(MouseAction) -> MouseButtons + 'a) -> Element<'a, Msg> {
     let (list, picked) = options(&MOUSE_ACTIONS, l, chosen);
@@ -296,6 +310,8 @@ struct Prefs {
     ambient: bool,
     /// What a drag with each mouse button does in the viewport.
     mouse_buttons: MouseButtons,
+    /// What W, A, S and D do in the 3D view.
+    key_navigation: KeyNavigation,
 }
 
 impl Default for Prefs {
@@ -320,6 +336,7 @@ impl Default for Prefs {
             levels_3d: false,
             ambient: false,
             mouse_buttons: MouseButtons::default(),
+            key_navigation: KeyNavigation::default(),
         }
     }
 }
@@ -957,6 +974,7 @@ impl Studio {
         self.apply_extensions();
         (self.app.grid_heads_hidden, self.app.grid_dims, self.app.levels_3d, self.app.ambient) = (self.prefs.grid_heads_hidden, self.prefs.grid_dims, self.prefs.levels_3d, self.prefs.ambient);
         self.app.mouse_buttons = self.prefs.mouse_buttons;
+        self.app.key_navigation = self.prefs.key_navigation;
         self.prefs_path = Some(prefs);
         let keymap = dir.join("shortcuts.json");
         self.keymap = Keymap::load(&keymap);
@@ -1933,8 +1951,9 @@ impl Studio {
                     self.save_prefs();
                 }
                 // and what the mouse buttons do
-                if self.app.mouse_buttons != self.prefs.mouse_buttons {
+                if self.app.mouse_buttons != self.prefs.mouse_buttons || self.app.key_navigation != self.prefs.key_navigation {
                     self.prefs.mouse_buttons = self.app.mouse_buttons;
+                    self.prefs.key_navigation = self.app.key_navigation;
                     self.save_prefs();
                 }
                 // what opens in the explorer shows it
@@ -2230,7 +2249,7 @@ impl Studio {
                 // looks around
                 if self.dialog.is_none() && !self.backstage && !press.modifiers.control() && !press.modifiers.alt() {
                     if let Key::Character(c) = &press.key {
-                        let walks = self.app.can_walk() && (self.app.looking() || !matches!(self.product(), Product::Modeller | Product::Docs | Product::Library | Product::Planner));
+                        let walks = self.app.can_walk() && self.app.key_navigation != KeyNavigation::Off && (self.app.looking() || !matches!(self.product(), Product::Modeller | Product::Docs | Product::Library | Product::Planner));
                         if let Some(walk) = c.chars().next().filter(|_| walks).and_then(|c| Message::walk(c, true, press.modifiers.shift())) {
                             self.keys.clear();
                             return self.update(Msg::App(walk));
@@ -3283,6 +3302,12 @@ impl Studio {
                         mouse_button_row(look, l, l.text("Wiel ingedrukt slepen", "Wheel pressed drag"), buttons.middle, move |a| MouseButtons { middle: a, ..buttons }),
                         mouse_button_row(look, l, l.text("Rechtermuisknop slepen", "Right button drag"), buttons.right, move |a| MouseButtons { right: a, ..buttons }),
                         w::secondary(look, l.text("Draaien gaat om het punt onder de muis. Een dubbelklik of het rechtermuismenu zet een vast draaipunt; dat blijft staan tot een dubbelklik in de lucht of het menu het opheft. Bij rondkijken blijft de muis op zijn plek, zoals in een game. Shift + links pant, Shift + wiel draait.", "Orbiting turns about the point under the cursor. A double click or the right-click menu sets a fixed pivot; it stays until a double click in empty space or the menu clears it. Looking around holds the cursor in place, as in a game. Shift + left pans, Shift + wheel orbits.")),
+                        w::mono_label(look, l.text("Bewegen met toetsen", "Moving with keys")),
+                        {
+                            let (list, picked) = options(&KEY_NAVIGATION, l, self.app.key_navigation);
+                            w::property_row(look, l.text("W A S D", "W A S D"), w::select(look, list, picked, |n: Named<KeyNavigation>| Msg::App(Message::KeyNavigation(n.value)), D::Regular))
+                        },
+                        w::secondary(look, l.text("W, A, S en D bewegen zolang je ze vasthoudt, Q en E gaan recht omlaag en omhoog, met Shift ga je sneller. Vliegen gaat waar je kijkt, ook omhoog en omlaag; lopen blijft horizontaal. In de Modeller, waar de letters gereedschappen zijn, werken ze terwijl je met de rechtermuisknop rondkijkt.", "W, A, S and D move as long as you hold them, Q and E go straight down and up, Shift goes faster. Flying goes where you look, also up and down; walking stays level. In the Modeller, whose letters are its tools, they work while you look around with the right mouse button.")),
                         w::mono_label(look, l.text("Taal", "Language")),
                         w::property_row(look, l.text("Taal", "Language"), w::select(look, &Language::ALL, Some(l), Msg::Language, D::Regular)),
                     ]

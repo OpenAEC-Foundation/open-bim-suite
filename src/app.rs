@@ -94,7 +94,7 @@ mod sheets;
 mod structural;
 mod underlays;
 mod views_in_3d;
-mod walk;
+pub mod walk;
 
 pub use docs::{DocsMessage, DocsTab};
 pub use libraries::LibrariesMessage;
@@ -336,6 +336,8 @@ pub struct App {
     pub ambient: bool,
     /// What a drag with each mouse button does in the viewport (kept between sessions).
     pub mouse_buttons: crate::viewport::MouseButtons,
+    /// What W, A, S and D do in the 3D view: fly, walk or nothing (a setting).
+    pub key_navigation: walk::KeyNavigation,
     /// The size a point of a cloud is drawn at (pixels).
     pub point_size: f32,
     /// Shade the points of a cloud by depth (eye-dome lighting).
@@ -792,6 +794,8 @@ pub enum Message {
     ToggleAmbient,
     /// What a drag with each mouse button does in the viewport.
     MouseButtons(crate::viewport::MouseButtons),
+    /// The setting of what W, A, S and D do in the 3D view.
+    KeyNavigation(walk::KeyNavigation),
     /// Colour the points of the clouds another way.
     CloudColor(crate::cloud_color::CloudColor),
     /// Colour the mesh of a simulation file by another field, or show another time step.
@@ -1204,6 +1208,7 @@ impl Default for App {
             views_in_3d: false,
             ambient: false,
             mouse_buttons: Default::default(),
+            key_navigation: Default::default(),
             point_size: 2.5,
             cloud_depth: true,
             analysis: crate::structural::diagrams::Shown { scale: 1.0, ..Default::default() },
@@ -2928,6 +2933,10 @@ impl App {
             }
             Message::ToggleAmbient => self.ambient = !self.ambient,
             Message::MouseButtons(buttons) => self.mouse_buttons = buttons,
+            Message::KeyNavigation(nav) => {
+                self.key_navigation = nav;
+                self.walk_stop();
+            }
             Message::CloudColor(color) => self.cloud_color = color,
             Message::Field(change) => self.change_field(change),
             Message::ToggleCloudDepth => self.cloud_depth = !self.cloud_depth,

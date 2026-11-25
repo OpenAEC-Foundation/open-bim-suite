@@ -1,6 +1,7 @@
-//! Walking through the model in the 3D view with W, A, S and D, as in a game: forward, to the
-//! left, back and to the right as the camera looks (level), Q and E down and up. The camera
-//! moves as long as a key is held, smoothly, every frame; with Shift it runs.
+//! Moving through the model in the 3D view with W, A, S and D, as in a game: forward, to the
+//! left, back and to the right, Q and E straight down and up. The camera moves as long as a key
+//! is held, smoothly, every frame; with Shift it runs. How W and S go is a setting
+//! ([`KeyNavigation`]): flying where the camera looks, up and down with it, or walking level.
 //!
 //! Outside the Modeller the keys walk whenever the 3D view shows; in the Modeller, whose letters
 //! are its tools, while the right button looks around (`shell::Studio`, `Msg::Key`).
@@ -13,6 +14,19 @@ const WALK: f32 = 3.0;
 const RUN: f32 = 12.0;
 /// A frame that comes late (the window was busy) moves no further than this long a step.
 const LONGEST_STEP: f32 = 0.1;
+
+/// What W, A, S and D do in the 3D view (a setting kept between sessions).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyNavigation {
+    /// W and S fly where the camera looks, also up and down; A and D go aside, level.
+    #[default]
+    Fly,
+    /// W and S walk level the way the camera looks, as on a floor.
+    Walk,
+    /// The letters are only shortcuts.
+    Off,
+}
 
 /// The keys that walk, held now, and when the camera last moved.
 #[derive(Debug, Default, Clone)]
@@ -59,7 +73,7 @@ impl App {
     /// A walking key went down or up.
     pub(super) fn walk_key(&mut self, key: char, down: bool, fast: bool) {
         let Some(k) = walk_key(key) else { return };
-        if down && !self.can_walk() {
+        if down && (!self.can_walk() || self.key_navigation == KeyNavigation::Off) {
             return;
         }
         let was = self.walking.any();
@@ -97,11 +111,15 @@ impl App {
         self.walk_by(forward, right, up, speed * seconds);
     }
 
-    /// Moves the eye and what it looks at together by `distance`: level as the camera looks
-    /// (`forward`), to its right, or straight up; the view keeps its direction.
+    /// Moves the eye and what it looks at together by `distance`: ahead (`forward`), where the
+    /// camera looks when flying and level that way when walking, to its right, or straight up;
+    /// the view keeps its direction.
     pub(super) fn walk_by(&mut self, forward: f32, right: f32, up: f32, distance: f32) {
         let (sin, cos) = self.camera.yaw.sin_cos();
-        let ahead = Vec3::new(-cos, -sin, 0.0);
+        let ahead = match self.key_navigation {
+            KeyNavigation::Fly => self.camera.forward(),
+            KeyNavigation::Walk | KeyNavigation::Off => Vec3::new(-cos, -sin, 0.0),
+        };
         let aside = Vec3::new(-sin, cos, 0.0);
         let way = ahead * forward + aside * right + Vec3::Z * up;
         if way != Vec3::ZERO {
@@ -132,6 +150,7 @@ mod tests {
     fn a_held_key_moves_the_camera_every_frame_by_the_time() {
         let mut app = app_with_model();
         app.camera.yaw = 0.0;
+        app.camera.pitch = 0.0;
         let start = app.camera.target;
         let _ = app.update(Message::WalkKey { key: 'w', down: true, fast: false });
         let t0 = app.walking.last.unwrap();
@@ -168,6 +187,30 @@ mod tests {
         let t0 = app.walking.last.unwrap();
         app.walk_frame(t0 + Duration::from_secs(3));
         assert!(((app.camera.target - start).z - WALK * LONGEST_STEP).abs() < 1e-4);
+    }
+
+    #[test]
+    fn flying_goes_up_and_down_with_the_view_and_walking_stays_level() {
+        let looking_down = |nav: KeyNavigation| {
+            let mut app = app_with_model();
+            app.key_navigation = nav;
+            app.camera.yaw = 0.0;
+            app.camera.pitch = 30f32.to_radians();
+            let start = app.camera.target;
+            let _ = app.update(Message::WalkKey { key: 'w', down: true, fast: false });
+            let t0 = app.walking.last.unwrap();
+            app.walk_frame(t0 + Duration::from_millis(100));
+            app.camera.target - start
+        };
+        let fly = looking_down(KeyNavigation::Fly);
+        // pitch 30° looks down at 30°: forward goes down by half its length
+        assert!((fly.length() - WALK * 0.1).abs() < 1e-4 && (fly.z + WALK * 0.1 * 0.5).abs() < 1e-4, "{fly:?}");
+        let walk = looking_down(KeyNavigation::Walk);
+        assert!(walk.z.abs() < 1e-6 && (walk.length() - WALK * 0.1).abs() < 1e-4, "{walk:?}");
+        let mut app = app_with_model();
+        app.key_navigation = KeyNavigation::Off;
+        let _ = app.update(Message::WalkKey { key: 'w', down: true, fast: false });
+        assert!(!app.walking.any());
     }
 
     #[test]

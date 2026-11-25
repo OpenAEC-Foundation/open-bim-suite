@@ -2066,6 +2066,9 @@
     "Too weak for": "Şunun için fazla zayıf:",
     "Export STEP": "STEP olarak dışa aktar",
     "Export STEP…": "STEP olarak dışa aktar…",
-    "Writes the modelled elements as exact solids for CAD: round columns and bowed edges as true cylinders and arcs": "Modellenen elemanları CAD için kesin katılar olarak yazar: yuvarlak kolonlar ve kavisli kenarlar gerçek silindirler ve yaylar olarak"
+    "Writes the modelled elements as exact solids for CAD: round columns and bowed edges as true cylinders and arcs": "Modellenen elemanları CAD için kesin katılar olarak yazar: yuvarlak kolonlar ve kavisli kenarlar gerçek silindirler ve yaylar olarak",
+    "Moving with keys": "Tuşlarla hareket",
+    "W A S D": "W A S D",
+    "W, A, S and D move as long as you hold them, Q and E go straight down and up, Shift goes faster. Flying goes where you look, also up and down; walking stays level. In the Modeller, whose letters are its tools, they work while you look around with the right mouse button.": "W, A, S ve D basılı tuttuğun sürece hareket ettirir, Q ve E dümdüz aşağı ve yukarı gider, Shift ile daha hızlı gidersin. Uçmak baktığın yöne gider, yukarı ve aşağı da; yürümek yatay kalır. Harflerin araç olduğu Modeller'da sağ fare tuşuyla etrafa bakarken çalışırlar."
   }
 }

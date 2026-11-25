@@ -2066,6 +2066,9 @@
     "Too weak for": "För svag för",
     "Export STEP": "Exportera STEP",
     "Export STEP…": "Exportera STEP…",
-    "Writes the modelled elements as exact solids for CAD: round columns and bowed edges as true cylinders and arcs": "Skriver de modellerade elementen som exakta solider för CAD: runda pelare och böjda kanter som verkliga cylindrar och bågar"
+    "Writes the modelled elements as exact solids for CAD: round columns and bowed edges as true cylinders and arcs": "Skriver de modellerade elementen som exakta solider för CAD: runda pelare och böjda kanter som verkliga cylindrar och bågar",
+    "Moving with keys": "Röra sig med tangenter",
+    "W A S D": "W A S D",
+    "W, A, S and D move as long as you hold them, Q and E go straight down and up, Shift goes faster. Flying goes where you look, also up and down; walking stays level. In the Modeller, whose letters are its tools, they work while you look around with the right mouse button.": "W, A, S och D rör dig så länge du håller dem, Q och E går rakt ned och upp, med Skift går det fortare. Flyga går dit du tittar, även upp och ned; gå håller sig vågrätt. I Modeller, där bokstäverna är verktyg, fungerar de medan du ser dig omkring med höger musknapp."
   }
 }
