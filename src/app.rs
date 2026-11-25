@@ -94,6 +94,7 @@ mod sheets;
 mod structural;
 mod underlays;
 mod views_in_3d;
+pub mod walk;
 
 pub use docs::{DocsMessage, DocsTab};
 pub use libraries::LibrariesMessage;
@@ -335,6 +336,8 @@ pub struct App {
     pub ambient: bool,
     /// What a drag with each mouse button does in the viewport (kept between sessions).
     pub mouse_buttons: crate::viewport::MouseButtons,
+    /// What W, A, S and D do in the 3D view: fly, walk or nothing (a setting).
+    pub key_navigation: walk::KeyNavigation,
     /// The size a point of a cloud is drawn at (pixels).
     pub point_size: f32,
     /// Shade the points of a cloud by depth (eye-dome lighting).
@@ -519,6 +522,8 @@ pub struct App {
     /// The navigation under way: the point a drag orbits about, the depth it pans at, the
     /// point the wheel moves towards.
     nav: navigation::Navigation,
+    /// The keys that walk through the model (W, A, S, D, Q, E), held now.
+    walking: walk::Walking,
     /// The selection and hover of structural nodes and members.
     pub(crate) structural: structural::StructuralView,
     /// The modelled elements and the tool placing them.
@@ -714,9 +719,11 @@ pub enum Message {
     MoveOnSheet(Arc<str>, usize, [f64; 2]),
     /// Switch the dimension tool of the sheets on or off.
     DimensionTool(bool),
-    /// A step through the model as the camera looks (W, A, S, D; Q and E down and up):
-    /// forward, to the right and up, in steps; `fast` with Shift.
-    Walk { forward: f32, right: f32, up: f32, fast: bool },
+    /// A key that walks through the model went down or up (W, A, S, D; Q and E down and up),
+    /// `fast` with Shift: the camera moves every frame while one is held (`app::walk`).
+    WalkKey { key: char, down: bool, fast: bool },
+    /// Every walking key let go (the window lost the keyboard).
+    WalkStop,
     /// A view's tab draws it as on a sheet, or over the model.
     DrawingOnPaper(bool),
     /// Crop a floor plan (its path) to a rectangle in plan, or show all of it (`None`).
@@ -787,6 +794,8 @@ pub enum Message {
     ToggleAmbient,
     /// What a drag with each mouse button does in the viewport.
     MouseButtons(crate::viewport::MouseButtons),
+    /// The setting of what W, A, S and D do in the 3D view.
+    KeyNavigation(walk::KeyNavigation),
     /// Colour the points of the clouds another way.
     CloudColor(crate::cloud_color::CloudColor),
     /// Colour the mesh of a simulation file by another field, or show another time step.
@@ -1199,6 +1208,7 @@ impl Default for App {
             views_in_3d: false,
             ambient: false,
             mouse_buttons: Default::default(),
+            key_navigation: Default::default(),
             point_size: 2.5,
             cloud_depth: true,
             analysis: crate::structural::diagrams::Shown { scale: 1.0, ..Default::default() },
@@ -1293,6 +1303,7 @@ impl Default for App {
             hover_scene: None,
             pick_index: None,
             nav: Default::default(),
+            walking: Default::default(),
             structural: Default::default(),
             modeller: Default::default(),
         }
@@ -1830,23 +1841,6 @@ impl App {
         }
         self.anim = Some((self.camera, to, Instant::now()));
         true
-    }
-
-    /// A step through the model in the 3D view: level, the way the camera looks (`forward`) and
-    /// to its right, or straight up. The camera turns to perspective, as one walks in a
-    /// building; the eye and what it looks at move together, so the view keeps its direction.
-    fn walk(&mut self, forward: f32, right: f32, up: f32, fast: bool) {
-        if self.model.is_none() || self.shown_view().is_some() || self.active_sheet.is_some() || self.active_doc_sheet.is_some() {
-            return;
-        }
-        self.anim = None;
-        self.camera.ortho = false;
-        // a pace, or three with Shift
-        let step = if fast { 1.8 } else { 0.6 };
-        let (sin, cos) = self.camera.yaw.sin_cos();
-        let ahead = Vec3::new(-cos, -sin, 0.0);
-        let aside = Vec3::new(-sin, cos, 0.0);
-        self.camera.target += (ahead * forward + aside * right + Vec3::Z * up) * step;
     }
 
     /// Turns the camera to (yaw, pitch) and frames the model, animated.
@@ -2536,7 +2530,8 @@ impl App {
             Message::Ortho(o) => self.camera.ortho = o,
             Message::Fit => self.fit(),
             Message::NavigateSheet { zoom, pan } => { self.sheet_zoom = zoom; self.sheet_pan = pan; }
-            Message::Walk { forward, right, up, fast } => self.walk(forward, right, up, fast),
+            Message::WalkKey { key, down, fast } => self.walk_key(key, down, fast),
+            Message::WalkStop => self.walk_stop(),
             Message::ToggleLayersPanel => self.show_layers = !self.show_layers,
             Message::TogglePropertiesPanel => self.show_properties = !self.show_properties,
             Message::Layer(i, v) => self.switch_layers(&[i], v),
@@ -2938,6 +2933,10 @@ impl App {
             }
             Message::ToggleAmbient => self.ambient = !self.ambient,
             Message::MouseButtons(buttons) => self.mouse_buttons = buttons,
+            Message::KeyNavigation(nav) => {
+                self.key_navigation = nav;
+                self.walk_stop();
+            }
             Message::CloudColor(color) => self.cloud_color = color,
             Message::Field(change) => self.change_field(change),
             Message::ToggleCloudDepth => self.cloud_depth = !self.cloud_depth,
@@ -3163,6 +3162,7 @@ impl App {
             }
             Message::Pressed(fingers) => self.fingers = fingers,
             Message::Tick => {
+                self.walk_frame(Instant::now());
                 if let Some((from, to, start)) = self.anim {
                     let t = (start.elapsed().as_secs_f32() / ANIM_SECONDS).min(1.0);
                     let eased = t * t * (3.0 - 2.0 * t);
@@ -3370,6 +3370,7 @@ impl App {
             || self.anim.is_some()
             || self.hover_request.is_some()
             || self.heads_stale()
+            || self.walking.any()
         {
             window::frames().map(|_| Message::Tick)
         } else {
@@ -3413,7 +3414,20 @@ impl App {
         } else {
             Subscription::none()
         };
-        Subscription::batch([events, ticks, remote, letting_go])
+        // a walking key is let go wherever the keyboard is, and all of them when the window
+        // loses it (its release would go elsewhere)
+        let walking = if self.walking.any() {
+            event::listen_with(|event, _, _| match event {
+                iced::Event::Keyboard(keyboard::Event::KeyReleased { key: keyboard::Key::Character(c), .. }) => {
+                    c.chars().next().and_then(|c| Message::walk(c, false, false))
+                }
+                iced::Event::Window(window::Event::Unfocused) => Some(Message::WalkStop),
+                _ => None,
+            })
+        } else {
+            Subscription::none()
+        };
+        Subscription::batch([events, ticks, remote, letting_go, walking])
     }
 
     pub fn view(&self) -> Element<'_, Message> {
