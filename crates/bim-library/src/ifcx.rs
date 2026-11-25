@@ -353,8 +353,12 @@ pub fn read(file: &Value) -> Result<Library, LibraryError> {
             service_types.push(service);
         }
         if let Some(own) = attributes.get(crate::standard::HATCH_STANDARD) {
-            let standard: crate::standard::HatchStandard = serde_json::from_value(own.clone()).map_err(|e| LibraryError::Unreadable(format!("hatch standard {path}: {e}")))?;
-            // (as written: the chosen one stays chosen)
+            let mut standard: crate::standard::HatchStandard = serde_json::from_value(own.clone()).map_err(|e| LibraryError::Unreadable(format!("hatch standard {path}: {e}")))?;
+            // (as written: the chosen one stays chosen; one the suite brings has the suite's
+            // name for it, whatever an older file called it)
+            if let Some(ours) = crate::standard::starter().into_iter().find(|s| s.key == standard.key && s.set == standard.set) {
+                standard.names = ours.names;
+            }
             standard.check()?;
             if library.hatch_standards.iter().any(|s| s.key == standard.key) {
                 return Err(LibraryError::Duplicate(standard.key));
