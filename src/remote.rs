@@ -587,8 +587,9 @@ impl App {
             "measure_angle" => self.measure_angle(a),
             "measure_between_elements" => self.measure_between_elements(a),
             "clear_measurements" => {
-                let n = self.measurements.len();
-                self.measurements.clear();
+                // the saved ones and those drawn (also an issue's dimensions), as "Clear all" does
+                let n = self.measurements.len() + self.measure.results.len();
+                let _ = self.update(Message::MeasureClear);
                 Ok(json!({ "cleared": n }))
             }
             #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]

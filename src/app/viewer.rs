@@ -27,7 +27,7 @@ impl Message {
     pub(crate) fn allowed_in_viewer(&self) -> bool {
         use Message::*;
         matches!(self,
-            OpenDialog | OpenFolderDialog | AddDialog | Open(_) | Picked(_) | AddPicked(_) | AddSeveral(_) | Loaded(_) |
+            OpenDialog | OpenFolderDialog | AddDialog | Open(_) | Dropped(_) | Picked(_) | AddPicked(_) | AddSeveral(_) | Loaded(_) |
             ModelVisible(..) | PickModel(_) | ToggleFolder(_) | ViewOrder(_) | ProjectView(_) | Origin(super::origin::Message::Map(..)) |
             BuildFilmDialog | BuildFilmPicked(_) | BuildFilmDone(_) | RenderDialog | RenderPicked(_) | Saved(_) |
             Mode(_) | ToggleGrid | ToggleFlipUp | Theme(_) | Tab(_) | Preset(_) | Ortho(_) | Fit | NavigateSheet { .. } |
