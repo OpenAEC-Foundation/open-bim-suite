@@ -157,7 +157,10 @@ pub fn family_name(family: bim_library::Family, l: Language) -> &'static str {
         Family::Concrete => l.text("beton", "concrete"),
         Family::Steel => l.text("constructiestaal", "structural steel"),
         Family::Reinforcement => l.text("betonstaal", "reinforcing steel"),
+        Family::Prestressing => l.text("voorspanstaal", "prestressing steel"),
         Family::Bolt => l.text("bouten", "bolts"),
+        Family::Aluminium => l.text("aluminium", "aluminium"),
+        Family::Mortar => l.text("metselmortel", "masonry mortar"),
         Family::Timber => l.text("hout", "timber"),
     }
 }
@@ -203,6 +206,8 @@ pub enum MaterialMessage {
     Hatch(HatchKind),
     /// Typed as its grade or strength class ("C24"); empty for none.
     Graded(String),
+    /// It names this exposure class of concrete ("XC4"), or names it no more.
+    Exposed(String, bool),
     /// Its own hatch of the hatch catalogue, by its key; none: drawn by its hatch kind.
     Sign(Option<String>),
     /// Edit a material of another library: a copy of it in the project, under its key.
@@ -484,6 +489,13 @@ impl App {
                     show = false;
                 }
             }
+            MaterialMessage::Exposed(class, on) => {
+                if let Some(key) = &picked {
+                    changed = change(&mut self.library, key, |m| m.expose(&class, on));
+                    // (nor does what it stands in)
+                    show = false;
+                }
+            }
             MaterialMessage::Sign(sign) => {
                 if let Some(key) = &picked {
                     changed = change(&mut self.library, key, |m| m.sign = sign.filter(|key| bim_library::hatch::hatch(key).is_some()));
@@ -698,6 +710,26 @@ impl App {
                 fields = fields.push(text(l.text("Geen sterkteklasse van een norm: er zijn geen waarden bij.", "No strength class of a standard: it has no values.")).size(11).color(p.text_secondary).wrapping(Wrapping::Word));
             }
             None => {}
+        }
+        // the exposure classes of a concrete: each to be set, what the set ones stand for with
+        // the least strength class of each, and whether its own class is under that
+        if m.hatch == HatchKind::Concrete || m.class().is_some_and(|c| c.family == bim_library::Family::Concrete) || !m.exposure.is_empty() {
+            let exposed = m.exposures();
+            let classes = row(bim_library::exposure::CLASSES.iter().map(|c| {
+                let on = exposed.iter().any(|e| e.name == c.name);
+                let set = button(text(c.name).size(11).color(if on { p.text } else { p.text_secondary })).padding([2, 5]).style(move |_, s| if on { p.ribbon_button(true, s) } else { p.row_button(s) }).on_press(MaterialMessage::Exposed(c.name.into(), !on));
+                a11y::named(set, Aria::Button, c.name).into()
+            }))
+            .spacing(2)
+            .wrap();
+            fields = fields.push(caption(l.text("Milieuklassen", "Exposure classes"))).push(classes);
+            for c in &exposed {
+                fields = fields.push(text(c.line(lang)).size(11).color(p.text_secondary).wrapping(Wrapping::Word));
+            }
+            if let Some(short) = m.below() {
+                let told = format!("{} {}: {} ({})", l.text("Te zwak voor", "Too weak for"), short.name, short.least, short.source());
+                fields = fields.push(text(told).size(11).color(p.accent).wrapping(Wrapping::Word));
+            }
         }
         // its physics, with where they are from: taken once they have a source and a date
         let props = view.props.clone().unwrap_or_else(|| props_of(library, &m.key));
@@ -1056,6 +1088,44 @@ mod tests {
         assert_eq!((app.library.material("timber").unwrap().grade.as_deref(), app.library.material("timber").unwrap().timber_grade()), (Some("S355"), None));
         let _ = app.material_update(MaterialMessage::Graded("  ".into()));
         assert_eq!(app.library.material("timber").unwrap().grade, None);
+    }
+
+    #[test]
+    fn a_concrete_names_its_exposure_classes_and_the_pane_says_when_it_is_too_weak() {
+        let mut app = App::default();
+        let pane = |app: &App, find: &str| crate::app::test_ui_of(iced::Size::new(340.0, 2400.0), app.material_pane(app.theme.palette(), Language::English)).find(find).is_ok();
+        // of a material that is no concrete the pane has no exposure classes
+        let _ = app.material_update(MaterialMessage::Pick("timber".into()));
+        assert!(!pane(&app, "Exposure classes") && !pane(&app, "XC4"));
+        // a concrete has every class to set
+        let _ = app.material_update(MaterialMessage::Pick("concrete".into()));
+        assert!(pane(&app, "Exposure classes") && pane(&app, "X0") && pane(&app, "XC4") && pane(&app, "XA3"));
+        assert!(!pane(&app, "XC4 · carbonation: wet and dry in turn · C30/37"));
+        let _ = app.material_update(MaterialMessage::Exposed("XF1".into(), true));
+        let _ = app.material_update(MaterialMessage::Exposed("XC4".into(), true));
+        assert_eq!(app.library.material("concrete").unwrap().exposure, ["XC4", "XF1"]);
+        assert!(pane(&app, "XC4 · carbonation: wet and dry in turn · C30/37") && pane(&app, "XF1 · freezing and thawing: moderately saturated, without de-icing salt · C30/37"));
+        // without a strength class nothing is said of its strength; with one that is too low it is
+        assert!(!pane(&app, "Too weak for XC4: C30/37 (EN 1992-1-1, table E.1N)"));
+        let _ = app.material_update(MaterialMessage::Graded("C20/25".into()));
+        assert!(pane(&app, "Too weak for XC4: C30/37 (EN 1992-1-1, table E.1N)"));
+        let _ = app.material_update(MaterialMessage::Graded("C30/37".into()));
+        assert!(!pane(&app, "Too weak for XC4: C30/37 (EN 1992-1-1, table E.1N)"));
+        // in Dutch the classes are said in Dutch
+        {
+            let mut dutch = crate::app::test_ui_of(iced::Size::new(340.0, 2400.0), app.material_pane(app.theme.palette(), Language::Dutch));
+            assert!(dutch.find("Milieuklassen").is_ok() && dutch.find("XC4 · carbonatatie: afwisselend nat en droog · C30/37").is_ok());
+        }
+        // set off again, and a name that is no class changes nothing
+        let _ = app.material_update(MaterialMessage::Exposed("XC4".into(), false));
+        let _ = app.material_update(MaterialMessage::Exposed("XQ1".into(), true));
+        assert_eq!(app.library.material("concrete").unwrap().exposure, ["XF1"]);
+        // a material that is no concrete but named a class in its file still shows it
+        let _ = app.material_update(MaterialMessage::Pick("timber".into()));
+        let _ = app.material_update(MaterialMessage::Exposed("XC1".into(), true));
+        assert!(pane(&app, "XC1 · carbonation: dry or always wet · C20/25"));
+        // the families that came with prestressing steel, aluminium and mortar have a name
+        assert_eq!(bim_library::Family::ALL.map(|f| family_name(f, Language::Dutch)), ["beton", "constructiestaal", "betonstaal", "voorspanstaal", "bouten", "aluminium", "metselmortel", "hout"]);
     }
 
     #[test]
