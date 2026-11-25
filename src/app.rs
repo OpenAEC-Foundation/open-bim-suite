@@ -310,8 +310,8 @@ pub struct App {
     /// Sheets of the document open in a document tab (paths), and the one shown.
     pub open_doc_sheets: Vec<String>,
     pub active_doc_sheet: Option<String>,
-    sheet_zoom: f64,
-    sheet_pan: [f64; 2],
+    pub(crate) sheet_zoom: f64,
+    pub(crate) sheet_pan: [f64; 2],
     /// The cut of every floor plan placed on a sheet, by the plan's path.
     pub cuts: std::collections::HashMap<String, Arc<crate::drawing::Cut>>,
     /// The drawings laid on the levels.
