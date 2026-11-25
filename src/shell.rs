@@ -1339,6 +1339,10 @@ impl Studio {
                 .icon(small("file.import"), large("file.import"))
                 .shortcut(Shortcut::ctrl_shift('o'))
                 .dialog(),
+            Command::new("file.save", l.text("Opslaan", "Save"), go(Message::Save))
+                .icon(small("file.save-as"), large("file.save-as"))
+                .shortcut(Shortcut::ctrl('s'))
+                .enabled(loaded),
             Command::new("file.save-as", l.text("Opslaan als…", "Save as…"), go(Message::SaveDialog))
                 .icon(small("file.save-as"), large("file.save-as"))
                 .shortcut(Shortcut::ctrl_shift('s'))
@@ -2019,11 +2023,18 @@ impl Studio {
                     self.l().text("Aantal", "Number"),
                 ];
                 self.app.modeller.snap_words = crate::app::modeller::snaps::Snap::ALL.map(|s| s.label(self.l()));
+                // a project dropped on the window opens as a project does, in a tab of its own
+                // beside a model; another file dropped is added to the model shown
+                #[cfg(not(target_arch = "wasm32"))]
+                let message = match message {
+                    Message::Dropped(path) if crate::app::project_file::Project::peek(&path).is_some() => Message::Open(path),
+                    message => message,
+                };
                 let opened = match &message {
-                    Message::Open(path) => Some(path.clone()),
+                    Message::Open(path) | Message::Dropped(path) => Some(path.clone()),
                     _ => None,
                 };
-                if opened.is_some() || matches!(message, Message::OpenDialog | Message::SaveDialog | Message::SaveProjectDialog | Message::SaveIfcDialog(_) | Message::BlenderRender) {
+                if opened.is_some() || matches!(message, Message::OpenDialog | Message::Save | Message::SaveDialog | Message::SaveProjectDialog | Message::SaveIfcDialog(_) | Message::BlenderRender) {
                     self.backstage = false;
                 }
                 if let Some(path) = opened {
@@ -2649,7 +2660,7 @@ impl Studio {
     fn title_bar(&self, look: Look) -> Element<'_, Msg> {
         // the Modeller changes the model, so taking a step back or forth is at hand there
         let modelling = self.product() == Product::Modeller;
-        let ids: &[&str] = if self.product() == Product::Viewer { &["file.open"] } else if modelling { &["file.new", "file.open", "file.save-as", "edit.undo", "edit.redo"] } else { &["file.new", "file.open", "file.save-as"] };
+        let ids: &[&str] = if self.product() == Product::Viewer { &["file.open"] } else if modelling { &["file.new", "file.open", "file.save", "edit.undo", "edit.redo"] } else { &["file.new", "file.open", "file.save"] };
         let mut quick = vec![cm::button(look, &self.command("view.3d"), K::Quiet, D::Compact)];
         quick.extend(ids.iter().map(|id| cm::icon_button(look, &self.command(id), 28.0)));
         let mut extra = Vec::new();
@@ -3022,6 +3033,7 @@ impl Studio {
             t::file_nav_row(look, small("file.open"), l.text("Openen", "Open"), false, Some(Msg::App(Message::OpenDialog))),
             t::file_nav_row(look, small("file.open"), l.text("Map openen", "Open folder"), false, Some(Msg::App(Message::OpenFolderDialog))),
             t::file_nav_row(look, small("file.import"), l.text("Toevoegen", "Add"), false, Some(Msg::App(Message::AddDialog))),
+            t::file_nav_row(look, small("file.save-as"), l.text("Opslaan", "Save"), false, loaded.then_some(Msg::App(Message::Save))),
             t::file_nav_row(look, small("file.save-as"), l.text("Opslaan als", "Save as"), false, loaded.then_some(Msg::App(Message::SaveDialog))),
             t::file_nav_row(look, small("file.save-as"), l.text("Project opslaan", "Save project"), false, loaded.then_some(Msg::App(Message::SaveProjectDialog))),
             t::file_nav_row(look, small("file.save-as"), l.text("Exporteren als IFC 4x3", "Export IFC 4x3"), false, loaded.then_some(Msg::App(Message::SaveIfcDialog(crate::export::IfcSchema::Ifc4x3)))),

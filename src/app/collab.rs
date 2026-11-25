@@ -482,6 +482,9 @@ pub struct State {
     guids: Option<(u64, Arc<HashMap<String, u64>>)>,
     /// The topic a picture of the view is being taken for.
     shot_for: Option<String>,
+    /// The dimensions and remarks drawn in the view came from an issue's viewpoint: they go
+    /// when another issue is shown, the issue is removed or other issues come in.
+    markup: bool,
 }
 
 impl Default for State {
@@ -572,6 +575,7 @@ impl Default for State {
             run: 0,
             guids: None,
             shot_for: None,
+            markup: false,
         }
     }
 }
@@ -840,6 +844,8 @@ pub enum Event {
     ShowClosed(bool),
     OnlyFailed(bool),
     RemoveTopic,
+    /// Take away the dimensions and remarks of the viewpoint shown.
+    ClearMarkup,
     RuleSet(usize),
     ModelChecks(bool),
     Ils(bool),
@@ -1491,6 +1497,7 @@ impl App {
                 self.collab.issues = issues;
                 self.collab.issues_path = None;
                 self.collab.topic = None;
+                self.collab_clear_markup();
                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 self.collab_note(Tone::Success, format!("{count} {} {name}", l.text("issues uit", "issues from")));
             }
@@ -1571,6 +1578,15 @@ impl App {
     }
 
     /// Shows a viewpoint: what it hides, selects and cuts, from where it looks.
+    /// Takes away the dimensions and remarks an issue's viewpoint drew, with what was measured
+    /// over them; what was measured while no issue drew any stays.
+    pub(crate) fn collab_clear_markup(&mut self) {
+        if std::mem::take(&mut self.collab.markup) {
+            self.measure.results.clear();
+            self.measure.picks.clear();
+        }
+    }
+
     fn collab_show_viewpoint(&mut self, view: &Viewpoint) {
         let guids = self.collab_guids();
         let ids = |list: &[String]| -> Vec<u64> { list.iter().filter_map(|g| guids.get(g).copied()).collect() };
@@ -1587,12 +1603,15 @@ impl App {
             }
         }
         self.collab_select(ids(&view.selection));
-        // its dimensions and remarks come back in place of what was measured
+        // its dimensions and remarks come back in place of what was measured; those of the issue
+        // shown before go, also when this one has none
+        self.collab_clear_markup();
         if !(view.lines.is_empty() && view.notes.is_empty() && view.marks.is_empty()) {
             let lines = view.lines.iter().map(|(from, to)| crate::measure::Measurement::Distance(crate::measure::geometry::Distance { p1: self.collab_to_display(*from), p2: self.collab_to_display(*to), extensions: Vec::new() }));
             let notes = view.notes.iter().map(|(at, text)| crate::measure::Measurement::Note { at: self.collab_to_display(*at), text: text.clone() });
             let marks = view.marks.iter().filter_map(|(kind, points)| Some(crate::measure::Measurement::Mark { kind: crate::measure::MarkKind::parse(kind)?, points: points.iter().map(|p| self.collab_to_display(*p)).collect() }));
             self.measure.results = lines.chain(notes).chain(marks).collect();
+            self.collab.markup = true;
         }
         // A clash viewpoint carries six outward-facing planes around its local section.
         let mut lo = Vec3::splat(f32::NEG_INFINITY);
@@ -2431,6 +2450,7 @@ impl App {
             Event::Opened(_, None) => {}
             Event::Opened(File::Bcf, Some(path)) => match std::fs::read(&path).map_err(|e| e.to_string()).and_then(|bytes| Issues::read(&bytes)) {
                 Ok(issues) => {
+                    self.collab_clear_markup();
                     let count = issues.topics.len();
                     let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                     // who it comes from: the name typed, else who wrote most of it
@@ -2534,8 +2554,10 @@ impl App {
                 self.collab.labels_text = guid.as_ref().and_then(|g| self.collab.issues.topics.iter().find(|t| &t.guid == g)).map(|t| t.labels.join(", ")).unwrap_or_default();
                 self.collab.comment.clear();
                 let view = guid.and_then(|g| self.collab.issues.topics.iter().find(|t| t.guid == g)).and_then(|t| t.viewpoints.first().cloned());
-                if let Some(view) = view {
-                    self.collab_show_viewpoint(&view);
+                match view {
+                    Some(view) => self.collab_show_viewpoint(&view),
+                    // another issue, or none: the dimensions of the one before go
+                    None => self.collab_clear_markup(),
                 }
             }
             Event::Viewpoint(guid, k) => {
@@ -2735,6 +2757,7 @@ impl App {
                     topic.comment(draft.trim(), &author, at);
                 }
             }
+            Event::ClearMarkup => self.collab_clear_markup(),
             Event::RemoveTopic => {
                 if let Some(guid) = self.collab.topic.take() {
                     self.collab.share_removed.push(guid.clone());
@@ -2743,6 +2766,7 @@ impl App {
                     }
                     self.collab.issues.topics.retain(|t| t.guid != guid);
                     self.collab.issues_changed = true;
+                    self.collab_clear_markup();
                 }
             }
             Event::RuleSet(k) => {
@@ -3495,6 +3519,9 @@ impl App {
                 self.collab.partial_run = false;
                 let mut rows = run_clashes(&model, &models, &rules.clash_rules(), &AtomicBool::new(false));
                 self.collab_take_clashes(&mut rows);
+                // the clash picked in the run before is no longer there, nor its marker
+                self.collab.clash = None;
+                self.collab.open_group = None;
                 self.collab.clashes = rows;
                 group_clashes(&mut self.collab.clashes, self.collab.grouping);
                 self.collab.show_tests = self.collab.clashes.is_empty();
@@ -3503,6 +3530,8 @@ impl App {
                 if !self.collab.clashes.is_empty() {
                     let _ = self.collab_update(Event::PickClash(0));
                     self.finish_animation();
+                } else {
+                    self.refresh_overlay();
                 }
             }
             Some("issues") | None => {}
@@ -3829,6 +3858,10 @@ impl App {
             for k in 0..topic.viewpoints.len() {
                 let label = format!("{} {}", l.text("Standpunt", "Viewpoint"), k + 1);
                 views = views.push(named(button(text(label.clone()).size(12)).padding([3, 8]).style(move |_, s| p.ribbon_button(true, s)).on_press(go(Event::Viewpoint(topic.guid.clone(), k))), Node::new(Role::Button, label)));
+            }
+            if self.collab.markup {
+                let label = l.text("Markeringen wissen", "Clear markups");
+                views = views.push(named(button(text(label).size(12)).padding([3, 8]).style(move |_, s| p.ribbon_button(false, s)).on_press(go(Event::ClearMarkup)), Node::new(Role::Button, label)));
             }
             detail = detail.push(views.wrap());
             let mut facts = vec![format!("{} {}", first.selection.len(), l.text("geselecteerd", "selected"))];
@@ -5528,11 +5561,48 @@ mod tests {
         assert!(matches!(&back[2], Measurement::Mark { kind: crate::measure::MarkKind::Cloud, points } if points.len() == 3), "{back:?}");
         assert!(matches!(&back[0], Measurement::Distance(d) if d.p1.distance(Vec3::ZERO) < 1e-4 && d.p2.distance(Vec3::new(3.0, 4.0, 0.0)) < 1e-4), "{back:?}");
         assert!(matches!(&back[1], Measurement::Note { at, text } if at.distance(Vec3::new(1.0, 1.0, 2.0)) < 1e-4 && text == "Te laag"), "{back:?}");
-        // an issue without any leaves what is measured alone
+        // an issue without any takes those of the issue before away
         let plain = Topic::new("Zonder", "an");
         app.collab.issues.topics.push(plain.clone());
         let _ = app.collab_update(Event::Topic(Some(plain.guid.clone())));
-        assert_eq!(app.measure.results.len(), 3);
+        assert!(app.measure.results.is_empty(), "{:?}", app.measure.results);
+        // and leaves what is measured by hand alone
+        app.measure.results.push(Measurement::Note { at: Vec3::ZERO, text: "hier".into() });
+        let _ = app.collab_update(Event::Topic(Some(plain.guid.clone())));
+        assert_eq!(app.measure.results.len(), 1);
+    }
+
+    #[test]
+    fn the_dimensions_of_an_issue_go_when_it_is_removed_or_other_issues_come_in() {
+        use crate::measure::{geometry::Distance, Measurement};
+        let mut app = App::default();
+        app.set_model(Arc::new(two_blocks()));
+        let with_lines = |app: &mut App| {
+            app.measure.results = vec![Measurement::Distance(Distance { p1: Vec3::ZERO, p2: Vec3::new(1.2, 0.0, 0.0), extensions: Vec::new() })];
+            let mut topic = Topic::new("Maat", "an");
+            topic.viewpoints.push(app.collab_viewpoint_now());
+            app.measure.results.clear();
+            app.collab.issues.topics.push(topic.clone());
+            let _ = app.collab_update(Event::Topic(Some(topic.guid.clone())));
+            assert_eq!(app.measure.results.len(), 1);
+        };
+        // removed
+        with_lines(&mut app);
+        let _ = app.collab_update(Event::RemoveTopic);
+        assert!(app.measure.results.is_empty() && app.collab.issues.topics.is_empty());
+        // another BCF opened
+        with_lines(&mut app);
+        let dir = std::env::temp_dir().join(format!("o3v-markup-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let other = dir.join("other.bcf");
+        std::fs::write(&other, Issues::default().write().unwrap()).unwrap();
+        let _ = app.collab_update(Event::Opened(File::Bcf, Some(other)));
+        assert!(app.measure.results.is_empty(), "{:?}", app.measure.results);
+        // by hand, with the button
+        with_lines(&mut app);
+        let _ = app.collab_update(Event::ClearMarkup);
+        assert!(app.measure.results.is_empty() && !app.collab.markup);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

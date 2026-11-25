@@ -2069,6 +2069,7 @@
     "Writes the modelled elements as exact solids for CAD: round columns and bowed edges as true cylinders and arcs": "Écrit les éléments modélisés en solides exacts pour la CAO : poteaux ronds et bords courbes en vrais cylindres et arcs",
     "Moving with keys": "Se déplacer au clavier",
     "W A S D": "W A S D",
-    "W, A, S and D move as long as you hold them, Q and E go straight down and up, Shift goes faster. Flying goes where you look, also up and down; walking stays level. In the Modeller, whose letters are its tools, they work while you look around with the right mouse button.": "W, A, S et D déplacent tant que tu les maintiens, Q et E descendent et montent à la verticale, Maj va plus vite. Voler va là où tu regardes, aussi vers le haut et le bas ; marcher reste à niveau. Dans le Modeller, où les lettres sont des outils, elles agissent pendant que tu regardes autour avec le bouton droit de la souris."
+    "W, A, S and D move as long as you hold them, Q and E go straight down and up, Shift goes faster. Flying goes where you look, also up and down; walking stays level. In the Modeller, whose letters are its tools, they work while you look around with the right mouse button.": "W, A, S et D déplacent tant que tu les maintiens, Q et E descendent et montent à la verticale, Maj va plus vite. Voler va là où tu regardes, aussi vers le haut et le bas ; marcher reste à niveau. Dans le Modeller, où les lettres sont des outils, elles agissent pendant que tu regardes autour avec le bouton droit de la souris.",
+    "Clear markups": "Effacer les annotations"
   }
 }

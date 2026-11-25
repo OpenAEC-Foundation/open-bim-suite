@@ -180,7 +180,11 @@ impl App {
         let project = self.project_now(&folder);
         let left_out = self.models.len().saturating_sub(project.models.len());
         let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        self.status = match std::fs::write(&path, project.write()) {
+        let written = std::fs::write(&path, project.write());
+        if written.is_ok() {
+            self.save_target = Some(super::SaveTarget::Project(path.clone()));
+        }
+        self.status = match written {
             Ok(()) if left_out > 0 => Status::Loaded(format!("Saved project {file} with {} files; {left_out} without a file of their own are not in it", project.models.len())),
             Ok(()) => Status::Loaded(format!("Saved project {file} with {} files", project.models.len())),
             Err(e) => Status::Error(format!("{file}: {e}")),
@@ -201,7 +205,10 @@ impl App {
         };
         self.add_queue = sources.collect();
         self.project_opening = Some(Opening { project, folder, missing });
-        self.open(first, false)
+        let task = self.open(first, false);
+        // Save writes the project back where it came from
+        self.save_target = Some(super::SaveTarget::Project(file.to_path_buf()));
+        task
     }
 
     /// The files of a project at `file` that are there, and those that are not.

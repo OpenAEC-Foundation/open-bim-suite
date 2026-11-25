@@ -178,6 +178,13 @@ pub enum Status {
     Error(String),
 }
 
+/// Where Save writes: a model file in a format (and IFC schema), or a project.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum SaveTarget {
+    Model(PathBuf, export::IfcSchema),
+    Project(PathBuf),
+}
+
 pub struct App {
     pub theme: ThemeKind,
     pub model: Option<Arc<Model>>,
@@ -241,6 +248,9 @@ pub struct App {
     /// The schema the next save writes a `.ifc` in (Export IFC 4x3, `save_file` with a schema);
     /// back to IFC 4 once that save starts.
     pub(crate) save_schema: export::IfcSchema,
+    /// Where Save (Ctrl+S) writes without asking: the file or project saved to, or opened as a
+    /// project, last.
+    pub(crate) save_target: Option<SaveTarget>,
     pub viewport_size: (f32, f32),
     /// The last press was a finger's, not the mouse's: the hint shows the touch gestures.
     pub fingers: bool,
@@ -560,6 +570,11 @@ pub enum Message {
     OpenFolderDialog,
     AddDialog,
     Open(PathBuf),
+    /// Save where it was saved last, else ask where (Save as, or Save project with more models).
+    Save,
+    /// A file dropped on the window: added to the model that is open, else opened (a project
+    /// opens as itself).
+    Dropped(PathBuf),
     Picked(Option<loaders::Source>),
     AddPicked(Option<loaders::Source>),
     /// Several files to add at once: read one after the other, shown together.
@@ -1160,6 +1175,7 @@ impl Default for App {
             parked_histories: Default::default(),
             status: Status::Ready,
             save_schema: export::IfcSchema::default(),
+            save_target: None,
             viewport_size: (1000.0, 700.0),
             fingers: false,
             initial_view: None,
@@ -2109,6 +2125,10 @@ impl App {
         if matches!(self.status, Status::Loading { .. }) {
             return Task::none();
         }
+        // another model: Save no longer writes over the file of the one before
+        if !add {
+            self.save_target = None;
+        }
         // a project file: the files it names, each put back where the project had it
         #[cfg(not(target_arch = "wasm32"))]
         if let (loaders::Source::File(path), false) = (&source, add) {
@@ -2261,6 +2281,29 @@ impl App {
                 return self.open(first, true);
             }
             Message::Open(path) => return self.open(loaders::Source::File(path), false),
+            Message::Dropped(path) => {
+                // issues and information requirements go to the Validator, beside the models
+                #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
+                {
+                    use collab::{Event, File};
+                    match path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).as_deref() {
+                        Some("bcf" | "bcfzip") => return self.collab_update(Event::Opened(File::Bcf, Some(path))),
+                        Some("ids") => return self.collab_update(Event::Opened(File::Ids, Some(path))),
+                        _ => {}
+                    }
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                if project_file::Project::peek(&path).is_some() {
+                    return self.open(loaders::Source::File(path), false);
+                }
+                // several files dropped at once come one by one: they follow the one loading
+                if matches!(self.status, Status::Loading { .. }) {
+                    self.add_queue.push(loaders::Source::File(path));
+                    return Task::none();
+                }
+                let add = self.model.is_some();
+                return self.open(loaders::Source::File(path), add);
+            }
             Message::Loaded(Ok(model)) => {
                 let drawings = self.read_drawings(&model);
                 let (mut stack, restack) = std::mem::take(&mut self.loading_stack);
@@ -2319,7 +2362,10 @@ impl App {
             Message::Remote(call) => return self.remote(call),
             Message::RemoteShot(shot) => self.remote_shot(shot),
             Message::ClearMeasurements => self.measurements.clear(),
-            Message::NewModel(level) => self.new_model(level),
+            Message::NewModel(level) => {
+                self.save_target = None;
+                self.new_model(level);
+            }
             Message::Reinforcement(action) => self.rebar_action(action),
             Message::ModelTool(tool) => self.start_model_tool(tool),
             Message::GridTool => self.toggle_grid_tool(),
@@ -2442,7 +2488,21 @@ impl App {
                 };
             }
             // the dialog asked before replacing a file
-            Message::SavePicked(Some(path)) => return self.start_save(path, true),
+            Message::SavePicked(Some(path)) => {
+                if self.model.is_some() && !matches!(self.status, Status::Loading { .. } | Status::Saving { .. }) {
+                    self.save_target = Some(SaveTarget::Model(path.clone(), self.save_schema));
+                }
+                return self.start_save(path, true);
+            }
+            Message::Save => match self.save_target.clone() {
+                Some(SaveTarget::Model(path, schema)) => {
+                    self.save_schema = schema;
+                    return self.start_save(path, true);
+                }
+                Some(SaveTarget::Project(path)) => return self.update(Message::SaveProjectPicked(Some(path))),
+                None if self.models.len() > 1 => return self.update(Message::SaveProjectDialog),
+                None => return self.update(Message::SaveDialog),
+            },
             Message::SaveProjectDialog => {
                 if !self.models.is_empty() || self.model.is_some() {
                     return project_file::save_dialog_task(self);
@@ -3377,7 +3437,7 @@ impl App {
             Subscription::none()
         };
         let events = event::listen_with(|event, status, _window| match event {
-            iced::Event::Window(window::Event::FileDropped(path)) => Some(Message::Open(path)),
+            iced::Event::Window(window::Event::FileDropped(path)) => Some(Message::Dropped(path)),
             iced::Event::Touch(iced::touch::Event::FingerPressed { .. }) => Some(Message::Pressed(true)),
             iced::Event::Mouse(iced::mouse::Event::ButtonPressed(_)) => Some(Message::Pressed(false)),
             iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
@@ -6729,6 +6789,43 @@ mod tests {
         let _ = app.update(Message::ResetSection);
         assert_eq!(app.plane, Some(placed));
         assert!(!app.plane_picking);
+    }
+
+    #[test]
+    fn save_writes_where_it_saved_last_and_another_model_forgets_it() {
+        let mut app = App::default();
+        app.set_model(two_squares());
+        // nothing saved yet: Save asks where (a test has no dialog, it names the file)
+        let _ = app.update(Message::Save);
+        assert_eq!(app.save_target, None);
+        let path = PathBuf::from("walls.ifc");
+        let _ = app.update(Message::SavePicked(Some(path.clone())));
+        assert_eq!(app.save_target, Some(SaveTarget::Model(path.clone(), export::IfcSchema::Ifc4)));
+        assert!(matches!(app.status, Status::Saving { .. }));
+        // saved: Save writes there again, in the same schema
+        app.status = Status::Loaded(String::new());
+        app.save_schema = export::IfcSchema::Ifc4x3;
+        let _ = app.update(Message::Save);
+        assert!(matches!(&app.status, Status::Saving { file, .. } if file == "walls.ifc"), "{:?}", app.status);
+        assert_eq!(app.save_schema, export::IfcSchema::default(), "the schema saved with is taken for the save");
+        // another model opened: Save asks again
+        app.status = Status::Loaded(String::new());
+        let _ = app.open(loaders::Source::File(PathBuf::from("other.obj")), false);
+        assert_eq!(app.save_target, None);
+    }
+
+    #[test]
+    fn a_file_dropped_beside_an_open_model_is_added() {
+        let mut app = App::default();
+        let _ = app.update(Message::Dropped(PathBuf::from("first.obj")));
+        assert!(!app.adding_model, "nothing open: it opens");
+        app.status = Status::Loaded(String::new());
+        app.set_model(two_squares());
+        let _ = app.update(Message::Dropped(PathBuf::from("second.obj")));
+        assert!(app.adding_model, "a model is open: the file is added to it");
+        // a second file dropped while the first loads follows it
+        let _ = app.update(Message::Dropped(PathBuf::from("third.obj")));
+        assert_eq!(app.add_queue.len(), 1);
     }
 
     #[test]
