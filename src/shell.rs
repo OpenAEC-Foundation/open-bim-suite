@@ -253,6 +253,15 @@ const MOUSE_ACTIONS: [[Named<MouseAction>; 3]; LANGUAGES] = [
     [named(MouseAction::Orbit, "Nokta etrafında döndür"), named(MouseAction::Look, "Etrafa bak"), named(MouseAction::Pan, "Kaydır")],
 ];
 
+/// A page of the settings, scrolling within their height, with room on the right for the bar.
+fn settings_scrolled(content: Element<'_, Msg>) -> Element<'_, Msg> {
+    iced::widget::scrollable(container(content).padding(iced::Padding { top: 0.0, right: 22.0, bottom: 0.0, left: 0.0 })).height(iced::Length::Fill).into()
+}
+
+/// The height of the settings' pages (logical pixels): each scrolls within it, so the dialog
+/// keeps one size whichever tab is open.
+const SETTINGS_BODY_HEIGHT: f32 = 560.0;
+
 const KEY_NAVIGATION: [[Named<KeyNavigation>; 3]; LANGUAGES] = [
     [named(KeyNavigation::Fly, "Vliegen in de kijkrichting"), named(KeyNavigation::Walk, "Lopen, horizontaal"), named(KeyNavigation::Off, "Uit")],
     [named(KeyNavigation::Fly, "Fly where you look"), named(KeyNavigation::Walk, "Walk, level"), named(KeyNavigation::Off, "Off")],
@@ -3284,8 +3293,12 @@ impl Studio {
                 let statusbars = options(&STATUSBARS, l, self.prefs.statusbar());
                 let text_sizes = options(&TEXT_SIZES, l, self.prefs.text_size());
                 let buttons = self.app.mouse_buttons;
+                // every page scrolls in the same height, so the dialog keeps its size from tab to
+                // tab; a low window makes it lower (the room over and under the body: title, tabs,
+                // footer and margins)
+                let body_height = SETTINGS_BODY_HEIGHT.min((self.height / self.prefs.scale() as f32 - 230.0).max(200.0));
                 let body: Element<'_, Msg> = match self.settings_page {
-                    SettingsPage::General => column![
+                    SettingsPage::General => settings_scrolled(column![
                         w::mono_label(look, l.text("Weergave", "Appearance")),
                         w::property_row(look, l.text("Thema", "Theme"), w::select(look, themes.0, themes.1, |n| Msg::Theme(n.value), D::Regular)),
                         w::property_row(look, l.text("Werkruimte", "Workspace"), w::select(look, workspaces.0, workspaces.1, |n| Msg::Workspace(n.value), D::Regular)),
@@ -3312,7 +3325,7 @@ impl Studio {
                         w::property_row(look, l.text("Taal", "Language"), w::select(look, &Language::ALL, Some(l), Msg::Language, D::Regular)),
                     ]
                     .spacing(6)
-                    .into(),
+                    .into()),
                     // the groups of the ribbon tab shown: each on or off
                     SettingsPage::Ribbon => {
                         let hidden = &self.prefs.ribbon_hidden;
@@ -3323,7 +3336,7 @@ impl Studio {
                             let shown = !hidden.iter().any(|k| k == key);
                             list = list.push(w::checkbox(look, group.0, shown, Some(move |on| Msg::RibbonGroup(key, on))));
                         }
-                        list.push(w::button(look, l.text("Alle groepen tonen", "Show all groups"), K::Secondary, D::Compact, None, (!hidden.is_empty()).then_some(Msg::RibbonReset))).into()
+                        settings_scrolled(list.push(w::button(look, l.text("Alle groepen tonen", "Show all groups"), K::Secondary, D::Compact, None, (!hidden.is_empty()).then_some(Msg::RibbonReset))).into())
                     }
                     // the extension manager: every integrated tool, on the switch or not
                     SettingsPage::Extensions => {
@@ -3345,20 +3358,22 @@ impl Studio {
                             entry = entry.push(container(tools).padding(iced::Padding { top: 2.0, right: 0.0, bottom: 4.0, left: 28.0 }));
                             list = list.push(entry);
                         }
-                        iced::widget::scrollable(container(list.push(w::secondary(look, l.text("Onder elke extensie staan de tools die erop draaien. Een tool die uit staat, verdwijnt van het lint.", "Under each extension are the tools that run on it. A tool that is switched off leaves the ribbon."))).padding(iced::Padding { top: 0.0, right: 22.0, bottom: 0.0, left: 0.0 }))).height(iced::Length::Fixed(460.0)).into()
+                        iced::widget::scrollable(container(list.push(w::secondary(look, l.text("Onder elke extensie staan de tools die erop draaien. Een tool die uit staat, verdwijnt van het lint.", "Under each extension are the tools that run on it. A tool that is switched off leaves the ribbon."))).padding(iced::Padding { top: 0.0, right: 22.0, bottom: 0.0, left: 0.0 }))).height(iced::Length::Fill).into()
                     }
                     // in the Modeller its own keys follow the commands' shortcuts
-                    SettingsPage::Shortcuts => column![sc::page(look, &self.shortcuts, &self.commands(), &self.keymap, &groups, Msg::Shortcuts)]
-                        .push((self.product() == Product::Modeller).then(|| crate::app::modeller::key_actions::key_list(look, l)))
-                        .spacing(14)
-                        .into(),
+                    SettingsPage::Shortcuts => settings_scrolled(
+                        column![sc::page(look, &self.shortcuts, &self.commands(), &self.keymap, &groups, Msg::Shortcuts)]
+                            .push((self.product() == Product::Modeller).then(|| crate::app::modeller::key_actions::key_list(look, l)))
+                            .spacing(14)
+                            .into(),
+                    ),
                 };
                 w::dialog(
                     look,
                     l.text("Instellingen", "Settings"),
                     close_icon,
                     Some(Msg::Dialog(None)),
-                    column![tabs, body].spacing(14).into(),
+                    column![tabs, container(body).height(iced::Length::Fixed(body_height))].spacing(14).into(),
                     None,
                     vec![w::button(look, l.text("Sluiten", "Close"), K::Primary, D::Regular, None, Some(Msg::Dialog(None)))],
                     true,
