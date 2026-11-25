@@ -94,6 +94,12 @@ pub fn material_node(material: &Material) -> Value {
     if let (Some(class), Some(attributes)) = (material.class(), node["attributes"].as_object_mut()) {
         attributes.extend(class.attributes());
     }
+    // the exposure classes of its concrete, under the name IFC has for them on an element
+    // (`Pset_ConcreteElementGeneral`)
+    let exposed = material.exposures();
+    if let (false, Some(attributes)) = (exposed.is_empty(), node["attributes"].as_object_mut()) {
+        attributes.insert("bsi::ifc::prop::ExposureClass".into(), json!(exposed.iter().map(|c| c.name).collect::<Vec<_>>().join(", ")));
+    }
     node
 }
 
