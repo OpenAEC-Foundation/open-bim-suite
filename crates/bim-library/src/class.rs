@@ -2,7 +2,8 @@
 //! each value is from.
 //!
 //! One place answers for a grade ([`class`]): concrete ("C20/25"), structural steel ("S355"),
-//! reinforcing steel ("B500B"), bolts ("8.8") and timber ("C24", "GL28h", from
+//! reinforcing steel ("B500B"), prestressing steel ("Y1860S7"), bolts ("8.8"), aluminium
+//! ("EN AW-6082 T6"), masonry mortar ("M10") and timber ("C24", "GL28h", from
 //! [`crate::grade`]). A class ([`StrengthClass`]) has its values by their symbol, the partial
 //! factors that go with it, and its [`Source`]: the standard, its year and the table or clause.
 //!
@@ -14,13 +15,24 @@
 //! - A bolt class is its name: "8.8" is a tensile strength of 800 N/mm² and a yield of 0.8 of it.
 //! - Structural and reinforcing steel have the nominal values of their name and of their product
 //!   standard.
+//! - A prestressing steel is its name: "Y1860S7" is a tensile strength of 1860 N/mm², of a
+//!   strand of seven wires ("S7"; "C" a wire, "H" a bar). Its modulus is the one EN 1992-1-1
+//!   has for its form (3.3.6). Its 0.1 % proof stress is its maker's, and not here.
+//! - A mortar class is its name: "M10" is a compressive strength of 10 N/mm² (EN 998-2). A
+//!   mortar has no factor of its own: the masonry it is in has.
+//! - An aluminium class is an alloy in a temper, as an extruded profile: the values of
+//!   EN 1999-1-1, table 3.2b, for the thinnest range of the table, with that range in its
+//!   source. A profile of several thicknesses, a sheet, a tube or a welded zone has other values.
 //!
 //! The partial factors are the values the Eurocodes recommend. A country's annex may set others;
 //! none is checked here, and nothing here is validated by an engineer: the Normenatlas is to be
 //! the source of validated values, and holds none yet.
 //!
-//! Not yet: exposure classes, prestressing steel, masonry, aluminium, welds, cross laminated
-//! timber; steel thicker than 80 mm; the values a national annex changes.
+//! The exposure classes of concrete are in [`crate::exposure`].
+//!
+//! Not yet: masonry units and masonry itself, welds, cross laminated timber; steel thicker than
+//! 80 mm; aluminium other than five alloys as extruded profiles; the values a national annex
+//! changes.
 
 use crate::grade::{self, TimberKind};
 use serde::Serialize;
@@ -37,12 +49,15 @@ pub enum Family {
     Concrete,
     Steel,
     Reinforcement,
+    Prestressing,
     Bolt,
+    Aluminium,
+    Mortar,
     Timber,
 }
 
 impl Family {
-    pub const ALL: [Family; 5] = [Family::Concrete, Family::Steel, Family::Reinforcement, Family::Bolt, Family::Timber];
+    pub const ALL: [Family; 8] = [Family::Concrete, Family::Steel, Family::Reinforcement, Family::Prestressing, Family::Bolt, Family::Aluminium, Family::Mortar, Family::Timber];
 }
 
 /// The unit of a value.
@@ -132,8 +147,9 @@ impl StrengthClass {
     fn modulus(&self) -> &'static str {
         match self.family {
             Family::Concrete => "Ecm",
-            Family::Steel | Family::Bolt => "E",
+            Family::Steel | Family::Bolt | Family::Aluminium | Family::Mortar => "E",
             Family::Reinforcement => "Es",
+            Family::Prestressing => "Ep",
             Family::Timber => "E0,mean",
         }
     }
@@ -153,13 +169,16 @@ impl StrengthClass {
         self.get("ρ").or_else(|| self.get("ρk"))
     }
 
-    /// The strength a class is known by, in N/mm²: fck, fy, fyk, fub or fm,k.
+    /// The strength a class is known by, in N/mm²: fck, fy, fyk, fpk, fub, fo, fm or fm,k.
     pub fn strength(&self) -> Option<f64> {
         self.get(match self.family {
             Family::Concrete => "fck",
             Family::Steel => "fy",
             Family::Reinforcement => "fyk",
+            Family::Prestressing => "fpk",
             Family::Bolt => "fub",
+            Family::Aluminium => "fo",
+            Family::Mortar => "fm",
             Family::Timber => "fm,k",
         })
     }
@@ -200,6 +219,13 @@ impl StrengthClass {
                 add("YieldStress", self.get("fyb").map(|f| f * 1e6));
                 add("UltimateStress", self.get("fub").map(|f| f * 1e6));
             }
+            Family::Prestressing => add("UltimateStress", self.get("fpk").map(|f| f * 1e6)),
+            // (of aluminium the 0.2 % proof stress stands for its yield)
+            Family::Aluminium => {
+                add("YieldStress", self.get("fo").map(|f| f * 1e6));
+                add("UltimateStress", self.get("fu").map(|f| f * 1e6));
+            }
+            Family::Mortar => add("CompressiveStrength", self.get("fm").map(|f| f * 1e6)),
             Family::Timber => {}
         }
         out
@@ -310,6 +336,53 @@ fn bolt(tensile: f64, ratio: f64) -> StrengthClass {
     }
 }
 
+/// Prestressing steel: its name, and whether it is a strand (a wire or a bar otherwise).
+const PRESTRESSING: [(&str, bool); 8] = [("Y1570C", false), ("Y1670C", false), ("Y1770C", false), ("Y1770S7", true), ("Y1860S7", true), ("Y1030H", false), ("Y1100H", false), ("Y1230H", false)];
+
+fn prestressing(name: &str, strand: bool) -> StrengthClass {
+    let fpk: f64 = name[1..].chars().take_while(char::is_ascii_digit).collect::<String>().parse().unwrap_or(0.0);
+    StrengthClass {
+        name: name.into(),
+        family: Family::Prestressing,
+        values: vec![stress("fpk", fpk), stress("Ep", if strand { 195_000.0 } else { 205_000.0 }), Value { symbol: "ρ", value: 7850.0, unit: Unit::Density }],
+        factors: vec![factor("γS", 1.15)],
+        source: Source { standard: "EN 1992-1-1", year: Some(2004), place: "3.3", factors: "EN 1992-1-1, 2.4.2.4, recommended" },
+    }
+}
+
+/// Aluminium as an extruded profile: the alloy and its temper, the 0.2 % proof and the tensile
+/// strength, and where in table 3.2b they are.
+const ALUMINIUM: [(&str, f64, f64, &str); 5] = [
+    ("EN AW-6060 T6", 140.0, 170.0, "table 3.2b, extruded profile up to 15 mm"),
+    ("EN AW-6063 T6", 160.0, 195.0, "table 3.2b, extruded profile up to 25 mm"),
+    ("EN AW-6005A T6", 215.0, 255.0, "table 3.2b, extruded hollow profile up to 5 mm"),
+    ("EN AW-6061 T6", 240.0, 260.0, "table 3.2b, extruded profile up to 20 mm"),
+    ("EN AW-6082 T6", 250.0, 290.0, "table 3.2b, extruded profile up to 5 mm"),
+];
+
+fn aluminium(name: &str, fo: f64, fu: f64, place: &'static str) -> StrengthClass {
+    StrengthClass {
+        name: name.into(),
+        family: Family::Aluminium,
+        values: vec![stress("fo", fo), stress("fu", fu), stress("E", 70_000.0), stress("G", 27_000.0), Value { symbol: "ρ", value: 2700.0, unit: Unit::Density }, Value { symbol: "ν", value: 0.3, unit: Unit::None }],
+        factors: vec![factor("γM1", 1.1), factor("γM2", 1.25)],
+        source: Source { standard: "EN 1999-1-1", year: Some(2007), place, factors: "EN 1999-1-1, 6.1.3, recommended" },
+    }
+}
+
+/// The mortar classes of EN 998-2: the compressive strength.
+const MORTAR: [f64; 6] = [1.0, 2.5, 5.0, 10.0, 15.0, 20.0];
+
+fn mortar(fm: f64) -> StrengthClass {
+    StrengthClass {
+        name: format!("M{fm}"),
+        family: Family::Mortar,
+        values: vec![stress("fm", fm)],
+        factors: Vec::new(),
+        source: Source { standard: "EN 998-2", year: Some(2016), place: "5.4.1", factors: "" },
+    }
+}
+
 fn timber(g: &grade::TimberGrade) -> StrengthClass {
     let glulam = g.kind == TimberKind::Glulam;
     StrengthClass {
@@ -333,14 +406,17 @@ fn timber(g: &grade::TimberGrade) -> StrengthClass {
     }
 }
 
-/// Every class: concrete, structural steel, reinforcing steel, bolts, then timber, each rising.
+/// Every class, family by family as [`Family::ALL`] has them, each rising.
 pub fn classes() -> &'static [StrengthClass] {
     static CLASSES: OnceLock<Vec<StrengthClass>> = OnceLock::new();
     CLASSES.get_or_init(|| {
         let mut all: Vec<StrengthClass> = CONCRETE.iter().map(|(fck, cube)| concrete(*fck, *cube)).collect();
         all.extend(STEEL.iter().map(|(name, values)| steel(name, *values)));
         all.extend(REINFORCEMENT.iter().map(|(name, ductility)| reinforcement(name, *ductility)));
+        all.extend(PRESTRESSING.iter().map(|(name, strand)| prestressing(name, *strand)));
         all.extend(BOLTS.iter().map(|(tensile, ratio)| bolt(*tensile, *ratio)));
+        all.extend(ALUMINIUM.iter().map(|(name, fo, fu, place)| aluminium(name, *fo, *fu, place)));
+        all.extend(MORTAR.iter().map(|fm| mortar(*fm)));
         all.extend(grade::timber_grades().iter().map(timber));
         all
     })
@@ -351,15 +427,26 @@ pub fn of(family: Family) -> impl Iterator<Item = &'static StrengthClass> {
     classes().iter().filter(move |c| c.family == family)
 }
 
+/// A name without its spaces and hyphens, in capitals; of aluminium without "EN AW" before it.
+fn bare(name: &str) -> String {
+    let bare: String = name.chars().filter(|c| !c.is_whitespace() && *c != '-').collect::<String>().to_ascii_uppercase();
+    match bare.strip_prefix("ENAW") {
+        Some(alloy) if !alloy.is_empty() => alloy.to_string(),
+        _ => bare,
+    }
+}
+
 /// The class a grade names, whatever its case and with or without spaces ("c20/25", "S355",
-/// "b500b", "8.8", "gl28H"). A steel grade names its class by its start: "S235JR", "S355J2+N".
+/// "b500b", "8.8", "gl28H"). A steel grade names its class by its start: "S235JR", "S355J2+N";
+/// an aluminium alloy with or without "EN AW": "6082-T6".
 pub fn class(grade: &str) -> Option<&'static StrengthClass> {
     let grade: String = grade.chars().filter(|c| !c.is_whitespace()).collect();
     if grade.is_empty() {
         return None;
     }
     let all = classes();
-    all.iter().find(|c| c.name.eq_ignore_ascii_case(&grade)).or_else(|| {
+    let named = bare(&grade);
+    all.iter().find(|c| c.name.eq_ignore_ascii_case(&grade)).or_else(|| all.iter().find(|c| bare(&c.name) == named)).or_else(|| {
         // a structural steel with its quality after its class
         let upper = grade.to_ascii_uppercase();
         all.iter().filter(|c| c.family == Family::Steel).find(|c| upper.strip_prefix(c.name.as_str()).is_some_and(|rest| rest.starts_with(|ch: char| ch.is_ascii_alphabetic())))
@@ -422,13 +509,43 @@ mod tests {
         assert_eq!((c24.family, c24.strength(), c24.e(), c24.g(), c24.density(), c24.factor("γM")), (Family::Timber, Some(24.0), Some(11.0e9), Some(0.69e9), Some(350.0), Some(1.3)));
         assert_eq!((class("GL28h").unwrap().factor("γM"), class("GL28h").unwrap().source.label().as_str()), (Some(1.25), "EN 14080, as Project Ocondat has it"));
         let all = classes();
-        assert_eq!(Family::ALL.map(|f| of(f).count()), [14, 5, 4, 7, grade::timber_grades().len()]);
+        assert_eq!(Family::ALL.map(|f| of(f).count()), [14, 5, 4, 8, 7, 5, 6, grade::timber_grades().len()]);
         for c in all {
             assert_eq!(all.iter().filter(|o| o.name.eq_ignore_ascii_case(&c.name)).count(), 1, "{}", c.name);
             assert!(std::ptr::eq(class(&c.name).unwrap(), c), "{}", c.name);
-            assert!(c.strength().is_some() && c.e().is_some() && !c.factors.is_empty() && c.lines().len() >= 3, "{}", c.name);
+            // (a mortar has its strength alone: no stiffness and no factor of its own)
+            let mortar = c.family == Family::Mortar;
+            assert!(c.strength().is_some() && (mortar || c.e().is_some() && !c.factors.is_empty()) && c.lines().len() >= 2, "{}", c.name);
         }
         assert_eq!(class("C20/25").unwrap().lines(), ["fck 20 · fck,cube 25 · fcm 28 · fctm 2.2 · fctk,0.05 1.5 · fctk,0.95 2.9 · Ecm 30000 N/mm²", "ρ 2400 kg/m³", "γC 1.5", "EN 1992-1-1:2004, table 3.1"]);
+    }
+
+    #[test]
+    fn prestressing_steel_aluminium_and_mortar_are_named_by_what_they_bear() {
+        // prestressing steel: the tensile strength of its name, the modulus of its form
+        assert_eq!(of(Family::Prestressing).map(|c| c.name.as_str()).collect::<Vec<_>>(), ["Y1570C", "Y1670C", "Y1770C", "Y1770S7", "Y1860S7", "Y1030H", "Y1100H", "Y1230H"]);
+        let strand = class("y1860s7").unwrap();
+        assert_eq!((strand.strength(), strand.e(), strand.density(), strand.factor("γS")), (Some(1860.0), Some(195.0e9), Some(7850.0), Some(1.15)));
+        assert_eq!((class("Y1770C").unwrap().e(), class("Y1030H").unwrap().get("fpk"), class("Y1030H").unwrap().e()), (Some(205.0e9), Some(1030.0), Some(205.0e9)));
+        assert_eq!(strand.ifc_properties(), [("MassDensity", 7850.0), ("YoungModulus", 195.0e9), ("UltimateStress", 1860.0e6)]);
+        assert_eq!(strand.source.label(), "EN 1992-1-1:2004, 3.3");
+        // aluminium: an alloy in its temper, with or without "EN AW", spaces and hyphens
+        let a6082 = class("EN AW-6082 T6").unwrap();
+        assert_eq!((a6082.family, a6082.get("fo"), a6082.get("fu"), a6082.e(), a6082.g(), a6082.density()), (Family::Aluminium, Some(250.0), Some(290.0), Some(70.0e9), Some(27.0e9), Some(2700.0)));
+        assert_eq!((a6082.factor("γM1"), a6082.factor("γM2"), a6082.source.label().as_str()), (Some(1.1), Some(1.25), "EN 1999-1-1:2007, table 3.2b, extruded profile up to 5 mm"));
+        for typed in ["6082-T6", "6082 t6", "en aw 6082 T6", "ENAW-6082T6", "EN AW-6082-T6"] {
+            assert!(std::ptr::eq(class(typed).unwrap(), a6082), "{typed}");
+        }
+        assert!(class("6082").is_none() && class("6082 T4").is_none() && class("EN AW").is_none());
+        assert_eq!(of(Family::Aluminium).map(|c| (c.get("fo").unwrap(), c.get("fu").unwrap())).collect::<Vec<_>>(), [(140.0, 170.0), (160.0, 195.0), (215.0, 255.0), (240.0, 260.0), (250.0, 290.0)]);
+        assert_eq!(a6082.ifc_properties(), [("MassDensity", 2700.0), ("YoungModulus", 70.0e9), ("ShearModulus", 27.0e9), ("YieldStress", 250.0e6), ("UltimateStress", 290.0e6)]);
+        // mortar: its compressive strength, and nothing of stiffness or factors
+        assert_eq!(of(Family::Mortar).map(|c| c.name.as_str()).collect::<Vec<_>>(), ["M1", "M2.5", "M5", "M10", "M15", "M20"]);
+        let m10 = class("m10").unwrap();
+        assert_eq!((m10.strength(), m10.e(), m10.density(), m10.factors.len()), (Some(10.0), None, None, 0));
+        assert_eq!(m10.lines(), ["fm 10 N/mm²", "EN 998-2:2016, 5.4.1"]);
+        assert_eq!((class("M2.5").unwrap().get("fm"), m10.ifc_properties()), (Some(2.5), vec![("CompressiveStrength", 10.0e6)]));
+        assert!(class("M12").is_none() && class("M").is_none());
     }
 
     #[test]

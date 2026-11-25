@@ -2059,6 +2059,11 @@
     "by the pens above": "selon les plumes ci-dessus",
     "Grid and level": "Trame et niveau",
     "Section line": "Ligne de coupe",
+    "prestressing steel": "acier de précontrainte",
+    "aluminium": "aluminium",
+    "masonry mortar": "mortier de maçonnerie",
+    "Exposure classes": "Classes d'exposition",
+    "Too weak for": "Trop faible pour",
     "Export STEP": "Exporter en STEP",
     "Export STEP…": "Exporter en STEP…",
     "Writes the modelled elements as exact solids for CAD: round columns and bowed edges as true cylinders and arcs": "Écrit les éléments modélisés en solides exacts pour la CAO : poteaux ronds et bords courbes en vrais cylindres et arcs"

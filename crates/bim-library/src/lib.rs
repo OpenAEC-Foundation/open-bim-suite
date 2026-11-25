@@ -31,6 +31,7 @@ pub mod cost;
 pub mod detail;
 pub mod drawing;
 pub mod dutch;
+pub mod exposure;
 pub mod grade;
 pub mod hatch;
 pub mod house;
