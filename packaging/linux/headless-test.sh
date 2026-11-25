@@ -150,7 +150,8 @@ mkdir -p "$work/outside"
 cp "$model" "$work/outside/$name"
 secret=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
 port=${MCP_PORT:-39301}
-OPENAEC_MCP_POORT=$port OPENAEC_MCP_GEHEIM=$secret "$program" > "$out/app-mcp.log" 2>&1 &
+# the Viewer is read-only and refuses save_file; the BIM Validator opens and saves
+OPENAEC_MCP_POORT=$port OPENAEC_MCP_GEHEIM=$secret "$program" --product validator > "$out/app-mcp.log" 2>&1 &
 app_pid=$!
 pids+=("$app_pid")
 # mcp NAME BODY [curl options]: the HTTP status; the answer goes to mcp-NAME.json. A call that
