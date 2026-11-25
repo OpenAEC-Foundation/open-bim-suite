@@ -21,3 +21,5 @@ serde = { version = "1", features = ["derive"] }
 bim-library = { path = "../bim-library" }
 # float_roundtrip: exact f64 parsing, so a definition read back equals the one written
 serde_json = { version = "1", features = ["float_roundtrip"] }
+# Exact B-rep solids of the elements (MIT): round members and bowed slabs as true curves, STEP out
+springrep = "2.1"

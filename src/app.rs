@@ -414,7 +414,7 @@ pub struct App {
     /// The IFC tab: how the model's IFCX file is built up.
     pub ifc: IfcTab,
     /// The booklet: every sheet of the document in one tab.
-    pub booklet: paper::Booklet,
+    pub(crate) booklet: paper::Booklet,
     /// Docs: the documents of the project folder.
     pub docs: DocsTab,
     /// Library, the product: the source and the country its page shows.
@@ -705,6 +705,8 @@ pub enum Message {
     ShowBooklet,
     /// Writes every sheet of the document as one PDF, a page per sheet.
     ExportBooklet,
+    /// The modelled elements as one STEP file of their exact solids.
+    ExportStep,
     RemoveSheet(Arc<str>),
     /// Place a floor plan on a sheet: sheet, plan.
     PlaceOnSheet(Arc<str>, Arc<str>),
@@ -2815,6 +2817,7 @@ impl App {
             Message::OpenDocSheet(sheet) => self.open_doc_sheet(&sheet),
             Message::ShowBooklet => self.show_booklet(),
             Message::ExportBooklet => return self.export_booklet(),
+            Message::ExportStep => return self.export_step(),
             Message::RemoveSheet(sheet) => {
                 self.close_doc_sheet(&sheet);
                 self.document.remove_sheet(&sheet);

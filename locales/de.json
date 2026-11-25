@@ -2058,6 +2058,14 @@
     "Line style per line": "Linienstil je Linie",
     "by the pens above": "nach den Stiften oben",
     "Grid and level": "Raster und Ebene",
-    "Section line": "Schnittlinie"
+    "Section line": "Schnittlinie",
+    "prestressing steel": "Spannstahl",
+    "aluminium": "Aluminium",
+    "masonry mortar": "Mauermörtel",
+    "Exposure classes": "Expositionsklassen",
+    "Too weak for": "Zu schwach für",
+    "Export STEP": "STEP exportieren",
+    "Export STEP…": "STEP exportieren…",
+    "Writes the modelled elements as exact solids for CAD: round columns and bowed edges as true cylinders and arcs": "Schreibt die modellierten Elemente als exakte Volumenkörper für CAD: runde Stützen und gebogene Kanten als echte Zylinder und Bögen"
   }
 }

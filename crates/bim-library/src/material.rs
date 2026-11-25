@@ -162,6 +162,10 @@ pub struct Material {
     /// Its grade or strength class, as its standard writes it ("C24", "S355", "C20/25").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grade: Option<String>,
+    /// The exposure classes of its concrete, as EN 206 writes them ("XC4", "XF1"), in the order
+    /// of the standard ([`crate::exposure`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exposure: Vec<String>,
     /// Its hatch under a hatch standard, by the standard's key, where it names one of its own
     /// ([`crate::standard`]); under the others its sign gives it.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -175,7 +179,7 @@ impl Material {
 
     /// A material drawn by its hatch kind.
     pub fn new(key: &str, names: Names, hatch: HatchKind, colour: [u8; 3]) -> Self {
-        Self { key: key.into(), names, hatch, colour, sign: None, grade: None, hatches: Default::default() }
+        Self { key: key.into(), names, hatch, colour, sign: None, grade: None, exposure: Vec::new(), hatches: Default::default() }
     }
 
     /// Its own hatch of the hatch catalogue, when it names one the catalogue has.
@@ -184,7 +188,7 @@ impl Material {
     }
 
     /// The strength class its grade names, of whatever family ([`crate::class`]): concrete,
-    /// steel, reinforcing steel, a bolt or timber.
+    /// steel, reinforcing or prestressing steel, a bolt, aluminium, mortar or timber.
     pub fn class(&self) -> Option<&'static crate::class::StrengthClass> {
         self.grade.as_deref().and_then(crate::class::class)
     }

@@ -2058,6 +2058,14 @@
     "Line style per line": "Linjestil per linje",
     "by the pens above": "enligt pennorna ovan",
     "Grid and level": "Stomlinje och nivå",
-    "Section line": "Snittlinje"
+    "Section line": "Snittlinje",
+    "prestressing steel": "spännstål",
+    "aluminium": "aluminium",
+    "masonry mortar": "murbruk",
+    "Exposure classes": "Exponeringsklasser",
+    "Too weak for": "För svag för",
+    "Export STEP": "Exportera STEP",
+    "Export STEP…": "Exportera STEP…",
+    "Writes the modelled elements as exact solids for CAD: round columns and bowed edges as true cylinders and arcs": "Skriver de modellerade elementen som exakta solider för CAD: runda pelare och böjda kanter som verkliga cylindrar och bågar"
   }
 }

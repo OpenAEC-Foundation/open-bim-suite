@@ -141,6 +141,10 @@ impl Material {
         if let Some(grade) = &self.grade {
             data.push(Datum { nl: "Kwaliteit", en: "Grade", value: grade.clone(), from: Detail::D350 });
         }
+        let exposed = self.exposures();
+        if !exposed.is_empty() {
+            data.push(Datum { nl: "Milieuklassen", en: "Exposure classes", value: exposed.iter().map(|c| c.name).collect::<Vec<_>>().join(", "), from: Detail::D350 });
+        }
         let [r, g, b] = self.colour;
         data.push(Datum { nl: "Kleur", en: "Colour", value: format!("#{r:02x}{g:02x}{b:02x}"), from: Detail::D500 });
         data.push(Datum { nl: "Sleutel", en: "Key", value: self.key.clone(), from: Detail::D500 });
