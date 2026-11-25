@@ -306,12 +306,17 @@ jobs:
           # below says so, which makes the release a pre-release.
           # @(...) keeps a one-element array: a bare string would be splatted character by character
           $sign = @(if ($env:AZURE_CLIENT_SECRET) { "/DSIGN=$env:GITHUB_WORKSPACE\scripts\windows-sign.ps1" })
-          & $nsis @nsisArgs @sign installer.nsi
-          if ($LASTEXITCODE -ne 0 -and $sign) {
-            Write-Warning "signing the uninstaller failed; building it unsigned"
-            & $nsis @nsisArgs installer.nsi
+          # the suite, and the BIM Validator: the same program in a folder of its own, started on
+          # that product
+          foreach ($name in @("", "validator")) {
+            $product = @(if ($name) { "/DPRODUCT=$name" })
+            & $nsis @nsisArgs @product @sign installer.nsi
+            if ($LASTEXITCODE -ne 0 -and $sign) {
+              Write-Warning "signing the uninstaller failed; building it unsigned"
+              & $nsis @nsisArgs @product installer.nsi
+            }
+            if ($LASTEXITCODE -ne 0) { throw "makensis failed" }
           }
-          if ($LASTEXITCODE -ne 0) { throw "makensis failed" }
           Pop-Location
       - name: Sign the installer
         continue-on-error: true
@@ -350,6 +355,8 @@ jobs:
             "installed open-3d-viewer-mcp.exe" = "$installed\open-3d-viewer-mcp.exe"
             "installed uninstall.exe" = "$installed\uninstall.exe"
           }
+          $validator = "installer\open-bim-validator_$($env:NUMBER)_x64-setup.exe"
+          $files[(Split-Path $validator -Leaf)] = $validator
           $all = $true
           "### Windows: Authenticode" >> $env:GITHUB_STEP_SUMMARY
           foreach ($name in $files.Keys) {
@@ -363,7 +370,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item "installer\open-3d-viewer_$($env:NUMBER)_x64-setup.exe" dist\
+          Copy-Item "installer\open-3d-viewer_$($env:NUMBER)_x64-setup.exe", "installer\open-bim-validator_$($env:NUMBER)_x64-setup.exe" dist\
           $app = "$env:RUNNER_TEMP\open-3d-viewer_$($env:NUMBER)_windows-x64"
           New-Item -ItemType Directory -Force $app | Out-Null
           Copy-Item sign\open-3d-viewer.exe, sign\open-3d-viewer-mcp.exe, sign\vertex.dll, LICENSE, README.md $app
@@ -586,6 +593,7 @@ jobs:
           | Systeem | Bestand |
           | --- | --- |
           | Windows 10/11 x64 | \`open-3d-viewer_${NUMBER}_x64-setup.exe\` (installeert zonder beheerdersrechten) of \`_windows-x64.zip\` |
+          | Windows 10/11 x64, alleen de BIM Validator | \`open-bim-validator_${NUMBER}_x64-setup.exe\`: hetzelfde programma, dat opent als BIM Validator (eerder de Collaborator) |
           | macOS 11+ (Apple silicon en Intel) | \`open-3d-viewer_${NUMBER}_macos-universal.dmg\` |
           | Ubuntu, Linux Mint | \`open-3d-viewer_${NUMBER}_amd64.deb\` (ARM: \`_arm64.deb\`) |
           | Fedora | \`open-3d-viewer_${NUMBER}_x86_64.rpm\` (ARM: \`_aarch64.rpm\`) |
