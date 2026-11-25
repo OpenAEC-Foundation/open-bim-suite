@@ -2066,6 +2066,9 @@
     "Too weak for": "Za słaby dla",
     "Export STEP": "Eksportuj STEP",
     "Export STEP…": "Eksportuj STEP…",
-    "Writes the modelled elements as exact solids for CAD: round columns and bowed edges as true cylinders and arcs": "Zapisuje modelowane elementy jako dokładne bryły dla CAD: okrągłe słupy i łukowe krawędzie jako prawdziwe walce i łuki"
+    "Writes the modelled elements as exact solids for CAD: round columns and bowed edges as true cylinders and arcs": "Zapisuje modelowane elementy jako dokładne bryły dla CAD: okrągłe słupy i łukowe krawędzie jako prawdziwe walce i łuki",
+    "Moving with keys": "Poruszanie klawiszami",
+    "W A S D": "W A S D",
+    "W, A, S and D move as long as you hold them, Q and E go straight down and up, Shift goes faster. Flying goes where you look, also up and down; walking stays level. In the Modeller, whose letters are its tools, they work while you look around with the right mouse button.": "W, A, S i D poruszają, dopóki je trzymasz, Q i E idą prosto w dół i w górę, z Shift szybciej. Lot idzie tam, gdzie patrzysz, także w górę i w dół; chodzenie zostaje poziomo. W Modellerze, gdzie litery są narzędziami, działają, gdy rozglądasz się prawym przyciskiem myszy."
   }
 }
