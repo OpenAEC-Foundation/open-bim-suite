@@ -3630,28 +3630,35 @@ impl App {
         self.measure.picks.clear();
         self.measure.hover = None;
         let (Some(first), Some(second)) = (first, second) else { return };
+        match self.align_model(i, first, second) {
+            Ok(said) => self.status = Status::Loaded(said),
+            Err(e) => self.status = Status::Error(e),
+        }
+    }
+
+    /// Turns and moves model `i` so the first point of each pair (as the view shows it) lands
+    /// on its second; says what it did.
+    pub(crate) fn align_model(&mut self, i: usize, first: (Vec3, Vec3), second: (Vec3, Vec3)) -> Result<String, String> {
         // the scene's frame: the points are in the view's, which may be turned up
         let inverse = self.model_matrix().inverse();
         let scene = |p: Vec3| inverse.transform_point3(p).as_dvec3();
-        let (Some(entry), Some(model)) = (self.models.get(i), self.model.as_ref()) else { return };
+        let (Some(entry), Some(model)) = (self.models.get(i), self.model.as_ref()) else { return Err(format!("no model {i}")) };
         // where the model's zero point lies in the scene: the turn is about it
         let first_origin: usize = self.models[..i].iter().map(|e| e.model.origins.len().max(1)).sum();
         let pivot = model.origins.get(first_origin).map_or(glam::DVec3::ZERO, |o| o.shift);
-        let Some((moved, turned)) = origin::aligned_by_pairs(entry.placed.moved, entry.placed.turned, pivot, [scene(first.0), scene(second.0)], [scene(first.1), scene(second.1)]) else {
-            self.status = Status::Error("The two points of a pair lie on top of each other in plan: pick points further apart".into());
-            return;
-        };
-        let Some(entry) = self.models.get_mut(i) else { return };
+        let (moved, turned) = origin::aligned_by_pairs(entry.placed.moved, entry.placed.turned, pivot, [scene(first.0), scene(second.0)], [scene(first.1), scene(second.1)])
+            .ok_or("The two points of a pair lie on top of each other in plan: pick points further apart")?;
+        let Some(entry) = self.models.get_mut(i) else { return Err(format!("no model {i}")) };
         entry.placed.moved = moved;
         entry.placed.turned = turned;
         let name = entry.model.file_name();
         self.replace_models();
-        self.status = Status::Loaded(format!("{name} aligned: moved {:.3}, {:.3}, {:.3} m, turned {turned:.3}°", moved.x, moved.y, moved.z));
+        Ok(format!("{name} aligned: moved {:.3}, {:.3}, {:.3} m, turned {turned:.3}°", moved.x, moved.y, moved.z))
     }
 
     /// Puts `model`, a new revision of model `i`'s file, in its place: shown or not, moved and
     /// turned as the one it replaces.
-    fn replace_model(&mut self, i: usize, model: Arc<Model>) {
+    pub(crate) fn replace_model(&mut self, i: usize, model: Arc<Model>) {
         let Some(old) = self.models.get(i) else { return self.add_model(model) };
         let (mut placed, visible, was) = (old.placed.clone(), old.visible, old.model.file_name());
         placed.map = origin::Map::None;
@@ -6312,6 +6319,32 @@ mod tests {
         let scene = app.model.clone().unwrap();
         let p = |layer: usize, k: usize| Vec3::new(scene.layers[layer].positions[3 * k], scene.layers[layer].positions[3 * k + 1], scene.layers[layer].positions[3 * k + 2]);
         assert!(p(1, 0).distance(b0) < 1e-3 && p(1, 1).distance(b1) < 1e-3, "{:?} {:?}", p(1, 0), p(1, 1));
+    }
+
+    #[test]
+    fn the_remote_lists_places_and_aligns_the_models() {
+        use serde_json::json;
+        let mut app = App::default();
+        app.set_model(named_square("architect", 7, 0.0));
+        app.add_model(named_square("structure", 8, 5.0));
+        let listed = app.place_model_command(&json!({ "action": "list" })).unwrap();
+        assert_eq!(listed["models"][1]["file"], "structure.rvt");
+        // set by file name: moved and turned
+        let set = app.place_model_command(&json!({ "action": "set", "model": "structure.rvt", "moved": [1.0, 2.0, 0.0], "turned": 10.0 })).unwrap();
+        assert_eq!(set["models"][1]["moved"], json!([1.0, 2.0, 0.0]));
+        assert_eq!(app.models[1].placed.turned, 10.0);
+        // aligned by two pairs of points, as the viewport has them
+        let scene = app.model.clone().unwrap();
+        let p = |k: usize| Vec3::new(scene.layers[1].positions[3 * k], scene.layers[1].positions[3 * k + 1], scene.layers[1].positions[3 * k + 2]);
+        let (a0, a1) = (p(0), p(1));
+        let to = |v: Vec3| [v.x as f64 + 3.0, v.y as f64, v.z as f64];
+        let aligned = app.place_model_command(&json!({ "action": "align", "model": 1, "pairs": [{ "from": [a0.x, a0.y, a0.z], "to": to(a0) }, { "from": [a1.x, a1.y, a1.z], "to": to(a1) }] })).unwrap();
+        assert!(aligned["said"].as_str().unwrap().contains("aligned"), "{aligned}");
+        assert!((app.models[1].placed.turned - 10.0).abs() < 1e-4, "a pure shift keeps the turn: {} {a0:?} {a1:?}", app.models[1].placed.turned);
+        let scene = app.model.clone().unwrap();
+        let moved = Vec3::new(scene.layers[1].positions[0], scene.layers[1].positions[1], scene.layers[1].positions[2]);
+        assert!(moved.distance(a0 + Vec3::X * 3.0) < 1e-3, "{moved:?}");
+        assert!(app.place_model_command(&json!({ "action": "set", "model": 5 })).is_err());
     }
 
     #[test]
