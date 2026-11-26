@@ -43,6 +43,17 @@ pub struct Pick<T> {
     label: String,
 }
 
+/// The colours to choose from, in language `l` (the first: their own).
+pub(super) fn colour_choices(l: Language) -> &'static [Pick<Option<[u8; 3]>>] {
+    &lists(l).colours
+}
+
+impl<T> Pick<T> {
+    pub fn new(value: T, label: String) -> Self {
+        Pick { value, label }
+    }
+}
+
 impl<T> std::fmt::Display for Pick<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.label)
@@ -124,6 +135,14 @@ pub struct State {
 /// Rule `k` of the view being edited.
 fn rule(app: &mut App, k: usize) -> Option<&mut ViewRule> {
     app.collab.views.draft.as_mut().and_then(|d| d.rules.get_mut(k))
+}
+
+impl State {
+    /// The elements are sorted again by the rules of the view shown, the next time it is drawn
+    /// (a property its rules read changed).
+    pub(crate) fn forget_taken(&mut self) {
+        self.taken_for = None;
+    }
 }
 
 impl App {

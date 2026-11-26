@@ -78,6 +78,13 @@ pub enum Event {
     RemoveTakeoff(usize),
 }
 
+impl State {
+    /// The properties to choose from are worked out again (a classification came or went).
+    pub(crate) fn forget_keys(&mut self) {
+        self.keys_for = None;
+    }
+}
+
 /// What the panel keeps of it.
 #[derive(Debug, Default)]
 pub struct State {
@@ -194,6 +201,7 @@ impl App {
                 };
                 (!bare.is_empty()).then(|| bare.to_string())
             }),
+            k if k.starts_with(super::classify::CLASSIFICATION) => self.class_value(id, k),
             _ => prop_value(props, key).filter(|v| !v.trim().is_empty()),
         }
     }
@@ -228,8 +236,11 @@ impl App {
         let mut found: Vec<(String, usize)> = count.into_iter().collect();
         found.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         let key = |key: &str, label: &str| Key { key: key.to_string(), label: label.to_string() };
+        // the project's classifications, as properties of every element
+        let classified: Vec<Key> = self.collab.rules().map_or_else(Vec::new, |r| r.classifications.iter().map(|c| key(&super::classify::key_of(&c.name), &format!("{}: {}", l.text("Classificatie", "Classification"), c.name))).collect());
         self.collab.inform.keys = [key("", "—"), key(MODEL, l.text("Model", "Model")), key(LAYER, l.text("Laag", "Layer")), key(CLASS, l.text("Klasse", "Class")), key(TYPE, l.text("Type", "Type"))]
             .into_iter()
+            .chain(classified)
             .chain(found.into_iter().map(|(k, _)| key(&k, &k)))
             .collect();
         if model_changed {
@@ -246,7 +257,28 @@ impl App {
         self.collab.inform.colour_by = key.to_string();
         let mut legend: Vec<LegendRow> = Vec::new();
         let mut painted = HashMap::new();
-        if let Some(model) = self.model.clone().filter(|_| !key.is_empty()) {
+        let classification = key.strip_prefix(super::classify::CLASSIFICATION).and_then(|name| self.collab.rules()?.classifications.iter().find(|c| c.name == name).cloned());
+        if let (Some(model), Some(classification)) = (self.model.clone(), classification) {
+            // by a classification: its classes in their order and colours, what none takes apart
+            let sorted = self.sorted_by(&classification.name).unwrap_or_default();
+            let mut ids: Vec<Vec<u64>> = vec![Vec::new(); classification.classes.len()];
+            let mut without = Vec::new();
+            for (id, _) in Self::inform_elements(&model) {
+                match sorted.get(&id) {
+                    Some(&(c, _)) => ids[c].push(id),
+                    None => without.push(id),
+                }
+            }
+            for (k, (class, ids)) in classification.classes.iter().zip(ids).enumerate().filter(|(_, (_, ids))| !ids.is_empty()) {
+                let color = class.colour.unwrap_or(colour(k));
+                painted.extend(ids.iter().map(|&id| (id, color)));
+                legend.push(LegendRow { value: class.label(), color, ids });
+            }
+            if !without.is_empty() {
+                let l = self.collab.language;
+                legend.push(LegendRow { value: l.text("(niet ingedeeld)", "(not classified)").to_string(), color: NONE, ids: without });
+            }
+        } else if let Some(model) = self.model.clone().filter(|_| !key.is_empty()) {
             let mut values: HashMap<String, Vec<u64>> = HashMap::new();
             let mut without = Vec::new();
             for (id, layer) in Self::inform_elements(&model) {

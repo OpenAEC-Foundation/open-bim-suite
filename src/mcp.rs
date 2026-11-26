@@ -247,6 +247,16 @@ pub fn tools() -> Vec<Value> {
                 "offset": { "type": "number", "description": "Set the position along the normal" },
                 "remove": { "type": "boolean" }
             }), &[], false),
+        tool("place_model", "Where the open models lie, each moved, turned about Z and with its zero point as the project keeps them (the files are not changed). list gives each model's place; set gives a model (index or file name) a move [x, y, z] (metres), a turn (degrees, anticlockwise from above, about its zero point) or a zero point; align turns and moves it so two of its points land on two others (pairs: [{from: [x,y,z], to: [x,y,z]}, {from, to}], in the coordinates the viewport and measure_distance use); replace puts a new revision of its file (path) in its place, moved and turned as before.",
+            json!({
+                "action": { "type": "string", "enum": ["list", "set", "align", "replace"] },
+                "model": { "type": ["integer", "string"], "description": "Index from list, or file name" },
+                "moved": { "type": "array", "items": { "type": "number" } },
+                "turned": { "type": "number" },
+                "zero": { "type": "array", "items": { "type": "number" } },
+                "pairs": { "type": "array", "items": { "type": "object" } },
+                "path": { "type": "string" }
+            }), &[], false),
         tool("measure_distance", "Measure the distance between two points (also horizontal and vertical parts) and draw it in the viewport.",
             json!({ "a": point_schema("First point"), "b": point_schema("Second point"), "show": { "type": "boolean", "description": "Draw it (default true)" } }), &["a", "b"], false),
         tool("measure_angle", "Measure the angle at a vertex between two points and draw it in the viewport.",
@@ -375,6 +385,13 @@ pub fn tools() -> Vec<Value> {
                 "action": { "type": "string", "enum": ["list", "save", "show", "off", "remove"] },
                 "index": { "type": "integer" },
                 "view": { "type": "object", "description": "{name, rules: [{take, property, value, hide, colour, transparency}], others}" }
+            }), &[], false),
+        tool("collab_classification", "The project's classifications by rules, kept in the rule set: each class (code, name, colour) takes the elements of its rules (take: {classes: [\"IfcWall*\"], models, layers}, conditions: [{property, value}] all holding; values with * ? and | between choices, any case); the first class that takes an element wins. An element's class is the property @classification:<name>, for collab_colours, collab_takeoff, collab_sets and collab_views. list, example (adds NL-SfB), save one (with index: in its place), remove, colour the model by one, report (elements per class per model, and the first that no class takes). The matrix of classes: matrix lists its pairs, pair saves one ({classification, a: \"5*\", b: \"2*\", tolerance_mm, severity: critical|moderate|low, accept, on}; with index: in its place), pair_remove; its pairs run as clash tests with collab_clashes.",
+            json!({
+                "action": { "type": "string", "enum": ["list", "example", "save", "remove", "colour", "report", "matrix", "pair", "pair_remove"] },
+                "index": { "type": "integer" },
+                "pair": { "type": "object" },
+                "classification": { "type": "object", "description": "{name, classes: [{code, name, colour: [r,g,b], rules: [{take, conditions: [{property, value}]}]}]}" }
             }), &[], false),
         tool("collab_takeoff", "Information takeoff: the elements (by class, e.g. [\"IfcWall*\"], and/or a property value) grouped by up to two properties (model, layer, class, type or a property key), with count, length, area and volume from the geometry. make shows it as a table under the 3D view (Excel from there) and returns its rows; keep stores it in the rule set; list gives those kept.",
             json!({

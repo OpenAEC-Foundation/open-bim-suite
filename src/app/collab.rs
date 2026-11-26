@@ -49,6 +49,8 @@ pub enum Tab {
     /// Takeoffs of the elements' information and quantities.
     Takeoff,
     Packages,
+    /// The project's classifications by rules.
+    Classes,
 }
 
 /// What a person decided on a clash.
@@ -247,6 +249,8 @@ pub struct ClashRow {
     pub fresh: bool,
     /// How far it goes.
     pub reach: Reach,
+    /// How much it weighs, as its test says.
+    pub severity: crate::collab::rules::Severity,
 }
 
 /// What a group of clashes is called: the element most of them have.
@@ -383,6 +387,8 @@ pub struct State {
     pub inform: super::inform::State,
     /// The views made of rules, of the Colours tab.
     pub views: super::rule_views::State,
+    /// The classifications by rules, of the Classification tab.
+    pub classify: super::classify::State,
     /// A point cloud against the model.
     pub cloud: super::cloud::State,
     /// The PDF report being made.
@@ -516,6 +522,7 @@ impl Default for State {
             matrix_amount: String::new(),
             inform: Default::default(),
             views: Default::default(),
+            classify: Default::default(),
             cloud: Default::default(),
             report_job: None,
             rerun: false,
@@ -894,6 +901,7 @@ pub enum Event {
     /// Colours, sets and takeoffs.
     Inform(super::inform::Event),
     Views(super::rule_views::Event),
+    Classes(super::classify::Event),
     /// A point cloud against the model.
     Cloud(super::cloud::Event),
     IssueFromClash(usize),
@@ -965,7 +973,7 @@ pub enum Event {
 
 /// Asks for a file to open (or, with `save`, where to save one) in a dialog that belongs to the
 /// window, so it opens in front of it, and then the message `then` makes of the answer.
-fn ask_file(
+pub(super) fn ask_file(
     make: impl Fn() -> rfd::AsyncFileDialog + Send + Sync + Clone + 'static,
     save: bool,
     then: impl Fn(Option<PathBuf>) -> Message + Send + Sync + Clone + 'static,
@@ -1122,6 +1130,7 @@ fn run_clashes(model: &Model, models: &[(String, std::ops::Range<usize>)], rules
                 let ib = host.map_or(ia, |w| &items[w]);
                 rows.push(ClashRow {
                     rule: rule.name.clone(),
+                    severity: rule.severity,
                     a: ia.id,
                     b: ib.id,
                     a_name: element_name(model, ia.id),
@@ -1130,7 +1139,7 @@ fn run_clashes(model: &Model, models: &[(String, std::ops::Range<usize>)], rules
                     at: mid.to_array(),
                     // the sides that are missing, as bits
                     distance: missing as f32,
-                    decision: Decision::Open,
+                    decision: if rule.accept { Decision::Accepted } else { Decision::Open },
                     group: rows.len(),
                     copy: false,
                     key: String::new(),
@@ -1194,6 +1203,7 @@ fn run_clashes(model: &Model, models: &[(String, std::ops::Range<usize>)], rules
                 }
                 rows.push(ClashRow {
                     rule: rule.name.clone(),
+                    severity: rule.severity,
                     a: ia.id,
                     b: ib.id,
                     a_name: element_name(model, ia.id),
@@ -1202,7 +1212,7 @@ fn run_clashes(model: &Model, models: &[(String, std::ops::Range<usize>)], rules
                     at: centre.to_array(),
                     // the share of the places it is not seen from
                     distance: hidden as f32 / places as f32,
-                    decision: Decision::Open,
+                    decision: if rule.accept { Decision::Accepted } else { Decision::Open },
                     group: rows.len(),
                     copy: false,
                     key: String::new(),
@@ -1231,6 +1241,7 @@ fn run_clashes(model: &Model, models: &[(String, std::ops::Range<usize>)], rules
             let copy = c.kind != Kind::Near && ia.class == ib.class && same(ia.solid.min, ib.solid.min) && same(ia.solid.max, ib.solid.max);
             rows.push(ClashRow {
                 rule: rule.name.clone(),
+                    severity: rule.severity,
                 a: ia.id,
                 b: ib.id,
                 a_name: element_name(model, ia.id),
@@ -1238,7 +1249,7 @@ fn run_clashes(model: &Model, models: &[(String, std::ops::Range<usize>)], rules
                 kind: c.kind,
                 at: c.at.to_array(),
                 distance: c.distance,
-                decision: Decision::Open,
+                decision: if rule.accept { Decision::Accepted } else { Decision::Open },
                 group: rows.len(),
                 copy,
                 key: String::new(),
@@ -1738,7 +1749,14 @@ impl App {
     fn collab_clash_topic(&self, row: &ClashRow, l: Language) -> Topic {
         let mut topic = Topic::new(&format!("{}: {} × {}", row.rule, row.a_name, row.b_name), &self.collab.author);
         topic.kind = "Clash".into();
-        topic.priority = "Normal".into();
+        // as heavy as its test says, and the classes of its two elements as labels
+        topic.priority = match row.severity {
+            crate::collab::rules::Severity::Critical => "Critical",
+            crate::collab::rules::Severity::Moderate => "Normal",
+            crate::collab::rules::Severity::Low => "Low",
+        }
+        .into();
+        topic.labels = self.class_labels(&[row.a, row.b]);
         let mm = (row.distance * 1000.0).round();
         topic.description = match row.kind {
             Kind::Crossing => format!("{} {mm} mm", l.text("De elementen doorsnijden elkaar over", "The elements cross by")),
@@ -2501,6 +2519,8 @@ impl App {
                 Ok(set) => {
                     self.collab.rule_sets.push(set);
                     self.collab.rule_set = self.collab.rule_sets.len() - 1;
+                    self.collab.classify.picked = 0;
+                    self.classes_changed();
                 }
                 Err(e) => self.collab_note(Tone::Error, e),
             },
@@ -2780,6 +2800,8 @@ impl App {
             Event::RuleSet(k) => {
                 if k < self.collab.rule_sets.len() {
                     self.collab.rule_set = k;
+                    self.collab.classify.picked = 0;
+                    self.classes_changed();
                 }
             }
             Event::ModelChecks(on) => {
@@ -3023,6 +3045,8 @@ impl App {
                     return Task::none();
                 }
                 // as the first test of the rule set asks, against everything else
+                let mut ids = ids;
+                ids.sort_unstable();
                 let like = self.collab.rules().and_then(|r| r.clashes.first().cloned()).unwrap_or_default();
                 let rule = ClashRule {
                     name: format!("{} ({})", l.text("Selectie tegen de rest", "Selection against the rest"), ids.len()),
@@ -3061,7 +3085,9 @@ impl App {
                     return Task::none();
                 };
                 self.collab.tab = Tab::Clashes;
-                let tests = rules.clash_rules();
+                // the rule set's own tests, and those of its matrix of classes
+                let mut tests = rules.clash_rules();
+                tests.extend(self.class_clash_tests(&rules));
                 if tests.is_empty() {
                     self.collab_note(Tone::Warning, l.text("De regelset heeft geen clashtest die aan staat.", "The rule set has no clash test switched on."));
                     return Task::none();
@@ -3145,6 +3171,7 @@ impl App {
             }
             Event::Inform(e) => return self.inform_handle(e),
             Event::Views(e) => return self.rule_views_handle(e),
+            Event::Classes(e) => return self.classify_handle(e),
             Event::Cloud(e) => return self.cloud_handle(e),
             Event::ReportShot(shot) => {
                 let picture = self.viewport_picture(&shot);
@@ -3526,7 +3553,9 @@ impl App {
                 let started = Instant::now();
                 self.collab_remember();
                 self.collab.partial_run = false;
-                let mut rows = run_clashes(&model, &models, &rules.clash_rules(), &AtomicBool::new(false));
+                let mut tests = rules.clash_rules();
+                tests.extend(self.class_clash_tests(&rules));
+                let mut rows = run_clashes(&model, &models, &tests, &AtomicBool::new(false));
                 self.collab_take_clashes(&mut rows);
                 // the clash picked in the run before is no longer there, nor its marker
                 self.collab.clash = None;
@@ -3567,6 +3596,7 @@ impl App {
             tab(Tab::Compare, l.text("Vergelijken", "Compare").to_string()),
             tab(Tab::Colours, l.text("Kleuren", "Colours").to_string()),
             tab(Tab::Takeoff, l.text("Staat", "Takeoff").to_string()),
+            tab(Tab::Classes, l.text("Classificatie", "Classification").to_string()),
         ]
         .spacing(2)
         .wrap();
@@ -3587,9 +3617,17 @@ impl App {
                 button(text(name.clone()).size(12)).padding([1, 4]).width(Length::Fill).style(move |_, s| p.ribbon_button(picked, s)).on_press(Message::PickModel(i)),
                 Node::new(Role::Button, format!("{} {name}", l.text("Kies model", "Pick model"))).selected(picked),
             );
+            // a model moved or turned in the project says so (its file is as it came)
+            let placed = match (entry.placed.moved != glam::DVec3::ZERO, entry.placed.turned != 0.0) {
+                (false, false) => String::new(),
+                (true, false) => l.text("verplaatst", "moved").to_string(),
+                (false, true) => format!("{} {:.1}°", l.text("gedraaid", "turned"), entry.placed.turned),
+                (true, true) => format!("{} · {:.1}°", l.text("verplaatst", "moved"), entry.placed.turned),
+            };
             let line = row![
                 named(w::checkbox(look, "", entry.visible, Some(move |on| Message::ModelVisible(i, on))), Node::new(Role::CheckBox, format!("{} {name}", l.text("Toon", "Show"))).selected(entry.visible)),
                 pick,
+                w::secondary(look, placed),
                 w::secondary(look, entry.model.format.clone()),
             ]
             .spacing(6)
@@ -3631,6 +3669,7 @@ impl App {
             Tab::Compare => column![self.collab_compare(look, l), w::divider(look), self.cloud_view(look, l)].spacing(8).into(),
             Tab::Colours => self.inform_colours(look, l, &state.sides),
             Tab::Takeoff => self.inform_takeoffs(look, l, &state.sides),
+            Tab::Classes => self.classify_panel(look, l, &state.sides),
         };
         body.push(scrollable(container(content).padding(iced::Padding { right: 10.0, ..iced::Padding::ZERO })).height(Length::Fill)).height(Length::Fill).into()
     }
@@ -4261,6 +4300,11 @@ impl App {
                 Kind::Unframed => (format!("{}: {}", l.text("geen", "no"), crate::collab::frame::words(clash.distance as u8, l == Language::Dutch)), Tone::Error),
             };
             let what = if clash.fresh { format!("{} · {what}", l.text("nieuw", "new")) } else { what };
+            // a test that weighs more or less than most says so
+            let what = match clash.severity {
+                crate::collab::rules::Severity::Moderate => what,
+                severity => format!("{} · {what}", super::classify::severity_word(severity, l)),
+            };
             match clash.decision {
                 Decision::Accepted => (l.text("akkoord", "accepted").to_string(), Tone::Success),
                 Decision::Rejected => (format!("{what} · {}", l.text("afgewezen", "rejected")), tone),
@@ -4649,6 +4693,9 @@ impl App {
         }
         if cmd == "collab_views" {
             return self.rule_views_command(a);
+        }
+        if cmd == "collab_classification" {
+            return self.classify_command(a);
         }
         if matches!(cmd, "collab_colours" | "collab_sets" | "collab_takeoff") {
             return self.inform_command(cmd, a);
@@ -5083,7 +5130,7 @@ pub(crate) mod tests {
     }
 
     fn row(rule: &str, a: u64, b: u64, at: [f32; 3]) -> ClashRow {
-        ClashRow { rule: rule.into(), a, b, a_name: format!("E{a}"), b_name: format!("E{b}"), kind: Kind::Crossing, at, distance: 0.01, decision: Decision::Open, group: 0, copy: false, key: String::new(), fresh: false, reach: Reach::Partly }
+        ClashRow { rule: rule.into(), a, b, a_name: format!("E{a}"), b_name: format!("E{b}"), kind: Kind::Crossing, at, distance: 0.01, decision: Decision::Open, group: 0, copy: false, key: String::new(), fresh: false, reach: Reach::Partly, severity: Default::default() }
     }
 
     #[test]

@@ -21,6 +21,8 @@ mod inform;
 #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
 mod rule_views;
 #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
+mod classify;
+#[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
 mod clash_words;
 #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
 mod room_checks;
@@ -285,6 +287,10 @@ pub struct App {
     /// Moving a model by two points picked in the 3D view: the model, and how many measurements
     /// there were when it began (the line drawn between the two points is not kept).
     pub moving_model: Option<(usize, usize)>,
+    /// The move by picked points aligns by two pairs of them, turning the model as well.
+    pub(crate) align_pairs: bool,
+    /// The model (by its place among the models) a new revision is loading for.
+    replacing: Option<usize>,
     /// The saved view last shown.
     pub active_view: Option<usize>,
     /// Show the model's grid lines with their bubbles.
@@ -591,6 +597,11 @@ pub enum Message {
     PickModel(usize),
     /// Move the picked model by two points picked in the 3D view: from, then to.
     MoveModelByPoints,
+    /// The picked model laid on others by two pairs of points: moved and turned.
+    AlignModelByPairs,
+    /// A new revision of the picked model's file to load in its place.
+    ReplaceModelDialog,
+    ReplacePicked(Option<loaders::Source>),
     /// Open or close a folder of views in the explorer (by its path).
     ToggleFolder(String),
     /// Order the views of the files in the explorer: see [`App::view_order`].
@@ -1203,6 +1214,8 @@ impl Default for App {
             plane_placed: None,
             plane_picking: false,
             moving_model: None,
+            align_pairs: false,
+            replacing: None,
             active_view: None,
             show_grids: true,
             picked_grid: None,
@@ -2335,6 +2348,8 @@ impl App {
                 self.scene_stale = false;
                 if restack {
                     self.replace_last_model(model);
+                } else if let Some(i) = self.replacing.take().filter(|_| self.adding_model) {
+                    self.replace_model(i, model);
                 } else if self.adding_model {
                     self.add_model(model);
                 } else {
@@ -2354,6 +2369,8 @@ impl App {
                 return Task::batch([drawings, self.compute_schedules(), self.shot_after_delay(), register]);
             }
             Message::Loaded(Err(e)) => {
+                // a new revision that does not read leaves the model it was for as it is
+                self.replacing = None;
                 // one of several files does not read: the others still come
                 if self.adding_model && !self.add_queue.is_empty() {
                     eprintln!("not added: {e}");
@@ -3300,7 +3317,27 @@ impl App {
                 self.explode = [0.0; 3];
                 self.update_explode();
             }
+            Message::AlignModelByPairs => {
+                let _ = self.update(Message::MoveModelByPoints);
+                self.align_pairs = self.moving_model.is_some();
+            }
+            Message::ReplaceModelDialog => {
+                if self.picked_model.is_some_and(|i| i < self.models.len()) && !matches!(self.status, Status::Loading { .. }) {
+                    return pick_model_task(false).map(|m| match m {
+                        Message::Picked(source) => Message::ReplacePicked(source),
+                        other => other,
+                    });
+                }
+            }
+            Message::ReplacePicked(None) => {}
+            Message::ReplacePicked(Some(source)) => {
+                if let Some(i) = self.picked_model.filter(|&i| i < self.models.len()) {
+                    self.replacing = Some(i);
+                    return self.open(source, true);
+                }
+            }
             Message::MoveModelByPoints => {
+                self.align_pairs = false;
                 if let Some(i) = self.picked_model.filter(|&i| i < self.models.len() && self.model.is_some()) {
                     self.moving_model = Some((i, self.measure.results.len()));
                     self.measure.picks.clear();
@@ -3555,6 +3592,9 @@ impl App {
         if self.measure.results.len() <= before {
             return;
         }
+        if self.align_pairs {
+            return self.align_model_by_lines(i, before);
+        }
         let line = match self.measure.results.pop() {
             Some(crate::measure::Measurement::Mark { points, .. }) if points.len() == 2 => Some((points[0], points[1])),
             _ => None,
@@ -3571,6 +3611,71 @@ impl App {
         let name = entry.model.file_name();
         self.replace_models();
         self.status = Status::Loaded(format!("{name} moved by {:.3}, {:.3}, {:.3} m", by.x, by.y, by.z));
+    }
+
+    /// Aligning by two pairs: once the second line is drawn, the model is turned and moved so
+    /// the first point of each line lands on its second.
+    fn align_model_by_lines(&mut self, i: usize, before: usize) {
+        if self.measure.results.len() < before + 2 {
+            return;
+        }
+        let mut line = || match self.measure.results.pop() {
+            Some(crate::measure::Measurement::Mark { points, .. }) if points.len() == 2 => Some((points[0], points[1])),
+            _ => None,
+        };
+        let (second, first) = (line(), line());
+        self.moving_model = None;
+        self.align_pairs = false;
+        self.measure.tool = None;
+        self.measure.picks.clear();
+        self.measure.hover = None;
+        let (Some(first), Some(second)) = (first, second) else { return };
+        match self.align_model(i, first, second) {
+            Ok(said) => self.status = Status::Loaded(said),
+            Err(e) => self.status = Status::Error(e),
+        }
+    }
+
+    /// Turns and moves model `i` so the first point of each pair (as the view shows it) lands
+    /// on its second; says what it did.
+    pub(crate) fn align_model(&mut self, i: usize, first: (Vec3, Vec3), second: (Vec3, Vec3)) -> Result<String, String> {
+        // the scene's frame: the points are in the view's, which may be turned up
+        let inverse = self.model_matrix().inverse();
+        let scene = |p: Vec3| inverse.transform_point3(p).as_dvec3();
+        let (Some(entry), Some(model)) = (self.models.get(i), self.model.as_ref()) else { return Err(format!("no model {i}")) };
+        // where the model's zero point lies in the scene: the turn is about it
+        let first_origin: usize = self.models[..i].iter().map(|e| e.model.origins.len().max(1)).sum();
+        let pivot = model.origins.get(first_origin).map_or(glam::DVec3::ZERO, |o| o.shift);
+        let (moved, turned) = origin::aligned_by_pairs(entry.placed.moved, entry.placed.turned, pivot, [scene(first.0), scene(second.0)], [scene(first.1), scene(second.1)])
+            .ok_or("The two points of a pair lie on top of each other in plan: pick points further apart")?;
+        let Some(entry) = self.models.get_mut(i) else { return Err(format!("no model {i}")) };
+        entry.placed.moved = moved;
+        entry.placed.turned = turned;
+        let name = entry.model.file_name();
+        self.replace_models();
+        Ok(format!("{name} aligned: moved {:.3}, {:.3}, {:.3} m, turned {turned:.3}°", moved.x, moved.y, moved.z))
+    }
+
+    /// Puts `model`, a new revision of model `i`'s file, in its place: shown or not, moved and
+    /// turned as the one it replaces.
+    pub(crate) fn replace_model(&mut self, i: usize, model: Arc<Model>) {
+        let Some(old) = self.models.get(i) else { return self.add_model(model) };
+        let (mut placed, visible, was) = (old.placed.clone(), old.visible, old.model.file_name());
+        placed.map = origin::Map::None;
+        let mut entry = ModelEntry::new(model, 0);
+        entry.placed = placed;
+        entry.visible = visible;
+        let now = entry.model.file_name();
+        self.models[i] = entry;
+        // the layers of the models after it shift by what the new revision has more or less
+        let mut first = 0;
+        for e in &mut self.models {
+            e.layers = first..first + e.model.layers.len();
+            first = e.layers.end;
+        }
+        self.combine_models();
+        self.picked_model = Some(i);
+        self.status = Status::Loaded(format!("{was} replaced by {now}: its place and turn kept"));
     }
 
     /// Something is selected: elements or layers, or structural objects picked by a click.
@@ -6186,6 +6291,78 @@ mod tests {
         let _ = app.update(Message::MoveModelByPoints);
         let _ = app.update(Message::Escape);
         assert!(app.moving_model.is_none() && app.measure.tool.is_none());
+    }
+
+    #[test]
+    fn a_picked_model_is_aligned_by_two_pairs_of_points_turning_it() {
+        let mut app = App::default();
+        app.set_model(named_square("architect", 7, 0.0));
+        app.add_model(named_square("structure", 8, 5.0));
+        let _ = app.update(Message::PickModel(1));
+        let _ = app.update(Message::AlignModelByPairs);
+        assert!(app.align_pairs && app.moving_model == Some((1, 0)));
+        let line = |a: Vec3, b: Vec3| crate::measure::Measurement::Mark { kind: crate::measure::MarkKind::Line, points: vec![a, b] };
+        // where the second square's corners are, before
+        let scene = app.model.clone().unwrap();
+        let p = |layer: usize, k: usize| Vec3::new(scene.layers[layer].positions[3 * k], scene.layers[layer].positions[3 * k + 1], scene.layers[layer].positions[3 * k + 2]);
+        let (a0, a1) = (p(1, 0), p(1, 1));
+        // the first line alone does not move it yet
+        let (b0, b1) = (Vec3::new(20.0, 10.0, 0.0), Vec3::new(20.0, 10.0, 0.0) + Vec3::new(-(a1 - a0).y, (a1 - a0).x, 0.0));
+        app.measure.results.push(line(a0, b0));
+        app.move_model_by_line();
+        assert!(app.moving_model.is_some(), "it waits for the second pair");
+        app.measure.results.push(line(a1, b1));
+        app.move_model_by_line();
+        assert!(app.moving_model.is_none() && !app.align_pairs && app.measure.results.is_empty());
+        assert!((app.models[1].placed.turned - 90.0).abs() < 1e-6, "{}", app.models[1].placed.turned);
+        // its corners lie on the points they were laid on
+        let scene = app.model.clone().unwrap();
+        let p = |layer: usize, k: usize| Vec3::new(scene.layers[layer].positions[3 * k], scene.layers[layer].positions[3 * k + 1], scene.layers[layer].positions[3 * k + 2]);
+        assert!(p(1, 0).distance(b0) < 1e-3 && p(1, 1).distance(b1) < 1e-3, "{:?} {:?}", p(1, 0), p(1, 1));
+    }
+
+    #[test]
+    fn the_remote_lists_places_and_aligns_the_models() {
+        use serde_json::json;
+        let mut app = App::default();
+        app.set_model(named_square("architect", 7, 0.0));
+        app.add_model(named_square("structure", 8, 5.0));
+        let listed = app.place_model_command(&json!({ "action": "list" })).unwrap();
+        assert_eq!(listed["models"][1]["file"], "structure.rvt");
+        // set by file name: moved and turned
+        let set = app.place_model_command(&json!({ "action": "set", "model": "structure.rvt", "moved": [1.0, 2.0, 0.0], "turned": 10.0 })).unwrap();
+        assert_eq!(set["models"][1]["moved"], json!([1.0, 2.0, 0.0]));
+        assert_eq!(app.models[1].placed.turned, 10.0);
+        // aligned by two pairs of points, as the viewport has them
+        let scene = app.model.clone().unwrap();
+        let p = |k: usize| Vec3::new(scene.layers[1].positions[3 * k], scene.layers[1].positions[3 * k + 1], scene.layers[1].positions[3 * k + 2]);
+        let (a0, a1) = (p(0), p(1));
+        let to = |v: Vec3| [v.x as f64 + 3.0, v.y as f64, v.z as f64];
+        let aligned = app.place_model_command(&json!({ "action": "align", "model": 1, "pairs": [{ "from": [a0.x, a0.y, a0.z], "to": to(a0) }, { "from": [a1.x, a1.y, a1.z], "to": to(a1) }] })).unwrap();
+        assert!(aligned["said"].as_str().unwrap().contains("aligned"), "{aligned}");
+        assert!((app.models[1].placed.turned - 10.0).abs() < 1e-4, "a pure shift keeps the turn: {} {a0:?} {a1:?}", app.models[1].placed.turned);
+        let scene = app.model.clone().unwrap();
+        let moved = Vec3::new(scene.layers[1].positions[0], scene.layers[1].positions[1], scene.layers[1].positions[2]);
+        assert!(moved.distance(a0 + Vec3::X * 3.0) < 1e-3, "{moved:?}");
+        assert!(app.place_model_command(&json!({ "action": "set", "model": 5 })).is_err());
+    }
+
+    #[test]
+    fn a_new_revision_takes_the_place_and_turn_of_the_model_it_replaces() {
+        let mut app = App::default();
+        app.set_model(named_square("architect", 7, 0.0));
+        app.add_model(named_square("structure", 8, 5.0));
+        app.models[1].placed.moved = glam::DVec3::new(1.0, 2.0, 0.0);
+        app.models[1].placed.turned = 15.0;
+        app.models[1].visible = false;
+        app.replace_model(1, named_square("structure_rev2", 9, 5.0));
+        let entry = &app.models[1];
+        assert_eq!(entry.model.file_name(), "structure_rev2.rvt");
+        assert_eq!((entry.placed.moved, entry.placed.turned, entry.visible), (glam::DVec3::new(1.0, 2.0, 0.0), 15.0, false));
+        assert_eq!(app.models[0].layers, 0..1);
+        assert_eq!(app.models[1].layers, 1..2);
+        let Status::Loaded(said) = &app.status else { panic!("{:?}", app.status) };
+        assert!(said.contains("replaced by structure_rev2.rvt"), "{said}");
     }
 
     #[test]
