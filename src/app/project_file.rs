@@ -53,6 +53,13 @@ pub struct Source {
     /// Where its zero point lies in it (metres).
     #[serde(default)]
     pub zero: [f64; 3],
+    /// How far it is turned about its zero point (degrees, anticlockwise seen from above).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub turned: f64,
+}
+
+fn is_zero(v: &f64) -> bool {
+    *v == 0.0
 }
 
 fn shown() -> bool {
@@ -157,7 +164,7 @@ impl App {
             .models
             .iter()
             .filter(|entry| entry.model.path.is_absolute())
-            .map(|entry| Source { path: named(folder, &entry.model.path), visible: entry.visible, moved: entry.placed.moved.to_array(), zero: entry.placed.zero.to_array() })
+            .map(|entry| Source { path: named(folder, &entry.model.path), visible: entry.visible, moved: entry.placed.moved.to_array(), zero: entry.placed.zero.to_array(), turned: entry.placed.turned })
             .collect();
         let mut work_packages = self.work_packages.clone();
         work_packages.map_sources(|path| PathBuf::from(named(folder, path)));
@@ -258,7 +265,8 @@ impl App {
             entry.visible = source.visible;
             entry.placed.moved = DVec3::from_array(source.moved);
             entry.placed.zero = DVec3::from_array(source.zero);
-            moved |= entry.placed.moved != DVec3::ZERO;
+            entry.placed.turned = source.turned;
+            moved |= entry.placed.moved != DVec3::ZERO || entry.placed.turned != 0.0;
         }
         if moved {
             self.replace_models();
@@ -310,8 +318,8 @@ mod tests {
             version: 1,
             work_packages: Default::default(),
             models: vec![
-                Source { path: "models/architect.ifc".into(), visible: true, moved: [0.0; 3], zero: [0.0; 3] },
-                Source { path: "../structure/frame.rvt".into(), visible: false, moved: [12.5, -3.0, 0.25], zero: [1.0, 2.0, 3.0] },
+                Source { path: "models/architect.ifc".into(), visible: true, moved: [0.0; 3], zero: [0.0; 3], turned: 0.0 },
+                Source { path: "../structure/frame.rvt".into(), visible: false, moved: [12.5, -3.0, 0.25], zero: [1.0, 2.0, 3.0], turned: 12.5 },
             ],
             camera: Some(View { target: [1.0, 2.0, 3.0], distance: 40.0, yaw: 0.5, pitch: 0.3, fov_y: 0.8, ortho: true }),
             plane: Some(([0.0, 0.0, 1.0], 2.5)),
@@ -330,7 +338,7 @@ mod tests {
         // a file written before a field was there still reads
         let old = r#"{"data":[{"path":"p","attributes":{"openaec::project":{"version":1,"models":[{"path":"a.ifc"}]}}}]}"#;
         let read = Project::read(old).expect("a project");
-        assert_eq!(read.models, vec![Source { path: "a.ifc".into(), visible: true, moved: [0.0; 3], zero: [0.0; 3] }]);
+        assert_eq!(read.models, vec![Source { path: "a.ifc".into(), visible: true, moved: [0.0; 3], zero: [0.0; 3], turned: 0.0 }]);
         assert_eq!((read.camera, read.plane), (None, None));
     }
 
@@ -356,6 +364,7 @@ mod tests {
         app.add_model(square(&b));
         app.models[1].placed.moved = DVec3::new(12.5, -3.0, 0.25);
         app.models[1].placed.zero = DVec3::new(1.0, 2.0, 3.0);
+        app.models[1].placed.turned = 30.0;
         app.replace_models();
         app.models[1].visible = false;
         app.restore_model_visibility();
@@ -376,6 +385,7 @@ mod tests {
         assert_eq!((again.models[0].visible, again.models[1].visible), (true, false));
         assert_eq!(again.models[1].placed.moved, DVec3::new(12.5, -3.0, 0.25));
         assert_eq!(again.models[1].placed.zero, DVec3::new(1.0, 2.0, 3.0));
+        assert_eq!(again.models[1].placed.turned, 30.0, "the turn comes back with the project");
         assert_eq!(again.models[0].placed.moved, DVec3::ZERO);
         // the moved model lies where it was moved to, and its layer is switched off
         let scene = again.model.as_ref().expect("a scene");

@@ -50,7 +50,8 @@ pub struct Selector {
     pub classes: Vec<String>,
     /// Elements whose name fits one of these (`*exit*`): a sign has no class of its own.
     pub names: Vec<String>,
-    /// For a test of the moment, not kept in a file: only these elements, and all but these.
+    /// For a test of the moment, not kept in a file: only these elements, and all but these
+    /// (both sorted, so a large class is looked through fast).
     #[serde(skip)]
     pub only: Vec<u64>,
     #[serde(skip)]
@@ -70,7 +71,7 @@ impl Selector {
 
     /// Whether it takes element `id` of this model, layer and class.
     pub fn takes_element(&self, id: u64, model: &str, layer: &str, class: &str) -> bool {
-        (self.only.is_empty() || self.only.contains(&id)) && !self.except.contains(&id) && self.takes(model, layer, class)
+        (self.only.is_empty() || self.only.binary_search(&id).is_ok()) && self.except.binary_search(&id).is_err() && self.takes(model, layer, class)
     }
 
     /// Whether it takes an element of this model, layer and class.
@@ -124,6 +125,45 @@ pub enum ClashKind {
     Frame,
 }
 
+/// How much a clash of a test weighs, to sort out what comes first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Severity {
+    Critical,
+    #[default]
+    Moderate,
+    Low,
+}
+
+/// A pair of the matrix of classes: the elements of the classes whose code fits `a` (`5*`, a
+/// group of classes) against those that fit `b`, in classification `classification`, how far
+/// they may cross, how much a clash weighs, and whether its clashes are agreed to at once (an
+/// electrical box in a wall).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ClassPair {
+    pub classification: String,
+    pub a: String,
+    pub b: String,
+    pub tolerance_mm: f32,
+    pub severity: Severity,
+    pub accept: bool,
+    pub on: bool,
+}
+
+impl Default for ClassPair {
+    fn default() -> Self {
+        ClassPair { classification: String::new(), a: String::new(), b: String::new(), tolerance_mm: 2.0, severity: Severity::Moderate, accept: false, on: true }
+    }
+}
+
+impl ClassPair {
+    /// What its test is called: `NL-SfB: 5* × 2*`.
+    pub fn name(&self) -> String {
+        format!("{}: {} × {}", self.classification, self.a.trim(), self.b.trim())
+    }
+}
+
 /// A clash test: the elements of `a` against those of `b`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -162,11 +202,14 @@ pub struct ClashRule {
     /// the walls whose openings are tested, by their type or name (`*sandwich*`; empty: all).
     pub frame_reach_mm: f32,
     pub frame_walls: String,
+    /// How much its clashes weigh, and whether they are agreed to as they are found.
+    pub severity: Severity,
+    pub accept: bool,
 }
 
 impl Default for ClashRule {
     fn default() -> Self {
-        ClashRule { name: String::new(), a: Selector::default(), b: Selector::default(), kind: ClashKind::Hard, tolerance_mm: 2.0, clearance_mm: 50.0, on: true, between_models: false, storeys: String::new(), property: String::new(), value: String::new(), pair_tolerances: String::new(), sight_m: 20.0, sight_blocked_pct: 50.0, sight_names: String::new(), frame_reach_mm: 250.0, frame_walls: String::new() }
+        ClashRule { name: String::new(), a: Selector::default(), b: Selector::default(), kind: ClashKind::Hard, tolerance_mm: 2.0, clearance_mm: 50.0, on: true, between_models: false, storeys: String::new(), property: String::new(), value: String::new(), pair_tolerances: String::new(), sight_m: 20.0, sight_blocked_pct: 50.0, sight_names: String::new(), frame_reach_mm: 250.0, frame_walls: String::new(), severity: Severity::Moderate, accept: false }
     }
 }
 
@@ -237,6 +280,131 @@ pub struct SelectionSet {
     pub keys: Vec<String>,
     pub property: String,
     pub value: String,
+}
+
+/// Whether `value` fits `pattern` as a whole, any case: `*` stands for any text, `?` for one
+/// character, `|` between choices (`true|.t.|1`); an empty pattern takes anything.
+pub fn fits(pattern: &str, value: &str) -> bool {
+    if pattern.contains('|') {
+        return pattern.split('|').any(|choice| !choice.trim().is_empty() && fits(choice, value));
+    }
+    let pattern: Vec<char> = pattern.trim().to_lowercase().chars().collect();
+    let value: Vec<char> = value.trim().to_lowercase().chars().collect();
+    if pattern.is_empty() {
+        return true;
+    }
+    // the usual walk with one place to go back to after the last star
+    let (mut p, mut v, mut star, mut mark) = (0, 0, None, 0);
+    while v < value.len() {
+        if p < pattern.len() && (pattern[p] == '?' || pattern[p] == value[v]) {
+            p += 1;
+            v += 1;
+        } else if p < pattern.len() && pattern[p] == '*' {
+            star = Some(p);
+            mark = v;
+            p += 1;
+        } else if let Some(s) = star {
+            p = s + 1;
+            mark += 1;
+            v = mark;
+        } else {
+            return false;
+        }
+    }
+    pattern[p..].iter().all(|&c| c == '*')
+}
+
+/// A condition of a classification rule: property `property` of the element (a key as the
+/// Colours tab lists them: model, layer, class, type or a property of the element) fits `value`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Condition {
+    pub property: String,
+    pub value: String,
+}
+
+/// A rule that puts elements in a class: those `take` takes (their IFC class, model or layer)
+/// whose conditions all hold.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ClassRule {
+    pub take: Selector,
+    pub conditions: Vec<Condition>,
+}
+
+/// A class of a classification: its code, its name, the colour it is shown in, and the rules
+/// that put elements in it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ClassDef {
+    pub code: String,
+    pub name: String,
+    pub colour: Option<[u8; 3]>,
+    pub rules: Vec<ClassRule>,
+}
+
+impl ClassDef {
+    /// The class as its elements say it: its code and its name.
+    pub fn label(&self) -> String {
+        match (self.code.trim(), self.name.trim()) {
+            ("", name) => name.to_string(),
+            (code, "") => code.to_string(),
+            (code, name) => format!("{code} {name}"),
+        }
+    }
+}
+
+/// A classification the project agrees on (NL-SfB, its own): every element of every model in
+/// the first class one of whose rules takes it, whatever its file calls it. Nothing is written
+/// into the files; the class is a property the Validator reads.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Classification {
+    pub name: String,
+    pub classes: Vec<ClassDef>,
+}
+
+impl Classification {
+    /// A classification from its own file (JSON), to share one between projects.
+    pub fn read(text: &str) -> Result<Classification, String> {
+        serde_json::from_str(text).map_err(|e| format!("classification: {e}"))
+    }
+
+    pub fn write(&self) -> String {
+        serde_json::to_string_pretty(self).unwrap_or_default()
+    }
+
+    /// A start in NL-SfB (the element method of '91, two digits), walls, floors and roofs
+    /// outside and inside apart: by the IFC class, and for walls by whether they are external.
+    pub fn nl_sfb() -> Classification {
+        let rule = |classes: &[&str], conditions: &[(&str, &str)]| ClassRule {
+            take: Selector::classes(classes),
+            conditions: conditions.iter().map(|&(property, value)| Condition { property: property.into(), value: value.into() }).collect(),
+        };
+        let class = |code: &str, name: &str, colour: [u8; 3], rules: Vec<ClassRule>| ClassDef { code: code.into(), name: name.into(), colour: Some(colour), rules };
+        Classification {
+            name: "NL-SfB".into(),
+            classes: vec![
+                class("16", "Funderingsconstructies", [120, 90, 60], vec![rule(&["IfcFooting"], &[])]),
+                class("17", "Paalfunderingen", [90, 70, 50], vec![rule(&["IfcPile"], &[])]),
+                class("21", "Buitenwanden", [200, 80, 60], vec![rule(&["IfcWall*"], &[("IsExternal", "true|.t.|1|yes|ja")]), rule(&["IfcCurtainWall"], &[])]),
+                class("22", "Binnenwanden", [230, 160, 120], vec![rule(&["IfcWall*"], &[])]),
+                class("13", "Vloeren op grondslag", [150, 150, 110], vec![rule(&["IfcSlab"], &[("PredefinedType", "BASESLAB")])]),
+                class("27", "Daken", [90, 120, 170], vec![rule(&["IfcRoof"], &[]), rule(&["IfcSlab"], &[("PredefinedType", "ROOF")])]),
+                class("23", "Vloeren", [170, 170, 170], vec![rule(&["IfcSlab"], &[])]),
+                class("24", "Trappen en hellingen", [160, 110, 170], vec![rule(&["IfcStair*", "IfcRamp*"], &[])]),
+                class("28", "Hoofddraagconstructies", [60, 110, 160], vec![rule(&["IfcBeam", "IfcColumn", "IfcMember"], &[])]),
+                class("31", "Buitenwandopeningen", [80, 170, 210], vec![rule(&["IfcWindow", "IfcDoor"], &[("IsExternal", "true|.t.|1|yes|ja")])]),
+                class("32", "Binnenwandopeningen", [140, 200, 220], vec![rule(&["IfcDoor", "IfcWindow"], &[])]),
+                class("34", "Balustrades en leuningen", [120, 120, 200], vec![rule(&["IfcRailing"], &[])]),
+                class("4-", "Afwerkingen", [210, 200, 150], vec![rule(&["IfcCovering"], &[])]),
+                class("5-", "Werktuigkundige installaties", [60, 160, 90], vec![rule(&["IfcPipe*", "IfcDuct*", "IfcFlow*", "IfcAirTerminal*", "IfcSanitaryTerminal*", "IfcValve*", "IfcPump*", "IfcFan*", "IfcTank*", "IfcEnergyConversionDevice*"], &[])]),
+                class("6-", "Elektrotechnische installaties", [230, 190, 40], vec![rule(&["IfcCable*", "IfcLightFixture", "IfcOutlet", "IfcSwitchingDevice", "IfcElectric*"], &[])]),
+                class("7-", "Vaste voorzieningen", [180, 130, 90], vec![rule(&["IfcFurnishingElement", "IfcSystemFurnitureElement"], &[])]),
+                class("8-", "Losse inventaris", [200, 150, 110], vec![rule(&["IfcFurniture"], &[])]),
+            ],
+        }
+    }
 }
 
 /// What a view does with the elements none of its rules takes.
@@ -379,6 +547,10 @@ pub struct RuleSet {
     pub takeoffs: Vec<Takeoff>,
     /// Views made of rules: what to hide, colour and make see-through.
     pub views: Vec<RuleView>,
+    /// The project's own classifications of its elements, by rules.
+    pub classifications: Vec<Classification>,
+    /// The matrix of classes: pairs of classes tested against each other.
+    pub class_matrix: Vec<ClassPair>,
     /// The clashes of the last run, with what was decided on them: the next run takes the
     /// decisions over and tells what is new and what is solved. And the runs so far.
     pub clash_memory: Vec<ClashMemo>,
@@ -442,6 +614,8 @@ impl Default for RuleSet {
             selection_sets: Vec::new(),
             takeoffs: Vec::new(),
             views: Vec::new(),
+            classifications: Vec::new(),
+            class_matrix: Vec::new(),
             clash_memory: Vec::new(),
             clash_runs: Vec::new(),
             info_rules: Vec::new(),
@@ -672,6 +846,30 @@ impl RuleSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pattern_fits_as_a_whole_with_stars_question_marks_and_choices() {
+        assert!(fits("21*", "21.12 Buitenwand"));
+        assert!(!fits("21*", "121"));
+        assert!(fits("ifcwall*", "IfcWallStandardCase"));
+        assert!(fits("2?", "22") && !fits("2?", "221"));
+        assert!(fits("*kalkzand*", "Wand 175 mm Kalkzandsteen"));
+        assert!(fits("true|.t.|1", ".T.") && fits("true|.t.|1", "True") && !fits("true|.t.|1", "false"));
+        assert!(fits("", "anything") && fits("*", ""));
+        assert!(!fits("a", ""));
+    }
+
+    #[test]
+    fn a_classification_goes_to_its_file_and_back() {
+        let nl = Classification::nl_sfb();
+        assert!(nl.classes.iter().any(|c| c.code == "21") && nl.classes.iter().all(|c| !c.rules.is_empty()));
+        let back = Classification::read(&nl.write()).unwrap();
+        assert_eq!(back, nl);
+        // a rule set keeps them
+        let set = RuleSet { classifications: vec![nl.clone()], ..RuleSet::default() };
+        let text = serde_json::to_string(&set).unwrap();
+        assert_eq!(serde_json::from_str::<RuleSet>(&text).unwrap().classifications, vec![nl]);
+    }
 
     #[test]
     fn a_selector_takes_by_model_layer_and_class() {

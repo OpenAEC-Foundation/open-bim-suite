@@ -374,6 +374,13 @@ pub fn tools() -> Vec<Value> {
                 "index": { "type": "integer" },
                 "view": { "type": "object", "description": "{name, rules: [{take, property, value, hide, colour, transparency}], others}" }
             }), &[], false),
+        tool("collab_classification", "The project's classifications by rules, kept in the rule set: each class (code, name, colour) takes the elements of its rules (take: {classes: [\"IfcWall*\"], models, layers}, conditions: [{property, value}] all holding; values with * ? and | between choices, any case); the first class that takes an element wins. An element's class is the property @classification:<name>, for collab_colours, collab_takeoff, collab_sets and collab_views. list, example (adds NL-SfB), save one (with index: in its place), remove, colour the model by one, report (elements per class per model, and the first that no class takes). The matrix of classes: matrix lists its pairs, pair saves one ({classification, a: \"5*\", b: \"2*\", tolerance_mm, severity: critical|moderate|low, accept, on}; with index: in its place), pair_remove; its pairs run as clash tests with collab_clashes.",
+            json!({
+                "action": { "type": "string", "enum": ["list", "example", "save", "remove", "colour", "report", "matrix", "pair", "pair_remove"] },
+                "index": { "type": "integer" },
+                "pair": { "type": "object" },
+                "classification": { "type": "object", "description": "{name, classes: [{code, name, colour: [r,g,b], rules: [{take, conditions: [{property, value}]}]}]}" }
+            }), &[], false),
         tool("collab_takeoff", "Information takeoff: the elements (by class, e.g. [\"IfcWall*\"], and/or a property value) grouped by up to two properties (model, layer, class, type or a property key), with count, length, area and volume from the geometry. make shows it as a table under the 3D view (Excel from there) and returns its rows; keep stores it in the rule set; list gives those kept.",
             json!({
                 "action": { "type": "string", "enum": ["make", "keep", "list"] },
