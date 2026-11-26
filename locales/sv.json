@@ -2107,6 +2107,13 @@
     "no elements on one of the sides": "inga element på en av sidorna",
     "elements in the test": "element i testet",
     "Add pair": "Lägg till par",
-    "Test classes against each other, by codes or groups (5* against 2*): per pair a tolerance, how much a clash weighs and whether it is agreed to at once (a socket box in a wall). The pairs run with Find clashes.": "Testa klasser mot varandra, efter koder eller grupper (5* mot 2*): per par en tolerans, hur tungt en krock väger och om den godkänns direkt (en uttagsdosa i en vägg). Paren körs med Sök krockar."
+    "Test classes against each other, by codes or groups (5* against 2*): per pair a tolerance, how much a clash weighs and whether it is agreed to at once (a socket box in a wall). The pairs run with Find clashes.": "Testa klasser mot varandra, efter koder eller grupper (5* mot 2*): per par en tolerans, hur tungt en krock väger och om den godkänns direkt (en uttagsdosa i en vägg). Paren körs med Sök krockar.",
+    "moved": "flyttad",
+    "turned": "vriden",
+    "Aligning…": "Justerar…",
+    "Align by two pairs": "Justera med två par",
+    "New revision…": "Ny revision…",
+    "Replaces the file by a new version; its place and turn stay.": "Ersätter filen med en ny version; läge och vridning behålls.",
+    "Click a point of the model and where it should go, then a second point and where that should go (such as two grid crossings). The model turns and moves so both pairs meet. Esc stops.": "Klicka på en punkt i modellen och vart den ska, sedan en andra punkt och vart den ska (till exempel två rutnätskorsningar). Modellen vrids och flyttas så att båda paren sammanfaller. Esc avbryter."
   }
 }
