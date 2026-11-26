@@ -534,6 +534,11 @@ pub struct App {
     nav: navigation::Navigation,
     /// The keys that walk through the model (W, A, S, D, Q, E), held now.
     walking: walk::Walking,
+    /// Ctrl, Shift and Alt as they are held now.
+    pub(crate) modifiers: keyboard::Modifiers,
+    /// The row of a schedule (or takeoff) clicked last, while the Validator isolates what is
+    /// clicked: clicking it again shows everything.
+    pub(crate) picked_row: Option<(usize, usize)>,
     /// The selection and hover of structural nodes and members.
     pub(crate) structural: structural::StructuralView,
     /// The modelled elements and the tool placing them.
@@ -739,6 +744,8 @@ pub enum Message {
     WalkKey { key: char, down: bool, fast: bool },
     /// Every walking key let go (the window lost the keyboard).
     WalkStop,
+    /// Ctrl, Shift or Alt went down or up: a row clicked with Ctrl or Shift adds to the selection.
+    Modifiers(keyboard::Modifiers),
     /// A view's tab draws it as on a sheet, or over the model.
     DrawingOnPaper(bool),
     /// Crop a floor plan (its path) to a rectangle in plan, or show all of it (`None`).
@@ -1320,6 +1327,8 @@ impl Default for App {
             pick_index: None,
             nav: Default::default(),
             walking: Default::default(),
+            modifiers: keyboard::Modifiers::default(),
+            picked_row: None,
             structural: Default::default(),
             modeller: Default::default(),
         }
@@ -2592,6 +2601,7 @@ impl App {
             Message::NavigateSheet { zoom, pan } => { self.sheet_zoom = zoom; self.sheet_pan = pan; }
             Message::WalkKey { key, down, fast } => self.walk_key(key, down, fast),
             Message::WalkStop => self.walk_stop(),
+            Message::Modifiers(m) => self.modifiers = m,
             Message::ToggleLayersPanel => self.show_layers = !self.show_layers,
             Message::TogglePropertiesPanel => self.show_properties = !self.show_properties,
             Message::Layer(i, v) => self.switch_layers(&[i], v),
@@ -3438,6 +3448,7 @@ impl App {
         };
         let events = event::listen_with(|event, status, _window| match event {
             iced::Event::Window(window::Event::FileDropped(path)) => Some(Message::Dropped(path)),
+            iced::Event::Keyboard(keyboard::Event::ModifiersChanged(m)) => Some(Message::Modifiers(m)),
             iced::Event::Touch(iced::touch::Event::FingerPressed { .. }) => Some(Message::Pressed(true)),
             iced::Event::Mouse(iced::mouse::Event::ButtonPressed(_)) => Some(Message::Pressed(false)),
             iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
