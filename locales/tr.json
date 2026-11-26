@@ -2070,6 +2070,16 @@
     "Moving with keys": "Tuşlarla hareket",
     "W A S D": "W A S D",
     "W, A, S and D move as long as you hold them, Q and E go straight down and up, Shift goes faster. Flying goes where you look, also up and down; walking stays level. In the Modeller, whose letters are its tools, they work while you look around with the right mouse button.": "W, A, S ve D basılı tuttuğun sürece hareket ettirir, Q ve E dümdüz aşağı ve yukarı gider, Shift ile daha hızlı gidersin. Uçmak baktığın yöne gider, yukarı ve aşağı da; yürümek yatay kalır. Harflerin araç olduğu Modeller'da sağ fare tuşuyla etrafa bakarken çalışırlar.",
-    "Clear markups": "İşaretlemeleri temizle"
+    "Clear markups": "İşaretlemeleri temizle",
+    "A view hides, colours and makes see-through by rules, the structure in colour and the rest see-through for one. They go with the rule set.": "Bir görünüm kurallara göre gizler, renklendirir ve saydam yapar; örneğin taşıyıcı sistem renkli, geri kalanı saydam. Görünümler kural setiyle birlikte gider.",
+    "As they are": "Oldukları gibi",
+    "Choose a rule set first.": "Önce bir kural seti seçin.",
+    "Name of the view": "Görünümün adı",
+    "New view": "Yeni görünüm",
+    "Other elements": "Diğer elemanlar",
+    "See-through": "Saydam",
+    "Show view": "Görünümü göster",
+    "The first rule that takes an element says how it shows.": "Bir elemanı alan ilk kural nasıl görüneceğini belirler.",
+    "Views by rules": "Kurallara göre görünümler"
   }
 }

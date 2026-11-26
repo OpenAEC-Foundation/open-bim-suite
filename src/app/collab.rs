@@ -381,6 +381,8 @@ pub struct State {
     pub open_group: Option<usize>,
     /// Colours, sets and takeoffs.
     pub inform: super::inform::State,
+    /// The views made of rules, of the Colours tab.
+    pub views: super::rule_views::State,
     /// A point cloud against the model.
     pub cloud: super::cloud::State,
     /// The PDF report being made.
@@ -513,6 +515,7 @@ impl Default for State {
             open_group: None,
             matrix_amount: String::new(),
             inform: Default::default(),
+            views: Default::default(),
             cloud: Default::default(),
             report_job: None,
             rerun: false,
@@ -890,6 +893,7 @@ pub enum Event {
     ReportShot(Arc<iced::window::Screenshot>),
     /// Colours, sets and takeoffs.
     Inform(super::inform::Event),
+    Views(super::rule_views::Event),
     /// A point cloud against the model.
     Cloud(super::cloud::Event),
     IssueFromClash(usize),
@@ -3140,6 +3144,7 @@ impl App {
                 return self.collab_clash_shot_next();
             }
             Event::Inform(e) => return self.inform_handle(e),
+            Event::Views(e) => return self.rule_views_handle(e),
             Event::Cloud(e) => return self.cloud_handle(e),
             Event::ReportShot(shot) => {
                 let picture = self.viewport_picture(&shot);
@@ -3624,7 +3629,7 @@ impl App {
             Tab::Checks => self.collab_checks(look, l),
             Tab::Clashes => self.collab_clashes(look, l),
             Tab::Compare => column![self.collab_compare(look, l), w::divider(look), self.cloud_view(look, l)].spacing(8).into(),
-            Tab::Colours => self.inform_colours(look, l),
+            Tab::Colours => self.inform_colours(look, l, &state.sides),
             Tab::Takeoff => self.inform_takeoffs(look, l, &state.sides),
         };
         body.push(scrollable(container(content).padding(iced::Padding { right: 10.0, ..iced::Padding::ZERO })).height(Length::Fill)).height(Length::Fill).into()
@@ -4642,6 +4647,9 @@ impl App {
         if cmd == "collab_cloud" {
             return self.cloud_command(a);
         }
+        if cmd == "collab_views" {
+            return self.rule_views_command(a);
+        }
         if matches!(cmd, "collab_colours" | "collab_sets" | "collab_takeoff") {
             return self.inform_command(cmd, a);
         }
@@ -5005,12 +5013,12 @@ fn spec_tone(status: ValidationStatus, severity: Severity) -> Option<Tone> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::model::Layer;
 
     /// Two boxes as elements 1 and 2 of one layer, the second sunk into the first.
-    pub(super) fn two_blocks() -> Model {
+    pub(crate) fn two_blocks() -> Model {
         let mut layer = Layer { name: "Walls".into(), color: [0.8; 3], positions: Vec::new(), normals: Vec::new(), colors: None, indices: Vec::new(), elements: Vec::new(), props: Vec::new(), hidden: false, points: false, lines: Vec::new(), line_elements: Vec::new(), splats: None, texturing: None };
         for (id, lo, hi) in [(1u64, [0.0f32, 0.0, 0.0], [4.0f32, 0.2, 3.0]), (2, [1.0, -1.0, 1.0], [1.3, 1.0, 1.3])] {
             let first = layer.indices.len() as u32;
