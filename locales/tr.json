@@ -2080,6 +2080,23 @@
     "See-through": "Saydam",
     "Show view": "Görünümü göster",
     "The first rule that takes an element says how it shows.": "Bir elemanı alan ilk kural nasıl görüneceğini belirler.",
-    "Views by rules": "Kurallara göre görünümler"
+    "Views by rules": "Kurallara göre görünümler",
+    "classes read": "sınıf okundu",
+    "Classification saved in": "Sınıflandırma kaydedildi:",
+    "Classification by rules": "Kurallara göre sınıflandırma",
+    "NL-SfB example": "NL-SfB örneği",
+    "classified": "sınıflandırıldı",
+    "not": "değil",
+    "rule": "kural",
+    "not classified": "sınıflandırılmadı",
+    "Remove class": "Sınıfı kaldır",
+    "and": "ve",
+    "value, * ? |": "değer, * ? |",
+    "Add condition": "Koşul ekle",
+    "Not classified": "Sınıflandırılmamış",
+    "Add class": "Sınıf ekle",
+    "(not classified)": "(sınıflandırılmamış)",
+    "A classification puts every element of every model in a class by rules (class, type, layer, properties), without changing the files. The class becomes a property to colour, count and select by. It goes with the rule set.": "Bir sınıflandırma, dosyaları değiştirmeden her modelin her elemanını kurallara göre (sınıf, tip, katman, özellikler) bir sınıfa koyar. Sınıf, renklendirme, sayma ve seçme için bir özellik olur. Kural setiyle birlikte gider.",
+    "The first class that takes an element wins: put the narrowest on top. Values: * for anything, ? for one character, | between choices, any case.": "Bir elemanı alan ilk sınıf kazanır: en dar olanı üste koyun. Değerler: her şey için *, bir karakter için ?, seçenekler arasında |, büyük/küçük harf fark etmez."
   }
 }

@@ -49,6 +49,8 @@ pub enum Tab {
     /// Takeoffs of the elements' information and quantities.
     Takeoff,
     Packages,
+    /// The project's classifications by rules.
+    Classes,
 }
 
 /// What a person decided on a clash.
@@ -383,6 +385,8 @@ pub struct State {
     pub inform: super::inform::State,
     /// The views made of rules, of the Colours tab.
     pub views: super::rule_views::State,
+    /// The classifications by rules, of the Classification tab.
+    pub classify: super::classify::State,
     /// A point cloud against the model.
     pub cloud: super::cloud::State,
     /// The PDF report being made.
@@ -516,6 +520,7 @@ impl Default for State {
             matrix_amount: String::new(),
             inform: Default::default(),
             views: Default::default(),
+            classify: Default::default(),
             cloud: Default::default(),
             report_job: None,
             rerun: false,
@@ -894,6 +899,7 @@ pub enum Event {
     /// Colours, sets and takeoffs.
     Inform(super::inform::Event),
     Views(super::rule_views::Event),
+    Classes(super::classify::Event),
     /// A point cloud against the model.
     Cloud(super::cloud::Event),
     IssueFromClash(usize),
@@ -965,7 +971,7 @@ pub enum Event {
 
 /// Asks for a file to open (or, with `save`, where to save one) in a dialog that belongs to the
 /// window, so it opens in front of it, and then the message `then` makes of the answer.
-fn ask_file(
+pub(super) fn ask_file(
     make: impl Fn() -> rfd::AsyncFileDialog + Send + Sync + Clone + 'static,
     save: bool,
     then: impl Fn(Option<PathBuf>) -> Message + Send + Sync + Clone + 'static,
@@ -2501,6 +2507,8 @@ impl App {
                 Ok(set) => {
                     self.collab.rule_sets.push(set);
                     self.collab.rule_set = self.collab.rule_sets.len() - 1;
+                    self.collab.classify.picked = 0;
+                    self.classes_changed();
                 }
                 Err(e) => self.collab_note(Tone::Error, e),
             },
@@ -2780,6 +2788,8 @@ impl App {
             Event::RuleSet(k) => {
                 if k < self.collab.rule_sets.len() {
                     self.collab.rule_set = k;
+                    self.collab.classify.picked = 0;
+                    self.classes_changed();
                 }
             }
             Event::ModelChecks(on) => {
@@ -3145,6 +3155,7 @@ impl App {
             }
             Event::Inform(e) => return self.inform_handle(e),
             Event::Views(e) => return self.rule_views_handle(e),
+            Event::Classes(e) => return self.classify_handle(e),
             Event::Cloud(e) => return self.cloud_handle(e),
             Event::ReportShot(shot) => {
                 let picture = self.viewport_picture(&shot);
@@ -3567,6 +3578,7 @@ impl App {
             tab(Tab::Compare, l.text("Vergelijken", "Compare").to_string()),
             tab(Tab::Colours, l.text("Kleuren", "Colours").to_string()),
             tab(Tab::Takeoff, l.text("Staat", "Takeoff").to_string()),
+            tab(Tab::Classes, l.text("Classificatie", "Classification").to_string()),
         ]
         .spacing(2)
         .wrap();
@@ -3631,6 +3643,7 @@ impl App {
             Tab::Compare => column![self.collab_compare(look, l), w::divider(look), self.cloud_view(look, l)].spacing(8).into(),
             Tab::Colours => self.inform_colours(look, l, &state.sides),
             Tab::Takeoff => self.inform_takeoffs(look, l, &state.sides),
+            Tab::Classes => self.classify_panel(look, l, &state.sides),
         };
         body.push(scrollable(container(content).padding(iced::Padding { right: 10.0, ..iced::Padding::ZERO })).height(Length::Fill)).height(Length::Fill).into()
     }
@@ -4649,6 +4662,9 @@ impl App {
         }
         if cmd == "collab_views" {
             return self.rule_views_command(a);
+        }
+        if cmd == "collab_classification" {
+            return self.classify_command(a);
         }
         if matches!(cmd, "collab_colours" | "collab_sets" | "collab_takeoff") {
             return self.inform_command(cmd, a);

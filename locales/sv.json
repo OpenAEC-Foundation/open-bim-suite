@@ -2080,6 +2080,23 @@
     "See-through": "Genomskinliga",
     "Show view": "Visa vy",
     "The first rule that takes an element says how it shows.": "Den första regeln som tar ett element avgör hur det visas.",
-    "Views by rules": "Vyer efter regler"
+    "Views by rules": "Vyer efter regler",
+    "classes read": "klasser inlästa",
+    "Classification saved in": "Klassificering sparad i",
+    "Classification by rules": "Klassificering efter regler",
+    "NL-SfB example": "NL-SfB-exempel",
+    "classified": "klassade",
+    "not": "inte",
+    "rule": "regel",
+    "not classified": "inte klassad",
+    "Remove class": "Ta bort klass",
+    "and": "och",
+    "value, * ? |": "värde, * ? |",
+    "Add condition": "Lägg till villkor",
+    "Not classified": "Inte klassade",
+    "Add class": "Lägg till klass",
+    "(not classified)": "(inte klassad)",
+    "A classification puts every element of every model in a class by rules (class, type, layer, properties), without changing the files. The class becomes a property to colour, count and select by. It goes with the rule set.": "En klassificering delar in varje element i varje modell i en klass enligt regler (klass, typ, lager, egenskaper) utan att ändra filerna. Klassen blir en egenskap att färga, räkna och välja efter. Den följer med regeluppsättningen.",
+    "The first class that takes an element wins: put the narrowest on top. Values: * for anything, ? for one character, | between choices, any case.": "Den första klassen som tar ett element vinner: lägg den snävaste överst. Värden: * för allt, ? för ett tecken, | mellan val, oavsett skiftläge."
   }
 }
