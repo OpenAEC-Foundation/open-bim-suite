@@ -794,7 +794,8 @@ impl App {
             for kind in ModelTool::OPENINGS {
                 let on = kind == tool;
                 let name = kind.label(l);
-                let pick = button(text(name).size(12)).padding([3, 10]).style(move |_, st| p.ribbon_button(on, st)).on_press_maybe((!on).then_some(Message::ModelTool(Some((kind, name)))));
+                // the kind in use cannot be pressed (that would stop the tool) but shows as on, not greyed
+                let pick = button(text(name).size(12)).padding([3, 10]).style(move |_, st| p.ribbon_button(on, if on { button::Status::Active } else { st })).on_press_maybe((!on).then_some(Message::ModelTool(Some((kind, name)))));
                 bar = bar.push(pick);
             }
         }
