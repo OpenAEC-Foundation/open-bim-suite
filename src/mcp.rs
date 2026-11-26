@@ -138,7 +138,8 @@ pub fn tools() -> Vec<Value> {
                 "text": { "type": "string", "description": "Any property value contains this (or the element id)" },
                 "where": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Property conditions, e.g. {\"category\": \"Doors\", \"level\": \"Level 1\"}" },
                 "layer": { "type": "string", "description": "Only elements on layers whose name contains this" },
-                "group_by": { "type": "string", "description": "Property to count by, e.g. \"level\" or \"type\"" }
+                "group_by": { "type": "string", "description": "Property to count by, e.g. \"level\" or \"type\"" },
+                "details": { "type": "boolean", "description": "Every element with all its properties and its bounding box, up to 1000 a call: reads a whole model in a few calls" }
             }), 50, 100), &[], true),
         tool("get_element", "All properties of an element plus its measurements: bounding box (min, max, size, centre), surface area, and volume when its mesh is closed. Structural nodes, members and the other analysis objects are elements too (properties built from the analysis model, bounds from their nodes).",
             json!({ "id": { "type": ["integer", "string"] } }), &["id"], true),
@@ -255,8 +256,10 @@ pub fn tools() -> Vec<Value> {
         tool("clear_measurements", "Remove the measurements drawn in the viewport.", json!({}), &[], false),
         tool("cancel", "Press Esc: stop placing a section plane, else clear the selection.", json!({}), &[], false),
         // the Modeller's viewport gestures
-        tool("place_model_point", "Click the active Modeller tool on its work plane at x and y in metres. The point must be visible in the viewport. Uses the same snaps, placement settings and undo as the window. Returns the snapped point, snap kind and newly created element IDs.",
-            json!({"x":{"type":"number"},"y":{"type":"number"}}), &["x","y"], false),
+        tool("sketch_line", "The Modeller: pick a line of the sketch that is open by its place (0 for the first line drawn), as a click on it with the Pick tool does. With slope, a line of a roof's outline gets that angle in degrees; 0 takes its slope away (a gable, or one of the sides of a single plane).",
+            json!({"index":{"type":"integer"},"slope":{"type":"number","description":"Degrees, 0 to 85; 0: no slope"}}), &["index"], false),
+        tool("place_model_point", "Click the active Modeller tool on its work plane at x and y in metres. The point must be visible in the viewport. Uses the same snaps, placement settings and undo as the window. Returns the snapped point, snap kind and newly created element IDs. A point no snap moved is taken exactly as given. While a floor's sketch is open the point goes to the sketch tool that is on (Line, Rectangle, Circle, Arc), not rounded; finish the sketch with the control 'Finish sketch'. With the Door or Window tool, give rotation: the door or window stands with the middle of its foot at the point, its width running that way, and cuts the walls it stands in. A door is hinged at the start of its width and opens to the left of the way it runs; mirrored: true hinges it at the end.",
+            json!({"x":{"type":"number"},"y":{"type":"number"},"rotation":{"type":"number","description":"Door and Window: the way the width runs, in degrees from the x axis"},"mirrored":{"type":"boolean","description":"Door: hinged at the end of its width and not at its start"}}), &["x","y"], false),
         tool("place_cursor", "The Modeller: put the 3D cursor under a pixel of the last viewport screenshot, as Shift + the right button does. It lands on a point of an element near it, else on the level worked on.",
             json!({ "x": { "type": "number" }, "y": { "type": "number" } }), &["x", "y"], false),
         tool("click_drawing", "The Modeller: click on the drawing shown (a floor plan, a section or an elevation) at pixels of the last viewport screenshot, one after the other, as the mouse does. With a tool of the Annotate or Project tab on (ui_press its button first) the clicks place what it places: two for a section or a dimension, two for a line, a rectangle or a circle, one for a text; without a tool a click picks a dimension, a text or a section line.",
@@ -268,12 +271,14 @@ pub fn tools() -> Vec<Value> {
                 "type": { "type": "string", "description": "The type to pick: its id or its name" },
                 "language": { "type": "string", "description": "The language of the names: en, nl, de or fr" }
             }), &[], false),
-        tool("tool_option", "The Modeller: the other lists of the strip of the tool that is on: the service of a duct, pipe, cable tray or appliance (supply air, heating supply, cold water, ...; '-' for none) and the kind of an appliance (radiator, boiler, pump, ...). Without a value it gives the lists with what they offer and what is picked; with a list and a value (a name in English or as shown, any case) it picks that, as choosing it in the list does. ui_press cannot open a list, so this is how one is chosen.",
+        tool("tool_option", "The Modeller: the other lists of the strip of the tool that is on: the material of a wall, a floor or a roof (its type is then the one of that material alone, as thick as the Thickness field says, and its cut is hatched as the material; '-' for none), the service of a duct, pipe, cable tray or appliance (supply air, heating supply, cold water, ...; '-' for none) and the kind of an appliance (radiator, boiler, pump, ...). Without a value it gives the lists with what they offer and what is picked; with a list and a value (a name in English or as shown, any case) it picks that, as choosing it in the list does. ui_press cannot open a list, so this is how one is chosen.",
             json!({
-                "list": { "type": "string", "enum": ["service", "kind"], "description": "The list to pick in" },
+                "list": { "type": "string", "enum": ["material", "service", "kind"], "description": "The list to pick in" },
                 "value": { "type": "string", "description": "What to pick: its name" },
                 "language": { "type": "string", "description": "The language of the names shown: en, nl, de or fr" }
             }), &[], false),
+        tool("hatch_standard", "The Modeller: the hatch standard the project's drawings hatch what is cut by: NEN 47 in colour (key openaec: the signs of NEN 47 on a colour, and more kinds of material; the one a project starts with) or NEN 47 (key nen47: the signs in black on the paper). Without a standard it lists them and says which is chosen; with one (its key or its name) it chooses that, as the list of the house style does, and the drawings follow.",
+            json!({ "standard": { "type": "string", "description": "The standard to choose: nen47, openaec, or one of the project's own" } }), &[], false),
         tool("element_drawings", "The Modeller: write the element drawings of the framed systems (timber frames, steel frames, metal stud walls) into a folder, as the Element drawings button of the properties panel does: for every prefab unit the drawing of its frame with its dimensions and the list of its members, then one of every layer with boards or battens. Of every framed system, or of the selected ones with selection: true. Returns the files written.",
             json!({
                 "folder": { "type": "string", "description": "The folder to write into (absolute); made when it is not there" },

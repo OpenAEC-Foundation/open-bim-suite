@@ -455,7 +455,12 @@ impl App {
                 let _ = self.update(Message::Redo);
                 Ok(self.visibility_json())
             }
-            "place_model_point" => self.place_model_point(a.get("x").and_then(Value::as_f64).ok_or("x in metres required")?, a.get("y").and_then(Value::as_f64).ok_or("y in metres required")?),
+            "place_model_point" => self.place_model_point(a.get("x").and_then(Value::as_f64).ok_or("x in metres required")?, a.get("y").and_then(Value::as_f64).ok_or("y in metres required")?, a.get("rotation").and_then(Value::as_f64), a.get("mirrored").and_then(Value::as_bool)),
+            "sketch_line" => {
+                let index = a.get("index").and_then(Value::as_u64).ok_or("index: the line's place in the sketch, from 0")? as usize;
+                let lines = self.sketch_pick_line(index, a.get("slope").and_then(Value::as_f64))?;
+                Ok(json!({ "picked": index, "lines": lines }))
+            }
             "pick" => self.remote_pick(a),
             "place_cursor" => {
                 let (x, y) = (num(a, "x").ok_or("x is required")?, num(a, "y").ok_or("y is required")?);
@@ -537,11 +542,23 @@ impl App {
                 self.pick_tool_type(found.0.clone());
                 Ok(json!({ "picked": found.0, "name": found.1 }))
             }
+            "hatch_standard" => {
+                // the hatch standard the project's drawings hatch by: listed, or chosen as the
+                // house style's list does
+                if let Some(wanted) = a.get("standard").and_then(|v| v.as_str()) {
+                    let key = self.library.hatch_standards.iter().find(|s| s.key.eq_ignore_ascii_case(wanted) || s.name(bim_library::Lang::En).eq_ignore_ascii_case(wanted)).map(|s| s.key.clone())
+                        .ok_or_else(|| format!("no hatch standard '{wanted}'; call hatch_standard without one to list them"))?;
+                    let _ = self.update(Message::House(crate::app::house::HouseMessage::HatchStandard(Some(key))));
+                }
+                let chosen = self.library.hatch_standard().map(|s| s.key.clone());
+                let standards: Vec<_> = self.library.hatch_standards.iter().map(|s| json!({ "key": s.key, "name": s.name(bim_library::Lang::En) })).collect();
+                Ok(json!({ "chosen": chosen, "standards": standards }))
+            }
             "tool_option" => {
                 let language = a.get("language").and_then(|v| v.as_str()).and_then(openaec_ui::Language::from_code).unwrap_or(openaec_ui::Language::English);
                 let lists = self.tool_options(language);
                 if lists.is_empty() {
-                    return Err("the tool that is on has no such list: press a tool of the MEP tab first (Duct, Pipe, Cable tray, Appliance)".into());
+                    return Err("the tool that is on has no such list: press Wall or Slab (material), or a tool of the MEP tab (Duct, Pipe, Cable tray, Appliance) first".into());
                 }
                 if let (Some(list), Some(value)) = (a.get("list").and_then(|v| v.as_str()), a.get("value").and_then(|v| v.as_str())) {
                     if !self.pick_tool_option(list, value, language) {
@@ -1117,7 +1134,10 @@ impl App {
             .map(|o| o.iter().map(|(k, v)| (k.to_lowercase(), v.as_str().map_or_else(|| v.to_string(), str::to_string).to_lowercase())).collect())
             .unwrap_or_default();
         let group_by = a.get("group_by").and_then(Value::as_str);
-        let (offset, limit) = page(a, 50, 100);
+        // with details every element comes with all its properties and its bounds, a thousand at
+        // a time: a whole model is read in a few calls instead of one call per element
+        let details = a.get("details").and_then(Value::as_bool).unwrap_or(false);
+        let (offset, limit) = page(a, 50, if details { 1000 } else { 100 });
 
         // elements with triangles (listed under their first layer), then structural objects
         // drawn from their document (listed under their analysis model)
@@ -1180,11 +1200,21 @@ impl App {
                 };
                 let keep = ["category", "family", "type", "name", "level", "class"];
                 let keep_structural = ["Class", "Number", "Name", "Kind", "Section", "Support"];
+                let all = if details { props.clone() } else { Vec::new() };
                 let summary: Map<String, Value> = props
                     .into_iter()
                     .filter(|(k, _)| keep.contains(&k.as_str()) || (structural && keep_structural.contains(&k.as_str())))
                     .map(|(k, v)| (k, Value::String(v)))
                     .collect();
+                if details && !structural {
+                    let mut b = Bounds::empty();
+                    for t in self.element_triangles(&model, id) {
+                        for p in t {
+                            b.extend(p.to_array());
+                        }
+                    }
+                    return json!({ "id": crate::structural::id_json(id), "layer": layer, "properties": props_json(all), "bounds": jbounds(&b) });
+                }
                 json!({ "id": crate::structural::id_json(id), "layer": layer, "properties": summary })
             })
             .collect();

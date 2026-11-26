@@ -29,6 +29,7 @@ pub(super) mod file_types;
 pub mod key_actions;
 pub mod keys;
 pub mod select;
+pub mod services;
 pub mod levels;
 pub(super) mod shape_handles;
 pub mod slab_handles;
@@ -234,6 +235,14 @@ pub struct Modeller {
     pub level_edit: Option<levels::LevelEdit>,
     /// The level worked on when no floor plan is shown (its path): PageUp and PageDown step it.
     pub level: Option<String>,
+    /// The point a click stands for when it was given in metres and not by the cursor
+    /// (see `place_model_point`).
+    pub exact: Option<DVec3>,
+    /// The regions the walls of each level close in, as last found: the walls they were found
+    /// for and the regions (see `spaces`).
+    pub regions: std::cell::RefCell<Vec<(Vec<spaces::Bound>, Vec<Vec<DVec2>>)>>,
+    /// What was shown of the model the last time: a change makes only what it touches again.
+    pub kept: Kept,
     /// The Grid tool is on: two clicks draw a grid line (see `grids`).
     pub grid_tool: bool,
     /// The reinforcement tool that is on (see `rebar`), and the element its first click was on:
@@ -363,6 +372,26 @@ pub struct Step {
     pub drawn: Arc<crate::document::Drawn>,
 }
 
+impl Modeller {
+    /// An empty one for another model: the product shown stays the one it was, and so do the
+    /// words of the interface language (what a space, a join or a schedule's columns are called),
+    /// which a file opened names its spaces with before anything else happens.
+    pub(super) fn anew(&self) -> Modeller {
+        Modeller {
+            in_modeller: self.in_modeller,
+            join_word: self.join_word,
+            fitting_words: self.fitting_words,
+            top_word: self.top_word,
+            pile_words: self.pile_words,
+            bar_words: self.bar_words,
+            plank_words: self.plank_words,
+            space_word: self.space_word,
+            snap_words: self.snap_words,
+            ..Modeller::default()
+        }
+    }
+}
+
 impl App {
     /// Takes over the elements an IFCX file this viewer wrote defines (`model` was just loaded),
     /// and shows them; a definition that cannot be read is left out.
@@ -408,7 +437,7 @@ impl App {
     pub(super) fn new_model(&mut self, level: &str) {
         let empty = Arc::new(Model::new(PathBuf::from("model.ifcx"), "IFCX", Vec::new()));
         self.set_model(empty.clone());
-        self.modeller = Modeller { shown: Some(empty.id), in_modeller: self.modeller.in_modeller, ..Modeller::default() };
+        self.modeller = Modeller { shown: Some(empty.id), ..self.modeller.anew() };
         let _ = self.document.add_level(level, 0.0);
         // the empty project with its first level is where its history starts
         self.settle_modelled();
@@ -437,6 +466,9 @@ impl App {
         self.modeller.cursor = None;
         self.modeller.aim = None;
         self.modeller.placement.last_wall = None;
+        // what was being typed in a field of the strip was the tool's before: the same field of
+        // the next tool shows its own value, not that text
+        self.modeller.placement.typing = None;
         self.modeller.refusal = None;
         if self.modeller.tool.is_some() {
             self.measure.tool = None;
@@ -548,6 +580,10 @@ impl App {
             }
         };
         let (mut corners, mut middles) = (Vec::new(), Vec::new());
+        // a run of a building service lands on the open connectors of its kind and service
+        if let Some((tool, _)) = self.modeller.tool {
+            corners.extend(self.open_connectors(tool).into_iter().map(|c| c.at));
+        }
         for e in self.modeller.model.iter().filter(|e| e.id != except) {
             match e.shape_in_project(&grid) {
                 Shape::Point(p) => corners.push(p.at),
@@ -733,16 +769,34 @@ impl App {
     }
 
     /// Project a metric work-plane point onto the active viewport, then use the GUI placement path.
-    pub(crate) fn place_model_point(&mut self, x: f64, y: f64) -> Result<serde_json::Value, String> {
+    pub(crate) fn place_model_point(&mut self, x: f64, y: f64, rotation: Option<f64>, mirrored: Option<bool>) -> Result<serde_json::Value, String> {
         if !self.annotates || !self.modeller.in_modeller || self.active_doc_tab() != 0 { return Err("Open the Modeller 3D view first".into()) }
+        // a sketch that is open takes the point: of a floor's outline, in plan
+        if let Some(sketch) = &self.modeller.sketch {
+            if sketch.face.is_some() { return Err("The sketch open lies on a wall: its points are clicked in the viewport (pick)".into()) }
+            let lines = self.sketch_place_at(DVec2::new(x, y)).ok_or("The sketch tool that is on takes no points: press Line, Rectangle, Circle or Arc first")?;
+            return Ok(serde_json::json!({"point": [x, y, self.work_plane().0], "snap": null, "created": [], "sketch_lines": lines}));
+        }
         let (tool, _) = self.modeller.tool.ok_or("Choose a modelling tool in the ribbon first")?;
-        if tool.opens() { return Err("Pick the host face in the viewport for an opening".into()) }
+        if tool.opens() {
+            // a door or a window with the way its width runs given: it stands there, its foot's
+            // middle at the point, and cuts the walls it stands in
+            let degrees = rotation.ok_or("A door or a window is clicked on a wall in the viewport (pick), or placed here with rotation: the way its width runs, in degrees from the x axis")?;
+            let before = self.modeller.model.iter().map(|e| e.id.0).max().unwrap_or(0);
+            self.place_opening_at(tool, x, y, degrees.to_radians(), mirrored);
+            if let Some(reason) = self.modeller.refusal { return Err(reason.reason().into()) }
+            let created: Vec<_> = self.modeller.model.iter().filter(|e| e.id.0 > before).map(|e| e.id.0).collect();
+            return Ok(serde_json::json!({"point": [x, y, self.work_plane().0], "snap": null, "created": created}));
+        }
         let (z, _, _) = self.work_plane();
         let (w, h) = self.viewport_size;
         let target = DVec3::new(x, y, z);
         let (px, py) = self.on_screen(target, w, h).filter(|(a,b)| (0.0..w).contains(a) && (0.0..h).contains(b)).ok_or("Point outside the current viewport")?;
         let before = self.modeller.model.iter().map(|e| e.id.0).max().unwrap_or(0);
-        let (point, snap) = self.click_work_plane(tool, px, py, w, h).ok_or("The work plane is edge-on")?;
+        self.modeller.exact = Some(target);
+        let clicked = self.click_work_plane(tool, px, py, w, h);
+        self.modeller.exact = None;
+        let (point, snap) = clicked.ok_or("The work plane is edge-on")?;
         if let Some(reason) = self.modeller.refusal { return Err(reason.reason().into()) }
         let created: Vec<_> = self.modeller.model.iter().filter(|e| e.id.0 > before).map(|e| e.id.0).collect();
         Ok(serde_json::json!({"point": point.to_array(), "snap": snap.map(|s| s.label(openaec_ui::Language::English)), "created": created}))
@@ -762,6 +816,12 @@ impl App {
         let (z, _, level) = self.work_plane();
         let p = self.plane_point(x, y, width, height, z)?;
         let (p, snap) = self.snapped_as(p, x, y, width, height);
+        // a point given in metres (see `place_model_point`) is taken as given where no snap
+        // moved it: the way through the screen and back costs it its last digits
+        let p = match self.modeller.exact.take() {
+            Some(given) if snap.is_none() && p.distance(given) < 1e-4 => given,
+            _ => p,
+        };
         // walls as a rectangle: the second click is the opposite corner, and four walls go
         // round, each from the end of the one before, as a chain does
         if tool == ModelTool::Wall && self.modeller.placement.rectangle {
@@ -809,10 +869,14 @@ impl App {
         }
         let name = self.placed_name(tool, name);
         // a run of a service starting where one ends at another height: a riser between them
-        let service = self.modeller.placement.of(tool).service.filter(|v| tool == ModelTool::Appliance || Some(v.role()) == tool.service());
+        let service = self.tool_service(tool);
         if let Some(riser) = self.riser_to(tool, service, &shape) {
             let _ = self.add_element_served(name, level.clone(), None, service, riser);
         }
+        // and one from each end that is over or under a connector of an appliance
+        let to_connectors = self.risers_to_connectors(tool, &shape);
+        let rise = if let Shape::Linear(l) = &shape { l.end.z - l.start.z } else { 0.0 };
+        let connector_level = level.clone();
         // with no height typed, what stands reaches the level above, when there is one
         let storey = matches!(tool, ModelTool::Wall | ModelTool::Column | ModelTool::System) && self.modeller.placement.of(tool).height.is_none() && tops::has_top(&shape);
         let top = if storey { self.level_above(level.as_deref()).map(|level| bim_core::Top { level, offset: 0.0 }) } else { None };
@@ -828,8 +892,13 @@ impl App {
         }
         match added {
             Ok(_) if tool.service().is_some() => {
-                self.modeller.placement.risen(tool, a.truncate().distance(b.truncate()) < 1e-6);
-                if self.modeller.placement.chain {
+                self.modeller.placement.risen(tool, a.truncate().distance(b.truncate()) < 1e-6, rise);
+                // a run that ended on a connector is done: the chain stops there
+                let ended = to_connectors.iter().any(|r| matches!(r, Shape::Linear(l) if (l.start - b).truncate().length() < 1e-6));
+                for riser in to_connectors {
+                    let _ = self.add_element_served(name, connector_level.clone(), None, service, riser);
+                }
+                if self.modeller.placement.chain && !ended {
                     self.modeller.points = vec![b];
                 }
             }
@@ -905,6 +974,24 @@ impl App {
         if let Some((tool,_)) = self.modeller.tool.filter(|(tool,_)| tool.service().is_some()) {
             if matches!(&element.shape, Shape::Linear(_)) {
                 element.service_type = self.modeller.placement.of(tool).kind;
+            }
+        }
+        // a build-up the library lacks (a material and a thickness of the strip) is added to it,
+        // and is the type the tool goes on with
+        if let Shape::Planar(PlanarDef { build_up: Some(b), form, .. }) = &element.shape {
+            if self.library.buildup(&b.id).is_none() {
+                let role = match form {
+                    PlanarForm::Slab { role, .. } => super::placement::slab_role(*role),
+                    _ => bim_library::Role::Wall,
+                };
+                let layers = b.layers.iter().map(|l| bim_library::Layer::new(&l.material, l.thickness)).collect();
+                if self.library.add_buildup(bim_library::BuildUp::new(&b.id, role, layers)).is_ok() {
+                    if let Some((tool, _)) = self.modeller.tool.filter(|(tool, _)| matches!(tool, ModelTool::Wall | ModelTool::Slab)) {
+                        let mut s = self.modeller.placement.of(tool);
+                        s.kind = Some(b.id.clone());
+                        self.modeller.placement.set(tool, s);
+                    }
+                }
             }
         }
         // numbered per IFC class: Wall 1, Wall 2, Slab 1
@@ -1034,21 +1121,31 @@ impl App {
         self.modeller.touched = true;
         self.issue_pile_numbers();
         let levels: Vec<(String, String)> = self.document.levels().iter().map(|l| (l.path.clone(), l.name.clone())).collect();
-        let (mut layers, parts, assemblies, bars) = viewer_layers(&self.modeller.model, &levels, &self.library);
+        let (mut layers, parts, assemblies, bars, symbolised) = viewer_layers_kept(&self.modeller.model, &levels, &self.library, &mut self.modeller.kept);
+        // what is kept of the unchanged elements is what making them all again gives
+        #[cfg(test)]
+        {
+            let whole = viewer_layers(&self.modeller.model, &levels, &self.library);
+            let same = |a: &Layer, b: &Layer| a.name == b.name && a.hidden == b.hidden && a.positions == b.positions && a.normals == b.normals && a.colors == b.colors && a.indices == b.indices && a.elements == b.elements && a.props == b.props;
+            assert!(whole.0.len() == layers.len() && whole.0.iter().zip(&layers).all(|(a, b)| same(a, b)) && whole.1 == parts && whole.2 == assemblies && whole.3 == bars && whole.4 == symbolised, "the model shown after a change is not the model made anew");
+        }
         // the spaces its walls close in stand beside its elements, on a layer of their own
         layers.extend(spaces::space_layer(&self.spaces(), &levels));
         let mut built = Model::new(PathBuf::from("model.ifcx"), "IFCX", layers);
         built.project.grids = self.modelled_grid_lines();
-        // the project's library goes into its file: materials and types, those taken from a file too
-        built.project.types = bim_library::ifcx::nodes(&self.library);
-        // a material with a hatch of its own in the hatch catalogue is cut with it
-        built.project.cut_patterns = crate::hatching::library_patterns(&self.library);
+        // the project's library goes into its file: materials and types, those taken from a file too;
+        // a material with a hatch of its own in the hatch catalogue is cut with it. Made again
+        // when the library changed, not with every change of the model
+        let (types, cut_patterns, part_materials) = self.modeller.kept.of_library.get_or_insert_with(|| (bim_library::ifcx::nodes(&self.library), crate::hatching::library_patterns(&self.library), crate::hatching::part_materials(&self.library))).clone();
+        built.project.types = types;
+        built.project.cut_patterns = cut_patterns;
         // an element of several materials is cut a face per part, each hatched as its material
         built.project.parts = parts;
         // a framed system is an assembly per prefab unit
         built.project.assemblies = assemblies;
         built.project.bars = bars;
-        built.project.part_materials = crate::hatching::part_materials(&self.library);
+        built.project.symbolised = symbolised;
+        built.project.part_materials = part_materials;
         // and its drawing standard: the kinds of drawing and their settings, a node each
         built.project.types.extend(bim_library::drawing::nodes(&self.standard));
         // and the house style it follows
@@ -1166,7 +1263,7 @@ impl App {
             self.modeller.model.replace(joint).expect("the demo's end plate");
             self.show_modelled();
         }
-        add(self, "Object", Shape::Point(PointDef { at: DVec3::new(7.0, 3.0, 0.0), rotation: 0.4, size: OBJECT, opening: None, role: Default::default() }));
+        add(self, "Object", Shape::Point(PointDef { at: DVec3::new(7.0, 3.0, 0.0), rotation: 0.4, size: OBJECT, opening: None, mirrored: false, role: Default::default() }));
         // a beam through the side wall, cutting its way
         let through = add(self, "Beam", beam(p(8.5, 3.0), p(13.0, 3.0)));
         add(self, "Cut-out", Shape::Connection(ConnectionDef { kind: ConnectionKind::Cut, primary: through, secondary: side }));
@@ -1206,12 +1303,24 @@ pub(super) fn tool_shape(tool: ModelTool, a: DVec3, b: DVec3, z: f64, storey: f6
         Some(ProfileDef::Catalogue { designation, shape: t.profile.clone() })
     };
     let profile = || s.kind.as_deref().and_then(|id| ProfileDef::steel(id).or_else(|| typed(id))).unwrap_or(ProfileDef::Rectangle { width: s.width, height: s.depth });
-    let build_up = |id: &Option<String>| id.as_deref().and_then(|id| bim_core::BuildUpDef::from_library(library, id));
+    // a type of one layer is as thick as was typed: the type of that material and thickness (the
+    // library's own, else one added to it when the element is: see `add_element_served`)
+    let build_up = |id: &Option<String>, role: bim_library::Role| {
+        let of = library.buildup(id.as_deref()?)?;
+        match &of.layers[..] {
+            [layer] if (layer.thickness - s.width).abs() > 1e-6 && s.width > 0.0 => {
+                let own = super::buildups::one_layer(library, role, &layer.material, s.width);
+                let cavity = library.material(&layer.material).is_some_and(|m| m.hatch == bim_library::HatchKind::Air);
+                Some(bim_core::BuildUpDef { id: own.id, layers: vec![bim_core::LayerDef { material: layer.material.clone(), thickness: s.width, cavity }] })
+            }
+            _ => bim_core::BuildUpDef::from_library(library, &of.id),
+        }
+    };
     match tool {
         // an opening tool places none of its own (see `openings`): an object stands for it
-        ModelTool::Appliance => Shape::Point(PointDef { at: a + DVec3::Z * s.offset, rotation: 0.0, size: DVec3::new(s.width, s.depth.max(0.01), s.height.unwrap_or(OBJECT.z)), opening: None, role: s.appliance }),
+        ModelTool::Appliance => Shape::Point(PointDef { at: a + DVec3::Z * s.offset, rotation: 0.0, size: DVec3::new(s.width, s.depth.max(0.01), s.height.unwrap_or(OBJECT.z)), opening: None, mirrored: false, role: s.appliance }),
         ModelTool::Point | ModelTool::Door | ModelTool::Window => {
-            Shape::Point(PointDef { at: a + DVec3::Z * s.offset, rotation: 0.0, size: DVec3::new(s.width, s.depth.max(0.01), s.height.unwrap_or(OBJECT.z)), opening: None, role: Default::default() })
+            Shape::Point(PointDef { at: a + DVec3::Z * s.offset, rotation: 0.0, size: DVec3::new(s.width, s.depth.max(0.01), s.height.unwrap_or(OBJECT.z)), opening: None, mirrored: false, role: Default::default() })
         }
         ModelTool::Column => {
             let base = z + s.offset;
@@ -1228,12 +1337,14 @@ pub(super) fn tool_shape(tool: ModelTool, a: DVec3, b: DVec3, z: f64, storey: f6
             let up = DVec3::Z * (z + s.height.unwrap_or(SERVICE_HEIGHT) - a.z);
             let role = tool.service().unwrap_or_default();
             // its rise takes its end up (a slope; a riser when both clicks are one point)
-            Shape::Linear(LinearDef { start: a + up, end: b + up + DVec3::Z * s.offset, profile: service_profile(tool, s.width, s.depth, s.kind.as_deref().and_then(|id| library.service_type(id)).and_then(|series| series.sizes.iter().find(|size| (size.width-s.width).abs() < 1e-6 && ((size.height-s.depth).abs() < 1e-6 || matches!(tool, ModelTool::Pipe | ModelTool::RoundDuct)))).map(|size| size.wall)), roll: 0.0, role })
+            // and a pipe with a fall drops as it runs: 1 in `sill`
+            let fall = if tool == ModelTool::Pipe && s.sill > 0.0 { a.truncate().distance(b.truncate()) / s.sill } else { 0.0 };
+            Shape::Linear(LinearDef { start: a + up, end: b + up + DVec3::Z * (s.offset - fall), profile: service_profile(tool, s.width, s.depth, s.kind.as_deref().and_then(|id| library.service_type(id)).and_then(|series| series.sizes.iter().find(|size| (size.width-s.width).abs() < 1e-6 && ((size.height-s.depth).abs() < 1e-6 || matches!(tool, ModelTool::Pipe | ModelTool::RoundDuct)))).map(|size| size.wall)), roll: 0.0, role })
         }
         ModelTool::Wall => {
             let base = z + s.offset;
             let wall = PlanarDef { form: PlanarForm::Wall { start: a.truncate(), end: b.truncate(), base, height: up_to(base) }, thickness: s.width, openings: Vec::new(), build_up: None };
-            Shape::Planar(wall.with_build_up(build_up(&s.kind)))
+            Shape::Planar(wall.with_build_up(build_up(&s.kind, bim_library::Role::Wall)))
         }
         ModelTool::Stair => {
             let base = z + s.offset;
@@ -1253,7 +1364,7 @@ pub(super) fn tool_shape(tool: ModelTool, a: DVec3, b: DVec3, z: f64, storey: f6
             let (lo, hi) = (a.truncate().min(b.truncate()), a.truncate().max(b.truncate()));
             let outline = vec![lo, DVec2::new(hi.x, lo.y), hi, DVec2::new(lo.x, hi.y)];
             let slab = PlanarDef { form: PlanarForm::Slab { outline, holes: Vec::new(), top: z + s.offset, bulges: Vec::new(), role: s.role, slope: None }, thickness: s.width, openings: Vec::new(), build_up: None };
-            Shape::Planar(slab.with_build_up(build_up(&s.kind)))
+            Shape::Planar(slab.with_build_up(build_up(&s.kind, super::placement::slab_role(s.role))))
         }
         ModelTool::System => {
             let base = z + s.offset;
@@ -1383,8 +1494,9 @@ fn class_colour(class: &str) -> [f32; 3] {
 /// `levels` names the levels by path.
 /// A part of a layered element has the colour of its layer's material in `library`.
 pub fn viewer_model(model: &bim_core::Model, levels: &[(String, String)], library: &bim_library::Library) -> Model {
-    let (layers, parts, assemblies, bars) = viewer_layers(model, levels, library);
+    let (layers, parts, assemblies, bars, symbolised) = viewer_layers(model, levels, library);
     let mut built = Model::new(PathBuf::from("model.ifcx"), "IFCX", layers);
+    built.project.symbolised = symbolised;
     built.project.parts = parts;
     built.project.assemblies = assemblies;
     built.project.bars = bars;
@@ -1400,31 +1512,74 @@ pub fn viewer_model(model: &bim_core::Model, levels: &[(String, String)], librar
 /// a system are drawn assembly by assembly. And the runs of reinforcing bars (see
 /// `ProjectData::bars`).
 #[allow(clippy::type_complexity)]
-fn viewer_layers(model: &bim_core::Model, levels: &[(String, String)], library: &bim_library::Library) -> (Vec<Layer>, Vec<(usize, u32, u32, u32)>, Vec<crate::model::Assembly>, Vec<(usize, u32, u32)>) {
-    let grid = model.grid;
+fn viewer_layers(model: &bim_core::Model, levels: &[(String, String)], library: &bim_library::Library) -> (Vec<Layer>, Vec<(usize, u32, u32, u32)>, Vec<crate::model::Assembly>, Vec<(usize, u32, u32)>, Vec<(usize, u32, u32)>) {
+    viewer_layers_kept(model, levels, library, &mut Kept::default())
+}
+
+/// What one element shows: its triangles (the indices from its own first vertex), its parts of
+/// several materials, its assemblies and its bars (their places from its own first index and
+/// vertex), and its properties.
+#[derive(Debug)]
+struct Shown {
+    class: &'static str,
+    positions: Vec<f32>,
+    normals: Vec<f32>,
+    colours: Vec<[u8; 4]>,
+    indices: Vec<u32>,
+    /// The first index and the index count of each part, and its material.
+    parts: Vec<(u32, u32, u32)>,
+    /// The first vertex and the vertex count of each reinforcing bar.
+    bars: Vec<(u32, u32)>,
+    /// The first vertex and the vertex count of what a floor plan draws by a symbol: a door's
+    /// leaf, a window's pane.
+    symbol: Option<(u32, u32)>,
+    /// Its assemblies: `layer` is not set, `first` counts from its own first index.
+    assemblies: Vec<crate::model::Assembly>,
+    props: String,
+}
+
+/// What was shown of the model the last time, kept so that a change makes only the elements it
+/// touches again (see `bim_core::Model::touched_since`): a model of a thousand walls is not made
+/// again for one wall more. Everything is made again when the levels' names or the library
+/// (a material's colour, a type's name) changed.
+#[derive(Debug, Clone, Default)]
+pub struct Kept {
+    model: Option<bim_core::Model>,
+    levels: Vec<(String, String)>,
+    library: Option<bim_library::Library>,
+    shown: std::collections::HashMap<ElementId, Option<Arc<Shown>>>,
+    /// What follows from the library alone: its nodes in the file, its materials' cut patterns
+    /// and the materials of the parts.
+    #[allow(clippy::type_complexity)]
+    of_library: Option<(Vec<serde_json::Value>, std::collections::HashMap<String, crate::hatching::Pattern>, Vec<crate::hatching::PartMaterial>)>,
+}
+
+/// As `viewer_layers`, making again only what changed since `kept` was made, and keeping what
+/// is shown now in it.
+#[allow(clippy::type_complexity)]
+fn viewer_layers_kept(model: &bim_core::Model, levels: &[(String, String)], library: &bim_library::Library, kept: &mut Kept) -> (Vec<Layer>, Vec<(usize, u32, u32, u32)>, Vec<crate::model::Assembly>, Vec<(usize, u32, u32)>, Vec<(usize, u32, u32)>) {
+    let same = kept.levels == levels && kept.library.as_ref() == Some(library);
+    let touched = kept.model.as_ref().filter(|_| same).and_then(|before| model.touched_since(before));
+    match &touched {
+        Some(touched) => kept.shown.retain(|id, _| !touched.contains(id) && model.get(*id).is_some()),
+        None => kept.shown.clear(),
+    }
+    if !same {
+        kept.levels = levels.to_vec();
+        kept.library = Some(library.clone());
+        kept.of_library = None;
+    }
+    kept.model = Some(model.clone());
     let mut layers: Vec<Layer> = Vec::new();
     let mut of_parts: Vec<(usize, u32, u32, u32)> = Vec::new();
     let has_rebar_areas = model.iter().any(|e| !e.reinforcement_areas.is_empty());
     let mut of_assemblies: Vec<crate::model::Assembly> = Vec::new();
     let mut bars: Vec<(usize, u32, u32)> = Vec::new();
+    let mut symbolised: Vec<(usize, u32, u32)> = Vec::new();
     for element in model.iter() {
-        let Ok(mut parts) = model.evaluate(element.id) else { continue };
-        if parts.is_empty() {
-            continue;
-        }
-        // a framed system: its parts in the order of its prefab units, and where each unit ends
-        let units = bim_core::system::assemblies(model, element, &parts).unwrap_or_default();
-        let mut ends: Vec<usize> = Vec::with_capacity(units.len());
-        if !units.is_empty() && units.iter().map(|u| u.parts.len()).sum::<usize>() == parts.len() {
-            let mut taken: Vec<Option<bim_core::Part>> = parts.into_iter().map(Some).collect();
-            parts = Vec::with_capacity(taken.len());
-            for u in &units {
-                parts.extend(u.parts.iter().filter_map(|&i| taken[i].take()));
-                ends.push(parts.len());
-            }
-        }
-        let mut unit_firsts: Vec<u32> = Vec::with_capacity(ends.len() + 1);
-        let class = element.class();
+        let shown = kept.shown.entry(element.id).or_insert_with(|| shown_element(model, element, levels, library).map(Arc::new));
+        let Some(shown) = shown else { continue };
+        let class = shown.class;
         let k = match layers.iter().position(|l| l.name == class) {
             Some(k) => k,
             None => {
@@ -1434,57 +1589,100 @@ fn viewer_layers(model: &bim_core::Model, levels: &[(String, String)], library: 
         };
         let layer = &mut layers[k];
         let first = layer.indices.len() as u32;
-        // of several materials: each part is told from the others where it is cut
-        // (its reinforcing bars are no part of that: no drawing cuts them)
-        let bar = |p: &bim_core::Part| p.class == bim_core::reinforcement::BAR_CLASS;
-        let several = parts.iter().filter(|p| !bar(p)).filter_map(|p| p.material.as_deref()).collect::<std::collections::HashSet<_>>().len() > 1;
-        for (n, part) in parts.iter().enumerate() {
-            if n == 0 || ends.contains(&n) {
-                unit_firsts.push(layer.indices.len() as u32);
-            }
-            let Ok(mesh) = Mesh::of(&part.solid) else { continue };
-            let part_first = layer.indices.len() as u32;
-            // tile-local f64 to the scene's f32, through the tile origin in f64
-            let origin = grid.origin(part.tile);
-            let base = (layer.positions.len() / 3) as u32;
-            if part.class == bim_core::reinforcement::BAR_CLASS {
-                match bars.last_mut() {
-                    Some(run) if run.0 == k && run.1 + run.2 == base => run.2 += mesh.positions.len() as u32,
-                    _ => bars.push((k, base, mesh.positions.len() as u32)),
-                }
-            }
-            let material = part.material.as_deref().and_then(|key| library.material(key));
-            // of a service: in its colour, so the systems are told apart
-            let plain = element.service.map_or_else(|| class_colour(part.class), service_colour);
-            let colour = material.map_or_else(|| plain.map(|c| (c * 255.0).round() as u8), |m| m.colour);
-            let colours = layer.colors.get_or_insert_with(Vec::new);
-            colours.extend(std::iter::repeat_n([colour[0], colour[1], colour[2], 255], mesh.positions.len()));
-            for (p, n) in mesh.positions.iter().zip(&mesh.normals) {
-                layer.positions.extend((origin + *p).as_vec3().to_array());
-                layer.normals.extend(n.as_vec3().to_array());
-            }
-            layer.indices.extend(mesh.indices.iter().map(|i| i + base));
-            if let Some(material) = part.material.as_deref().filter(|_| several && !bar(part)).and_then(|key| library.materials.iter().position(|m| m.key == key)) {
-                of_parts.push((k, part_first, layer.indices.len() as u32 - part_first, material as u32));
+        let base = (layer.positions.len() / 3) as u32;
+        layer.positions.extend_from_slice(&shown.positions);
+        layer.normals.extend_from_slice(&shown.normals);
+        layer.colors.get_or_insert_with(Vec::new).extend_from_slice(&shown.colours);
+        layer.indices.extend(shown.indices.iter().map(|i| i + base));
+        of_parts.extend(shown.parts.iter().map(|&(part_first, count, material)| (k, first + part_first, count, material)));
+        for &(bar_first, count) in &shown.bars {
+            match bars.last_mut() {
+                Some(run) if run.0 == k && run.1 + run.2 == base + bar_first => run.2 += count,
+                _ => bars.push((k, base + bar_first, count)),
             }
         }
-        let count = layer.indices.len() as u32 - first;
-        unit_firsts.push(layer.indices.len() as u32);
-        if !ends.is_empty() {
-            let mut from = 0;
-            for ((u, range), &to) in units.iter().zip(unit_firsts.windows(2)).zip(&ends) {
-                of_assemblies.push(crate::model::Assembly { layer: k, first: range[0], count: range[1] - range[0], element: element.id.0, number: u.number as u32, of: units.len() as u32, mark: u.mark(element), length: u.length(), parts: (to - from) as u32 });
-                from = to;
-            }
-        }
-        layer.elements.push((element.id.0, first, count));
-        let level = element.level.as_deref().and_then(|path| levels.iter().find(|(p, _)| p == path)).map(|(_, name)| name.as_str());
-        layer.props.push((element.id.0, properties(model, element, &parts, level, library)));
+        symbolised.extend(shown.symbol.map(|(symbol_first, count)| (k, base + symbol_first, count)));
+        of_assemblies.extend(shown.assemblies.iter().map(|a| crate::model::Assembly { layer: k, first: first + a.first, ..a.clone() }));
+        layer.elements.push((element.id.0, first, shown.indices.len() as u32));
+        layer.props.push((element.id.0, shown.props.clone()));
     }
     of_parts.sort_unstable();
     of_assemblies.sort_by_key(|a| (a.layer, a.first));
     bars.sort_unstable();
-    (layers, of_parts, of_assemblies, bars)
+    symbolised.sort_unstable();
+    (layers, of_parts, of_assemblies, bars, symbolised)
+}
+
+/// What `element` shows; `None` for one without a body (a connection without parts, one that
+/// cannot be made).
+fn shown_element(model: &bim_core::Model, element: &Element, levels: &[(String, String)], library: &bim_library::Library) -> Option<Shown> {
+    let grid = model.grid;
+    let mut parts = model.evaluate(element.id).ok()?;
+    if parts.is_empty() {
+        return None;
+    }
+    // a framed system: its parts in the order of its prefab units, and where each unit ends
+    let units = bim_core::system::assemblies(model, element, &parts).unwrap_or_default();
+    let mut ends: Vec<usize> = Vec::with_capacity(units.len());
+    if !units.is_empty() && units.iter().map(|u| u.parts.len()).sum::<usize>() == parts.len() {
+        let mut taken: Vec<Option<bim_core::Part>> = parts.into_iter().map(Some).collect();
+        parts = Vec::with_capacity(taken.len());
+        for u in &units {
+            parts.extend(u.parts.iter().filter_map(|&i| taken[i].take()));
+            ends.push(parts.len());
+        }
+    }
+    let mut unit_firsts: Vec<u32> = Vec::with_capacity(ends.len() + 1);
+    let mut shown = Shown { class: element.class(), positions: Vec::new(), normals: Vec::new(), colours: Vec::new(), indices: Vec::new(), parts: Vec::new(), bars: Vec::new(), symbol: None, assemblies: Vec::new(), props: String::new() };
+    // of several materials: each part is told from the others where it is cut
+    // (its reinforcing bars are no part of that: no drawing cuts them)
+    let bar = |p: &bim_core::Part| p.class == bim_core::reinforcement::BAR_CLASS;
+    let several = parts.iter().filter(|p| !bar(p)).filter_map(|p| p.material.as_deref()).collect::<std::collections::HashSet<_>>().len() > 1;
+    let filling = match &element.shape {
+        Shape::Point(p) if p.opening.is_some() && parts.len() > 1 => Some(parts.len() - 1),
+        _ => None,
+    };
+    for (n, part) in parts.iter().enumerate() {
+        if n == 0 || ends.contains(&n) {
+            unit_firsts.push(shown.indices.len() as u32);
+        }
+        let Ok(mesh) = Mesh::of(&part.solid) else { continue };
+        let part_first = shown.indices.len() as u32;
+        // tile-local f64 to the scene's f32, through the tile origin in f64
+        let origin = grid.origin(part.tile);
+        let base = (shown.positions.len() / 3) as u32;
+        if part.class == bim_core::reinforcement::BAR_CLASS {
+            shown.bars.push((base, mesh.positions.len() as u32));
+        }
+        // what fills a door or a window (the last of its solids, see `opening_solids`)
+        if filling == Some(n) {
+            shown.symbol = Some((base, mesh.positions.len() as u32));
+        }
+        let material = part.material.as_deref().and_then(|key| library.material(key));
+        // of a service: in its colour, so the systems are told apart
+        let plain = element.service.map_or_else(|| class_colour(part.class), service_colour);
+        let colour = material.map_or_else(|| plain.map(|c| (c * 255.0).round() as u8), |m| m.colour);
+        shown.colours.extend(std::iter::repeat_n([colour[0], colour[1], colour[2], 255], mesh.positions.len()));
+        for (p, n) in mesh.positions.iter().zip(&mesh.normals) {
+            shown.positions.extend((origin + *p).as_vec3().to_array());
+            shown.normals.extend(n.as_vec3().to_array());
+        }
+        shown.indices.extend(mesh.indices.iter().map(|i| i + base));
+        if let Some(material) = part.material.as_deref().filter(|_| several && !bar(part)).and_then(|key| library.materials.iter().position(|m| m.key == key)) {
+            shown.parts.push((part_first, shown.indices.len() as u32 - part_first, material as u32));
+        }
+    }
+    unit_firsts.push(shown.indices.len() as u32);
+    if !ends.is_empty() {
+        let mut from = 0;
+        for ((u, range), &to) in units.iter().zip(unit_firsts.windows(2)).zip(&ends) {
+            shown.assemblies.push(crate::model::Assembly { layer: 0, first: range[0], count: range[1] - range[0], element: element.id.0, number: u.number as u32, of: units.len() as u32, mark: u.mark(element), length: u.length(), parts: (to - from) as u32 });
+            from = to;
+        }
+    }
+    let level = element.level.as_deref().and_then(|path| levels.iter().find(|(p, _)| p == path)).map(|(_, name)| name.as_str());
+    shown.props = properties(model, element, &parts, level, library);
+    Some(shown)
 }
 
 /// The NL-SfB code of an element: of its build-up, its linear type (found by the name its
@@ -1534,7 +1732,7 @@ fn properties(model: &bim_core::Model, e: &Element, parts: &[bim_core::Part], le
     }
     // the definitions an IFCX file keeps and gives back: the element's, and those of the
     // connections it is the primary member of (a connection has no body, so no node of its own)
-    let joints = model.iter().filter(|c| matches!(&c.shape, Shape::Connection(j) if j.primary == e.id));
+    let joints = model.connections_of(e.id).filter(|c| matches!(&c.shape, Shape::Connection(j) if j.primary == e.id));
     let definitions: Vec<&Element> = std::iter::once(e).chain(joints).collect();
     put(crate::export::ifcx::DEFINITION, serde_json::to_string(&definitions).unwrap_or_default());
     match e.shape_in_project(&grid) {
@@ -1672,6 +1870,29 @@ mod tests {
     pub(super) fn click(app: &mut App, x: f64, y: f64) {
         let (sx, sy) = app.on_screen(DVec3::new(x, y, 0.0), 1000.0, 800.0).unwrap();
         let _ = app.update(Message::Navigate(Navigate::Pick { x: sx, y: sy, width: 1000.0, height: 800.0, add: false }));
+    }
+
+    #[test]
+    fn a_change_makes_only_what_it_touches_again() {
+        let mut app = modelling();
+        let wall = |a: (f64, f64), b: (f64, f64)| Shape::Planar(PlanarDef { form: PlanarForm::Wall { start: DVec2::new(a.0, a.1), end: DVec2::new(b.0, b.1), base: 0.0, height: 3.0 }, thickness: 0.2, openings: Vec::new(), build_up: None });
+        let near = app.add_element("Wall", None, wall((0.0, 0.0), (5.0, 0.0))).unwrap();
+        let far = app.add_element("Wall", None, wall((20.0, 0.0), (25.0, 0.0))).unwrap();
+        let shown = |app: &App, id: ElementId| app.modeller.kept.shown[&id].clone().expect("a wall shows");
+        let (near_before, far_before) = (shown(&app, near), shown(&app, far));
+        // a wall at the corner of the first: that one is cut to the corner, the far one is kept
+        // as it was made (every change is checked against the model made anew, see `show_modelled`)
+        app.add_element("Wall", None, wall((5.0, 0.0), (5.0, 4.0))).unwrap();
+        assert!(!Arc::ptr_eq(&near_before, &shown(&app, near)), "the wall at the corner is made again");
+        assert!(Arc::ptr_eq(&far_before, &shown(&app, far)), "the wall away from it is kept");
+        // a material's colour changed: everything is made again
+        app.library.materials[0].colour = [1, 2, 3];
+        app.show_modelled();
+        assert!(!Arc::ptr_eq(&far_before, &shown(&app, far)));
+        // and a wall removed is no longer kept
+        app.select_modelled(far);
+        let _ = app.update(Message::DeletePicked);
+        assert!(!app.modeller.kept.shown.contains_key(&far));
     }
 
     #[test]

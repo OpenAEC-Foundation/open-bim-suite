@@ -135,11 +135,11 @@ impl MaterialHatch {
     }
 }
 
-/// The standards a library starts with: the suite's coloured hatches, which is chosen, and the
-/// signs of NEN 47 in black on the paper.
+/// The standards a library starts with: the signs of NEN 47 on a colour (the suite's own set),
+/// which is chosen and named for what it draws, and the same signs in black on the paper.
 pub fn starter() -> Vec<HatchStandard> {
     vec![
-        HatchStandard { chosen: true, ..HatchStandard::new("openaec", Names::same("OpenAEC"), Some(HatchSet::OpenAec)) },
+        HatchStandard { chosen: true, ..HatchStandard::new("openaec", Names::new("NEN 47 in kleur", "NEN 47 in colour", "NEN 47 in Farbe", "NEN 47 en couleur"), Some(HatchSet::OpenAec)) },
         HatchStandard::new("nen47", Names::same("NEN 47"), Some(HatchSet::Nen47)),
     ]
 }
@@ -170,6 +170,7 @@ mod tests {
         let library = Library::starter();
         let [openaec, nen47] = &library.hatch_standards[..] else { panic!("two standards") };
         assert_eq!((openaec.key.as_str(), openaec.chosen, nen47.key.as_str(), nen47.chosen), ("openaec", true, "nen47", false));
+        assert_eq!((openaec.name(Lang::Nl), nen47.name(Lang::Nl)), ("NEN 47 in kleur", "NEN 47"), "both draw the signs of NEN 47");
         let timber = library.material("timber").unwrap();
         assert_eq!(openaec.of(timber).cut.as_deref(), Some("openaec-12"));
         assert_eq!(nen47.of(timber).cut.as_deref(), Some("nen47-12"), "softwood, in black on the paper");
@@ -227,6 +228,11 @@ mod tests {
         assert_eq!(read.hatch_standards, library.hatch_standards);
         assert_eq!(read.hatch_standard().map(|s| s.key.as_str()), Some("house"));
         assert_eq!(read.material("timber").unwrap().hatches, library.material("timber").unwrap().hatches);
+        // a file of before the coloured standard was named after NEN 47 has the name of now
+        let mut old = file.clone();
+        let text = serde_json::to_string(&old).unwrap().replace("NEN 47 in kleur", "OpenAEC");
+        old = serde_json::from_str(&text).unwrap();
+        assert_eq!(crate::ifcx::read(&old).unwrap().hatch_standards[0].name(Lang::Nl), "NEN 47 in kleur");
         // a library without standards draws a material by its own sign
         let bare = Library { materials: library.materials.clone(), ..Library::default() };
         assert_eq!(bare.material_hatch("timber").and_then(|h| h.cut).as_deref(), Some("openaec-12"));

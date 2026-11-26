@@ -2114,6 +2114,16 @@
     "Align by two pairs": "Wyrównaj dwiema parami",
     "New revision…": "Nowa rewizja…",
     "Replaces the file by a new version; its place and turn stay.": "Zastępuje plik nową wersją; położenie i obrót zostają.",
-    "Click a point of the model and where it should go, then a second point and where that should go (such as two grid crossings). The model turns and moves so both pairs meet. Esc stops.": "Kliknij punkt modelu i miejsce docelowe, potem drugi punkt i jego miejsce docelowe (np. dwa przecięcia osi). Model obraca się i przesuwa, aż obie pary się pokryją. Esc przerywa."
+    "Click a point of the model and where it should go, then a second point and where that should go (such as two grid crossings). The model turns and moves so both pairs meet. Esc stops.": "Kliknij punkt modelu i miejsce docelowe, potem drugi punkt i jego miejsce docelowe (np. dwa przecięcia osi). Model obraca się i przesuwa, aż obie pary się pokryją. Esc przerywa.",
+    "Connector": "Przyłącze",
+    "Network": "Sieć",
+    "fittings": "kształtki",
+    "appliances": "urządzenia",
+    "Network length": "Długość sieci",
+    "Select network": "Zaznacz sieć",
+    "Fall (1:n)": "Spadek (1:n)",
+    "Cancel sketch": "Anuluj szkic",
+    "Finish sketch": "Zakończ szkic",
+    "Hung the other way": "Zawieszone odwrotnie"
   }
 }

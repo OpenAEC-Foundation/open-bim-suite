@@ -17,6 +17,7 @@
 
 pub mod boolean;
 pub mod datum;
+mod delta;
 pub mod element;
 pub mod exact;
 pub mod join;
@@ -32,7 +33,7 @@ pub mod tile;
 
 pub use boolean::{boolean, BooleanOp};
 pub use datum::GridDef;
-pub use element::{Fixity, BaseKind, BayPanel, LinearRole, OwnGrid, PointRole, Service, StairShape, OpeningKind, SlabRole, Slope, Top, BuildUpDef, ConnectionDef, ConnectionKind, Element, ElementId, LayerDef, LinearDef, Opening, OpeningFraming, PlanarDef, PointDef, Shape, SystemDef, Division};
+pub use element::{Connector, Fixity, BaseKind, BayPanel, LinearRole, OwnGrid, PointRole, Service, StairShape, OpeningKind, SlabRole, Slope, Top, BuildUpDef, ConnectionDef, ConnectionKind, Element, ElementId, LayerDef, LinearDef, Opening, OpeningFraming, PlanarDef, PointDef, Shape, SystemDef, Division};
 pub use mesh::Mesh;
 pub use model::{Model, Part};
 pub use profile::{Profile, ProfileDef};

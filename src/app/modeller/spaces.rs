@@ -10,7 +10,8 @@
 //! - **How they show.** A label in the middle of each space, over the 3D view and the floor
 //!   plans: its name ("Space 1", numbered per level by where it lies, south-west first) and its
 //!   area in m².
-//! - Openings count for nothing: a doorway does not open a room. A room open on one side is none.
+//! - Openings count for nothing: a doorway does not open a room, and a door or window standing
+//!   between the ends of two walls closes the gap between them. A room open on one side is none.
 
 use crate::app::App;
 use bim_core::element::PlanarForm;
@@ -23,6 +24,11 @@ use iced::{alignment, mouse, Color, Point, Rectangle};
 const SAME: f64 = 1e-3;
 /// A wall's end this far past another's face still ends on it (metres).
 const REACH: f64 = 0.01;
+/// Two sides whose directions differ less than this (the sine of their angle) run on in one line.
+const STRAIGHT: f64 = 0.02;
+/// A region narrower than this on average (twice its area over its perimeter, metres) is no
+/// space: the cavity of a cavity wall, a slit between two walls.
+const NARROW: f64 = 0.25;
 /// The labels show over the viewport when the view looks down at least this steeply (radians).
 const LOOKING_DOWN: f32 = 1.0;
 
@@ -223,11 +229,30 @@ pub fn regions(bounds: &[Bound]) -> Vec<Vec<DVec2>> {
         }
     }
     // what ends loose closes nothing in
-    loop {
-        let degree = |n: usize| edges.iter().filter(|e| e.0 == n || e.1 == n).count();
-        let Some(k) = edges.iter().position(|e| degree(e.0) < 2 || degree(e.1) < 2) else { break };
-        edges.remove(k);
+    // (how many stretches meet at each point is kept, not counted again for every stretch: a
+    // storey of some hundreds of walls is searched in a moment)
+    let mut degree = vec![0usize; points.len()];
+    for e in &edges {
+        degree[e.0] += 1;
+        degree[e.1] += 1;
     }
+    let mut kept = vec![true; edges.len()];
+    loop {
+        let mut gone = false;
+        for (k, e) in edges.iter().enumerate() {
+            if kept[k] && (degree[e.0] < 2 || degree[e.1] < 2) {
+                kept[k] = false;
+                degree[e.0] -= 1;
+                degree[e.1] -= 1;
+                gone = true;
+            }
+        }
+        if !gone {
+            break;
+        }
+    }
+    let mut kept = kept.into_iter();
+    edges.retain(|_| kept.next().unwrap_or(true));
     // each stretch walked both ways; at its head the walk turns to the next stretch clockwise, so
     // a region is walked with its inside on the left
     let halves: Vec<(usize, usize, f64)> = edges.iter().flat_map(|e| [(e.0, e.1, e.2), (e.1, e.0, e.2)]).collect();
@@ -248,7 +273,8 @@ pub fn regions(bounds: &[Bound]) -> Vec<Vec<DVec2>> {
             .unwrap_or(h ^ 1)
     };
     let mut walked = vec![false; halves.len()];
-    let mut out = Vec::new();
+    // each region found: the ring of its walls' axes and the outline between their inner faces
+    let mut found: Vec<(Vec<DVec2>, Vec<DVec2>)> = Vec::new();
     for start in 0..halves.len() {
         if walked[start] {
             continue;
@@ -270,17 +296,42 @@ pub fn regions(bounds: &[Bound]) -> Vec<Vec<DVec2>> {
             let inward = (b - a).normalize_or_zero().perp() * thick[k];
             (a + inward, b + inward)
         };
+        // where two sides run on in one line (a thin wall going on as a thick one) their inner
+        // faces do not cross: the outline steps from the one face to the other there
         let inner: Vec<DVec2> = (0..n)
-            .map(|k| {
+            .flat_map(|k| {
                 let ((a, b), (c, d)) = (side((k + n - 1) % n), side(k));
-                crate::app::grips::crossing(a, b, c, d).unwrap_or(c)
+                let (r, s) = ((b - a).normalize_or_zero(), (d - c).normalize_or_zero());
+                if r.perp_dot(s).abs() < STRAIGHT {
+                    return if b.distance(c) <= SAME { vec![c] } else { vec![b, c] };
+                }
+                vec![crate::app::grips::crossing(a, b, c, d).unwrap_or(c)]
             })
             .collect();
         if signed_area(&inner) > SAME {
-            out.push(inner);
+            found.push((ring, inner));
         }
     }
-    out
+    // a cavity between two leaves or a slit between two walls is no room: what is narrow goes.
+    // A region that lies around others (the cavity round the inner leaf of a house) is as wide
+    // as what is left of it between them
+    let around = |ring: &[DVec2]| (0..ring.len()).map(|k| ring[k].distance(ring[(k + 1) % ring.len()])).sum::<f64>();
+    let holds = |outer: &[DVec2], other: &[DVec2]| signed_area(other) < signed_area(outer) && other.iter().all(|p| inside(outer, *p) || outer.iter().any(|q| q.distance(*p) <= SAME * 10.0));
+    (0..found.len())
+        .filter(|&k| {
+            let (ring, inner) = &found[k];
+            let within: Vec<usize> = (0..found.len()).filter(|&j| j != k && holds(ring, &found[j].0)).collect();
+            // those lying in another of them are counted with it
+            let islands = within.iter().filter(|&&j| !within.iter().any(|&i| i != j && holds(&found[i].0, &found[j].0)));
+            let (mut area, mut edge) = (signed_area(inner), around(inner));
+            for &j in islands {
+                area -= signed_area(&found[j].0);
+                edge += around(&found[j].0);
+            }
+            2.0 * area >= NARROW * edge
+        })
+        .map(|k| found[k].1.clone())
+        .collect()
 }
 
 impl App {
@@ -294,6 +345,12 @@ impl App {
             let (a, b, base, half) = match e.shape_in_project(&grid) {
                 Shape::Planar(p @ PlanarDef { form: PlanarForm::Wall { start, end, base, .. }, .. }) => (start, end, base, p.total_thickness() / 2.0),
                 Shape::System(s) if !s.lies() => (s.start, s.end, s.base, s.member.max_element() / 2.0),
+                // a door or a window closes the gap it stands in as a wall does: one placed
+                // between the ends of two walls (and not in a wall) does not leave the room open
+                Shape::Point(bim_core::PointDef { at, rotation, size, opening: Some(_), .. }) => {
+                    let along = DVec2::from_angle(rotation) * (size.x / 2.0);
+                    (at.truncate() - along, at.truncate() + along, at.z, size.y / 2.0)
+                }
                 _ => continue,
             };
             let bound = Bound { a, b, half };
@@ -303,8 +360,19 @@ impl App {
             }
         }
         let mut out = Vec::new();
+        // the regions of a level are kept while its walls stay as they are: the labels over the
+        // view ask for the spaces with every frame
+        let mut kept = self.modeller.regions.borrow_mut();
+        kept.retain(|(walls, _)| by_level.iter().any(|(_, _, w)| w == walls));
         for (level, z, walls) in by_level {
-            let mut found = regions(&walls);
+            let mut found = match kept.iter().find(|(w, _)| *w == walls) {
+                Some((_, found)) => found.clone(),
+                None => {
+                    let found = regions(&walls);
+                    kept.push((walls, found.clone()));
+                    found
+                }
+            };
             let middle = |ring: &Vec<DVec2>| ring.iter().sum::<DVec2>() / ring.len() as f64;
             found.sort_by(|a, b| {
                 let (p, q) = (middle(a), middle(b));
@@ -391,13 +459,14 @@ impl App {
         use crate::document::{Align, Note, NOTE_HEIGHT};
         let spaces = self.spaces();
         let grid = self.modeller.model.grid;
-        // each door: its level, the middle of its foot, the way its width runs, its width
-        let doors: Vec<(Option<String>, DVec2, DVec2, f64)> = self
+        // each door and window: its level, the middle of its foot, the way its width runs, its
+        // width, how thick its leaf or pane is, and (a window) how high it stands and reaches
+        let openings: Vec<(Option<String>, glam::DVec3, DVec2, glam::DVec3, bool, bool)> = self
             .modeller
             .model
             .iter()
             .filter_map(|e| match e.shape_in_project(&grid) {
-                Shape::Point(p) if p.opening == Some(bim_core::OpeningKind::Door) => Some((e.level.clone(), p.at.truncate(), DVec2::from_angle(p.rotation), p.size.x)),
+                Shape::Point(p) if p.opening.is_some() => Some((e.level.clone(), p.at, DVec2::from_angle(p.rotation), p.size, p.opening == Some(bim_core::OpeningKind::Door), p.mirrored)),
                 _ => None,
             })
             .collect();
@@ -448,13 +517,34 @@ impl App {
                 notes.push(note(format!("{:.2} m²", s.area), line));
             }
             let mut lines = Vec::new();
-            for (_, at, along, width) in doors.iter().filter(|d| on(&d.0)) {
-                // hinged at the start of its width, its leaf open square to the wall, and the
-                // quarter circle the leaf's end runs to the other jamb
-                let hinge = *at - *along * (*width / 2.0);
-                let leaf = |turn: f64| hinge + DVec2::from_angle(turn).rotate(*along) * *width;
-                lines.push([hinge.to_array(), leaf(std::f64::consts::FRAC_PI_2).to_array()]);
-                const STEPS: usize = 8;
+            let elevation = levels.iter().find(|(path, _)| *path == plan.level).map_or(0.0, |(_, e)| *e);
+            for (_, at, along, size, door, mirrored) in openings.iter().filter(|d| on(&d.0)) {
+                // between its jambs; one too small for a frame is a block, cut as it stands
+                let frame = bim_core::element::FRAME_WIDTH;
+                if size.x <= 3.0 * frame || size.z <= 3.0 * frame {
+                    continue;
+                }
+                let (middle, width) = (at.truncate(), size.x - 2.0 * frame);
+                if !*door {
+                    // a window the plan cuts: its pane, a line from jamb to jamb
+                    let (sill, head) = (at.z - elevation, at.z + size.z - elevation);
+                    if sill < plan.cut && head > plan.cut {
+                        lines.push([(middle - *along * (width / 2.0)).to_array(), (middle + *along * (width / 2.0)).to_array()]);
+                    }
+                    continue;
+                }
+                // a door: hinged at the jamb at the start of its width (at its end when hung the
+                // other way), its leaf open square to the wall on the left of the way its width
+                // runs (as thick as it is), and the quarter circle its end runs to the other jamb
+                let hand = if *mirrored { -1.0 } else { 1.0 };
+                let hinge = middle - *along * (hand * width / 2.0);
+                let leaf = |turn: f64| hinge + DVec2::from_angle(hand * turn).rotate(*along * hand) * width;
+                let thick = *along * (hand * size.y.clamp(0.02, 0.06));
+                let tip = leaf(std::f64::consts::FRAC_PI_2);
+                lines.push([hinge.to_array(), tip.to_array()]);
+                lines.push([tip.to_array(), (tip + thick).to_array()]);
+                lines.push([(tip + thick).to_array(), (hinge + thick).to_array()]);
+                const STEPS: usize = 12;
                 for k in 0..STEPS {
                     let turn = |k: usize| std::f64::consts::FRAC_PI_2 * k as f64 / STEPS as f64;
                     lines.push([leaf(turn(k)).to_array(), leaf(turn(k + 1)).to_array()]);
@@ -475,9 +565,12 @@ impl App {
         if self.camera.pitch.abs() < LOOKING_DOWN {
             return None;
         }
+        // of the level worked on: those of every storey lie over each other from above
+        let (_, _, level) = self.work_plane();
         let labels: Vec<(Vec3, String)> = self
             .spaces()
             .into_iter()
+            .filter(|s| s.level.is_none() || s.level == level)
             .map(|s| {
                 let middle = s.outline.iter().sum::<DVec2>() / s.outline.len() as f64;
                 (middle.extend(s.z).as_vec3(), format!("{}\n{:.2} m²", s.name, s.area))
@@ -533,6 +626,49 @@ mod tests {
         let mut areas: Vec<f64> = regions(bounds).iter().map(|r| (signed_area(r) * 1e6).round() / 1e6).collect();
         areas.sort_by(f64::total_cmp);
         areas
+    }
+
+    #[test]
+    fn a_door_between_two_wall_ends_closes_the_room() {
+        use crate::app::modeller::ModelTool;
+        let mut app = App::default();
+        app.new_model("Level 0");
+        let level = app.work_plane().2;
+        let wall = |a: (f64, f64), b: (f64, f64)| Shape::Planar(PlanarDef { form: PlanarForm::Wall { start: DVec2::new(a.0, a.1), end: DVec2::new(b.0, b.1), base: 0.0, height: 3.0 }, thickness: 0.2, openings: Vec::new(), build_up: None });
+        // four walls with a gap of a metre in the south one
+        for (a, b) in [((0.0, 0.0), (2.0, 0.0)), ((3.0, 0.0), (6.0, 0.0)), ((6.0, 0.0), (6.0, 4.0)), ((6.0, 4.0), (0.0, 4.0)), ((0.0, 4.0), (0.0, 0.0))] {
+            app.add_element("Wall", level.clone(), wall(a, b)).unwrap();
+        }
+        assert!(app.spaces().is_empty());
+        app.set_model_tool(Some((ModelTool::Door, "Door")));
+        app.place_message(crate::app::placement::PlaceMessage::Field(crate::app::placement::PlaceField::Width, "1.0".into()));
+        app.place_opening_at(ModelTool::Door, 2.5, 0.0, 0.0, None);
+        assert_eq!(app.spaces().len(), 1, "{:?}", app.modeller.refusal);
+    }
+
+    #[test]
+    fn a_cavity_is_no_space_and_a_thin_wall_going_on_as_a_thick_one_steps_the_outline() {
+        let leaf = |x0: f64, y0: f64, x1: f64, y1: f64, half: f64| {
+            [((x0, y0), (x1, y0)), ((x1, y0), (x1, y1)), ((x1, y1), (x0, y1)), ((x0, y1), (x0, y0))].map(|(a, b)| Bound { a: DVec2::new(a.0, a.1), b: DVec2::new(b.0, b.1), half })
+        };
+        // an outer leaf round an inner leaf, a cavity of 5 cm between them: one room, not a
+        // second one around it
+        let mut house: Vec<Bound> = leaf(0.0, 0.0, 6.0, 4.0, 0.05).into();
+        house.extend(leaf(0.2, 0.2, 5.8, 3.8, 0.1));
+        assert_eq!(areas(&house), vec![5.4 * 3.4]);
+        // and with a tie across the cavity, which makes a closed strip of it
+        house.push(Bound { a: DVec2::new(0.0, 2.0), b: DVec2::new(0.2, 2.0), half: 0.05 });
+        house.push(Bound { a: DVec2::new(6.0, 2.0), b: DVec2::new(5.8, 2.0), half: 0.05 });
+        assert_eq!(areas(&house), vec![5.4 * 3.4]);
+        // a side of two walls in one line, 100 and 300 thick: the outline steps, it does not
+        // shoot away to where the two faces would cross
+        let mut room = vec![wall((6.0, 0.0), (6.0, 4.0)), wall((6.0, 4.0), (0.0, 4.0)), wall((0.0, 4.0), (0.0, 0.0))];
+        room.push(Bound { a: DVec2::new(0.0, 0.0), b: DVec2::new(3.0, 0.0), half: 0.05 });
+        room.push(Bound { a: DVec2::new(3.0, 0.0), b: DVec2::new(6.0, 0.0), half: 0.15 });
+        let found = regions(&room);
+        assert_eq!(found.len(), 1);
+        assert!(found[0].iter().all(|p| p.x > 0.0 && p.x < 6.0 && p.y > 0.0 && p.y < 4.0), "{:?}", found[0]);
+        assert!((signed_area(&found[0]) - (5.8 * 3.9 - 2.9 * 0.05 - 2.9 * 0.15)).abs() < 1e-9, "{}", signed_area(&found[0]));
     }
 
     #[test]
@@ -629,13 +765,27 @@ mod tests {
         let tags: Vec<String> = app.document.view_tags(&plan).iter().map(|n| n.text.clone()).collect();
         assert_eq!(tags, ["Space 1", "25.84 m²"]);
         let swing = app.document.view_symbols(&plan);
-        assert_eq!(swing.len(), 9, "the leaf and the quarter circle in eight chords");
-        // the leaf stands square to the wall at the hinge, as long as the door is wide
+        assert_eq!(swing.len(), 15, "the leaf open (three sides of it) and the quarter circle in twelve chords");
+        // the leaf stands square to the wall at the hinge on its jamb, as long as the door is
+        // wide between its jambs
         let (a, b) = (DVec2::from_array(swing[0][0]), DVec2::from_array(swing[0][1]));
-        assert!((a - DVec2::new(2.55, 0.0)).length() < 1e-9 && (b - DVec2::new(2.55, 0.9)).length() < 1e-9, "{a} {b}");
+        assert!((a - DVec2::new(2.61, 0.0)).length() < 1e-9 && (b - DVec2::new(2.61, 0.78)).length() < 1e-9, "{a} {b}");
+        // a door hung the other way is hinged on its other jamb, and opens to the same side
+        app.set_model_tool(Some((ModelTool::Door, "Door")));
+        app.place_opening_at(ModelTool::Door, 7.0, 4.0, 0.0, Some(true));
+        app.set_model_tool(None);
+        let other = app.document.view_symbols(&plan)[15..].to_vec();
+        let (a, b) = (DVec2::from_array(other[0][0]), DVec2::from_array(other[0][1]));
+        assert!((a - DVec2::new(7.39, 4.0)).length() < 1e-9 && (b - DVec2::new(7.39, 4.78)).length() < 1e-9, "{a} {b}");
+        app.select_modelled(bim_core::ElementId(app.modeller.model.iter().map(|e| e.id.0).max().unwrap()));
+        let _ = app.update(crate::app::Message::DeletePicked);
+        app.sel.set(None);
+        // and the plan does not cut the leaf where it stands closed
+        let scene = app.model.clone().unwrap();
+        assert_eq!(scene.project.symbolised.len(), 1, "the door's leaf");
         // drawn as on a sheet, the plan's drawing holds both
         let drawing = crate::drawing2d::view_drawing(&app.document, &plan, &crate::drawing::Cut::default(), &crate::drawing2d::Rules::default()).unwrap();
-        assert!(drawing.texts.iter().any(|t| t.text == "Space 1") && drawing.lines.len() >= 9);
+        assert!(drawing.texts.iter().any(|t| t.text == "Space 1") && drawing.lines.len() >= 15);
         // a wall gone, no space, and the plan says none
         app.select_modelled(bim_core::ElementId(2));
         let _ = app.update(crate::app::Message::DeletePicked);

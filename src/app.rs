@@ -1027,6 +1027,8 @@ pub enum Message {
     RemoveGridLine(bool, usize),
     /// The selected curtain wall gets its equal grid back.
     EqualGrid,
+    /// Select the network of the selected run, fitting or appliance.
+    SelectNetwork,
     /// The Roof tool, named as its roofs are: the Slab tool making a roof, its sketch open.
     RoofTool(&'static str),
     /// The angle typed for the picked line of a roof's sketch.
@@ -1964,7 +1966,7 @@ impl App {
         // a simulation file opens coloured by its first field, at its first step
         self.field = fields::FieldView::of(&model);
         // the product shown stays the one it was
-        self.modeller = modeller::Modeller { in_modeller: self.modeller.in_modeller, ..modeller::Modeller::default() };
+        self.modeller = self.modeller.anew();
         self.set_scene(model.clone());
         // the cut the file opens with (Rhino: the clipping plane of its perspective view)
         self.plane = model.project.section;
@@ -2423,6 +2425,7 @@ impl App {
             Message::CurtainTool(tool) => self.toggle_curtain_tool(tool),
             Message::RemoveGridLine(upright, index) => self.remove_grid_line(upright, index),
             Message::EqualGrid => self.equal_grid(),
+            Message::SelectNetwork => self.select_network(),
             Message::StairSketch => self.toggle_stair_sketch(),
             Message::RoofTool(name) => self.start_roof_tool(name),
             Message::SketchSlope(typed) => self.sketch_slope_typed(typed),
