@@ -326,6 +326,7 @@ impl<M> canvas::Program<M> for SolidView {
     }
 
     fn draw(&self, state: &Turn, renderer: &iced::Renderer, _theme: &iced::Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<canvas::Geometry> {
+        let _timed = crate::frame_log::canvas("SolidView");
         let mut frame = Frame::new(renderer, bounds.size());
         // twice as many pixels as the page has points, while that stays light
         let finer = (Self::MOST / (bounds.width * bounds.height).max(1.0)).sqrt().clamp(0.5, 2.0);

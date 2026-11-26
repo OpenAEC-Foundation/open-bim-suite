@@ -636,6 +636,9 @@ pub enum Msg {
 pub struct Studio {
     /// The project shown.
     pub app: App,
+    /// The commands as they stand while one view is built: a view asks for them a dozen times,
+    /// and making the whole list each time took a good part of every frame.
+    commands_kept: std::sync::Mutex<Option<Vec<Command<Msg>>>>,
     /// The Modeller's letters typed so far (one waiting for its pair).
     pub(crate) keys: crate::app::modeller::keys::KeySequence,
     /// Its id, the other open projects with theirs, and the order of the project tabs.
@@ -748,6 +751,7 @@ impl Studio {
         Self {
             keys: Default::default(),
             app,
+            commands_kept: std::sync::Mutex::new(None),
             project: 0,
             parked: Vec::new(),
             tabs: vec![0],
@@ -1069,7 +1073,8 @@ impl Studio {
     pub fn update_with_frame(&mut self, message: Msg) -> Task<Msg> {
         // what laying the frame answers lays no frame again
         let answer = matches!(message, Msg::PlannerFrame(_) | Msg::PlannerDone(_));
-        let task = self.update(message);
+        let named = if crate::frame_log::on() { format!("{message:?}") } else { String::new() };
+        let task = crate::frame_log::time(crate::frame_log::Phase::Update, || named, || self.update(message));
         if self.product() != Product::Planner {
             // the pointer is followed on the Planner only: what it was says nothing on return
             self.planner_pointer = None;
@@ -1942,10 +1947,26 @@ impl Studio {
     }
 
     fn command(&self, id: &str) -> Command<Msg> {
-        self.commands().into_iter().find(|c| c.id == id).unwrap_or_else(|| panic!("command {id}"))
+        let mut kept = self.commands_kept.lock().unwrap_or_else(|e| e.into_inner());
+        if kept.is_none() {
+            // (made with the lock let go: the list asks for nothing of it)
+            drop(kept);
+            let made = self.commands();
+            kept = self.commands_kept.lock().unwrap_or_else(|e| e.into_inner());
+            *kept = Some(made);
+        }
+        kept.as_ref().and_then(|all| all.iter().find(|c| c.id == id)).cloned().unwrap_or_else(|| panic!("command {id}"))
+    }
+
+    /// The commands of the view being built, made once for it.
+    fn commands_of_view(&self) -> Vec<Command<Msg>> {
+        let _ = self.command("file.open");
+        self.commands_kept.lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_default()
     }
 
     pub fn update(&mut self, message: Msg) -> Task<Msg> {
+        // a message changes what the commands are
+        *self.commands_kept.get_mut().unwrap_or_else(|e| e.into_inner()) = None;
         // the Viewer only looks at a view: its bar has no tools to dimension, write or cut
         self.app.set_viewer_mode(self.product() == Product::Viewer);
         #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
@@ -2577,6 +2598,12 @@ impl Studio {
     }
 
     pub fn view(&self) -> Element<'_, Msg> {
+        crate::frame_log::time(crate::frame_log::Phase::View, String::new, || self.view_now())
+    }
+
+    fn view_now(&self) -> Element<'_, Msg> {
+        // what the commands were for the view before says nothing of this one
+        *self.commands_kept.lock().unwrap_or_else(|e| e.into_inner()) = None;
         let look = self.look();
         let l = self.l();
         let c = look.color;
@@ -2937,7 +2964,7 @@ impl Studio {
         let groups: Vec<(&'static str, Vec<RibbonPart>)> = self.ribbon_groups().into_iter().filter(|g| !self.prefs.ribbon_hidden.iter().any(|k| k == group_key(g))).collect();
         // drawn to fit the window: where the ribbon is wider, its groups show their small
         // buttons as icons only, from the last group back; narrower still, it scrolls sideways
-        let commands = self.commands();
+        let commands = self.commands_of_view();
         let command = |id: &str| commands.iter().find(|c| c.id == id).unwrap_or_else(|| panic!("command {id}"));
         let letters = |id: &str| command(id).label.trim_end_matches('…').chars().count() as f32;
         let part_width = |part: &RibbonPart, icons: bool| match part {

@@ -680,6 +680,8 @@ pub struct CubeState {
     /// the other fingers go on to the viewport below.
     finger: Option<touch::Finger>,
     dragged: bool,
+    /// The cube as drawn, kept while the camera and the pointer over it stay as they are.
+    kept: crate::kept_canvas::Kept,
 }
 
 impl<Message> canvas::Program<Message> for CubeOverlay
@@ -765,9 +767,10 @@ where
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
-        let mut frame = Frame::new(renderer, bounds.size());
-        draw(&mut frame, bounds, self.yaw, self.pitch, state.hover, self.ortho);
-        vec![frame.into_geometry()]
+        let _timed = crate::frame_log::canvas("CubeOverlay");
+        let hover = state.hover.map_or([f32::NAN; 2], |p| [p.x, p.y]);
+        let key = crate::kept_canvas::key(&[self.yaw, self.pitch, hover[0], hover[1], bounds.x, bounds.y], if self.ortho { "ortho" } else { "" });
+        vec![state.kept.draw(renderer, bounds.size(), key, |frame| draw(frame, bounds, self.yaw, self.pitch, state.hover, self.ortho))]
     }
 
     fn mouse_interaction(&self, state: &CubeState, bounds: Rectangle, cursor: mouse::Cursor) -> mouse::Interaction {

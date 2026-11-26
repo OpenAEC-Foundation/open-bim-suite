@@ -400,6 +400,7 @@ impl<M> canvas::Program<M> for ZeroPoints {
     type State = ();
 
     fn draw(&self, _: &(), renderer: &iced::Renderer, _: &iced::Theme, bounds: Rectangle, _: mouse::Cursor) -> Vec<canvas::Geometry> {
+        let _timed = crate::frame_log::canvas("ZeroPoints");
         let mut frame = Frame::new(renderer, bounds.size());
         let project = |world: Vec3| {
             let clip = self.view_proj * world.extend(1.0);

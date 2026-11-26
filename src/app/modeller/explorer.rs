@@ -128,7 +128,7 @@ impl App {
     }
 
     /// The rows of the explorer as it stands: the branches that are open show what they hold.
-    pub(in crate::app) fn explorer_rows(&self, l: Language) -> Vec<ExplorerRow> {
+    pub(crate) fn explorer_rows(&self, l: Language) -> Vec<ExplorerRow> {
         let open = |key: &str| self.modeller.explorer_open.contains(key);
         let branch = |depth: u8, key: &str, label: &str, count: usize| ExplorerRow {
             depth,
@@ -150,7 +150,7 @@ impl App {
         if open("storeys") {
             for level in levels {
                 let key = format!("level:{}", level.path);
-                let on: Vec<&Element> = elements.iter().copied().filter(|e| self.level_key(e) == key).collect();
+                let on: Vec<&Element> = elements.iter().copied().filter(|e| e.level.as_deref() == Some(level.path.as_str())).collect();
                 rows.push(ExplorerRow {
                     depth: 2,
                     key: key.clone(),
@@ -167,7 +167,7 @@ impl App {
             }
         }
         // what stands on no level
-        let loose: Vec<&Element> = elements.iter().copied().filter(|e| self.level_key(e) == "nolevel").collect();
+        let loose: Vec<&Element> = elements.iter().copied().filter(|e| !e.level.as_deref().is_some_and(|path| levels.iter().any(|level| level.path == path))).collect();
         if !loose.is_empty() {
             rows.push(branch(1, "nolevel", l.text("Zonder niveau", "No level"), loose.len()));
             if open("nolevel") {
@@ -184,12 +184,33 @@ impl App {
             }
         }
         // the types the elements use, by name
+        // (a build-up's name follows from all those of its role: they are named once a role,
+        // not once an element, or a large model would take its time at every frame)
+        let lang = crate::app::library::lang(l);
+        let mut named: std::collections::HashMap<&str, String> = std::collections::HashMap::new();
+        let mut roles = Vec::new();
         let mut types: Vec<(String, Vec<ElementId>)> = Vec::new();
+        let mut at: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         for e in &elements {
-            if let Some(name) = self.type_name(e, l) {
-                match types.iter_mut().find(|(n, _)| *n == name) {
-                    Some((_, ids)) => ids.push(e.id),
-                    None => types.push((name, vec![e.id])),
+            let name = match &e.shape {
+                Shape::Planar(bim_core::PlanarDef { build_up: Some(b), .. }) => {
+                    if !named.contains_key(b.id.as_str()) {
+                        if let Some(role) = self.library.buildup(&b.id).map(|b| b.role).filter(|role| !roles.contains(role)) {
+                            roles.push(role);
+                            named.extend(self.library.names(role, lang));
+                        }
+                    }
+                    Some(named.get(b.id.as_str()).cloned().unwrap_or_else(|| b.id.clone()))
+                }
+                _ => self.type_name(e, l),
+            };
+            if let Some(name) = name {
+                match at.get(&name) {
+                    Some(&i) => types[i].1.push(e.id),
+                    None => {
+                        at.insert(name.clone(), types.len());
+                        types.push((name, vec![e.id]));
+                    }
                 }
             }
         }

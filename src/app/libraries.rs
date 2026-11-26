@@ -1506,6 +1506,7 @@ impl<M> canvas::Program<M> for ComponentLook {
     type State = ();
 
     fn draw(&self, _state: &(), renderer: &iced::Renderer, _theme: &iced::Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<canvas::Geometry> {
+        let _timed = crate::frame_log::canvas("ComponentLook");
         let mut frame = Frame::new(renderer, bounds.size());
         for run in self.fitted(bounds.size()) {
             let path = Path::new(|b| {
@@ -1613,6 +1614,7 @@ impl<M> canvas::Program<M> for HatchLook {
     type State = HatchLookState;
 
     fn draw(&self, state: &HatchLookState, renderer: &iced::Renderer, _theme: &iced::Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<canvas::Geometry> {
+        let _timed = crate::frame_log::canvas("HatchLook");
         // (another hatch in the same place of the page, or another theme: drawn anew)
         let of = Some((self.hatch.key.as_str(), self.edge, self.scale));
         if state.of.get() != of {
@@ -1655,6 +1657,7 @@ impl<M> canvas::Program<M> for HatchTiles {
     type State = ();
 
     fn draw(&self, _state: &(), renderer: &iced::Renderer, _theme: &iced::Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<canvas::Geometry> {
+        let _timed = crate::frame_log::canvas("HatchTiles");
         let mut frame = Frame::new(renderer, bounds.size());
         let tile = Rectangle::new(Point::ORIGIN, Size::new(bounds.width, bounds.height));
         // (a hatch keeps its lines inside the band it is given)

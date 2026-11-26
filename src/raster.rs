@@ -169,6 +169,7 @@ impl<Message, F: Fn(&mut canvas::Frame, Rectangle)> canvas::Program<Message> for
     type State = ();
 
     fn draw(&self, _: &(), renderer: &iced::Renderer, _: &iced::Theme, bounds: Rectangle, _: iced::mouse::Cursor) -> Vec<canvas::Geometry> {
+        let _timed = crate::frame_log::canvas("Backdrop");
         let mut frame = canvas::Frame::new(renderer, bounds.size());
         (self.0)(&mut frame, bounds);
         vec![frame.into_geometry()]

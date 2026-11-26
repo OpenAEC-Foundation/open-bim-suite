@@ -91,6 +91,7 @@ impl canvas::Program<Message> for JoinMarks {
     }
 
     fn draw(&self, state: &MarksState, renderer: &iced::Renderer, _theme: &iced::Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<canvas::Geometry> {
+        let _timed = crate::frame_log::canvas("JoinMarks");
         let mut frame = Frame::new(renderer, bounds.size());
         for (id, p, picked) in &self.marks {
             let Some(at) = project(&self.view_proj, bounds.size(), *p) else { continue };

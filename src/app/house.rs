@@ -418,6 +418,7 @@ impl<M> canvas::Program<M> for SampleSheet {
     type State = ();
 
     fn draw(&self, _state: &(), renderer: &iced::Renderer, _theme: &iced::Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<canvas::Geometry> {
+        let _timed = crate::frame_log::canvas("SampleSheet");
         let mut frame = Frame::new(renderer, bounds.size());
         let (origin, scale) = self.fit(bounds.size());
         let at = |x: f64, y: f64| Point::new(origin.x + x as f32 * scale, origin.y + y as f32 * scale);

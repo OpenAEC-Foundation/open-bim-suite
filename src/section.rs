@@ -391,6 +391,7 @@ where
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
+        let _timed = crate::frame_log::canvas("SectionOverlay");
         let mut frame = Frame::new(renderer, bounds.size());
         let size = (bounds.width, bounds.height);
         let at = |w: Vec3| project(&self.view_proj, size, w);
@@ -645,6 +646,7 @@ where
     }
 
     fn draw(&self, state: &PlaneState, renderer: &iced::Renderer, _theme: &iced::Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<canvas::Geometry> {
+        let _timed = crate::frame_log::canvas("PlaneOverlay");
         let mut frame = Frame::new(renderer, bounds.size());
         let size = (bounds.width, bounds.height);
         let at = |w: Vec3| project(&self.view_proj, size, w);

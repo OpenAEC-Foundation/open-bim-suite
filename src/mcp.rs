@@ -298,6 +298,8 @@ pub fn tools() -> Vec<Value> {
             }), &["folder"], false),
         tool("open_drawing", "The project's own drawings: without a name, lists its floor plans, sections and elevations, and sheets; with one, opens that drawing in its tab (exact name, else the first that contains it).",
             json!({ "name": { "type": "string" } }), &[], false),
+        tool("place_view", "The Modeller: put a floor plan, a section or an elevation of the project on one of its sheets, in the middle of the paper, as dragging it there from the list of views does. Both by name (exact, else the first that contains it); open_drawing lists them.",
+            json!({ "sheet": { "type": "string" }, "view": { "type": "string" } }), &["sheet", "view"], false),
         tool("hover", "Rest the pointer on a pixel of the last viewport screenshot, as moving the mouse there does: a tool's preview runs to it, and elements grabbed with G follow it.",
             json!({ "x": { "type": "number" }, "y": { "type": "number" } }), &["x", "y"], false),
         tool("drag", "The Modeller, with the Select tool on: drag with the left button from one pixel of the last viewport screenshot to another, as the mouse does. It draws a selection box (to the right: what lies in it whole; to the left: what it touches too) over elements and grid lines, or, when it starts on a picked grid line, moves the picked grid lines. Tells what is selected after it and whether grid lines moved.",

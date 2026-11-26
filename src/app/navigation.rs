@@ -361,6 +361,7 @@ impl<M> canvas::Program<M> for PivotMark {
     type State = ();
 
     fn draw(&self, _state: &(), renderer: &iced::Renderer, _theme: &iced::Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<canvas::Geometry> {
+        let _timed = crate::frame_log::canvas("PivotMark");
         let mut frame = Frame::new(renderer, bounds.size());
         let view_proj = self.camera.view_proj(bounds.width / bounds.height.max(1.0));
         let screen = |p: Vec3| {
@@ -406,6 +407,7 @@ impl<M> canvas::Program<M> for Crosshair {
     type State = ();
 
     fn draw(&self, _state: &(), renderer: &iced::Renderer, _theme: &iced::Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<canvas::Geometry> {
+        let _timed = crate::frame_log::canvas("Crosshair");
         let mut frame = Frame::new(renderer, bounds.size());
         let c = self.at;
         let arms = [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)].map(|(dx, dy): (f32, f32)| {

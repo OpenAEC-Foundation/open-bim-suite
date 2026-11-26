@@ -596,6 +596,7 @@ impl canvas::Program<Message> for EditOverlay {
     }
 
     fn draw(&self, state: &EditState, renderer: &iced::Renderer, _theme: &iced::Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<canvas::Geometry> {
+        let _timed = crate::frame_log::canvas("EditOverlay");
         let mut frame = Frame::new(renderer, bounds.size());
         let shown: Vec<Option<Point>> = self.points.iter().map(|p| project(&self.view_proj, bounds.size(), *p)).collect();
         let n = shown.len();

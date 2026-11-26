@@ -185,6 +185,7 @@ impl<M> canvas::Program<M> for TempDimMarks {
     type State = ();
 
     fn draw(&self, _state: &(), renderer: &iced::Renderer, _theme: &iced::Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<canvas::Geometry> {
+        let _timed = crate::frame_log::canvas("TempDimMarks");
         let mut frame = Frame::new(renderer, bounds.size());
         let shown = |p: Vec3| {
             let c = self.view_proj.project_point3(p);

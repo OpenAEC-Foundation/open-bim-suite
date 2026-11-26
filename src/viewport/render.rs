@@ -182,7 +182,7 @@ impl shader::Primitive for ScenePrimitive {
         bounds: &Rectangle,
         viewport: &Viewport,
     ) {
-        pipeline.prepare(self, device, queue, bounds, viewport);
+        crate::frame_log::time(crate::frame_log::Phase::Prepare, String::new, || pipeline.prepare(self, device, queue, bounds, viewport));
     }
 
     fn render(

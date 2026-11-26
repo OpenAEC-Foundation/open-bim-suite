@@ -59,6 +59,7 @@ impl<Message> canvas::Program<Message> for BoxOverlay {
     type State = ();
 
     fn draw(&self, _state: &(), renderer: &iced::Renderer, _theme: &iced::Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<canvas::Geometry> {
+        let _timed = crate::frame_log::canvas("BoxOverlay");
         let mut frame = Frame::new(renderer, bounds.size());
         let (lo, hi) = (self.from.min(self.to), self.from.max(self.to));
         let outline = Path::rectangle(Point::new(lo.x, lo.y), Size::new(hi.x - lo.x, hi.y - lo.y));

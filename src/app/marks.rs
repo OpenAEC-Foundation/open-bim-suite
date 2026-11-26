@@ -838,6 +838,8 @@ pub(super) struct MarksState {
     drawing: Option<DrawKind>,
     /// The object snap the aim of a drawing tool is on.
     osnap: Option<Osnap>,
+    /// The paper and the hatched cut as drawn (see [`crate::kept_canvas`]).
+    kept: crate::kept_canvas::Kept,
 }
 
 impl ViewMarks {
@@ -1364,48 +1366,57 @@ impl canvas::Program<Message> for ViewMarks {
     }
 
     fn draw(&self, state: &MarksState, renderer: &iced::Renderer, _theme: &iced::Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<canvas::Geometry> {
+        let _timed = crate::frame_log::canvas("ViewMarks");
         let p = self.palette;
         let screen = self.screen(bounds);
-        let mut frame = Frame::new(renderer, bounds.size());
         let ink = p.text;
-        // as a sheet draws it: on paper, over the model as the 3D view shows it
-        if self.on_paper && self.image.is_none() {
-            let paper = if p.dark { Color::from_rgb(0.16, 0.16, 0.18) } else { Color::WHITE };
-            frame.fill_rectangle(Point::ORIGIN, bounds.size(), paper);
-        }
-        // the cut faces in their hatch, over the model's own cut fill
-        if let Some(cut) = &self.cut {
-            let per_metre = cut.extent.map_or(0.0, |(lo, _)| self.paper(&screen, lo.map(f64::from)) / self.scale as f32);
-            super::hatch::draw_fills(&mut frame, cut, self.crop, &|q| self.px(&screen, q), per_metre, if self.on_paper { None } else { Some(ink) });
-            if self.on_paper {
-                // its lines within its crop: what is seen beyond the cut thin and grey, the cut
-                // itself in ink, then those the view's filters give a pen of their own
-                let mut stroke = |segments: &[[[f32; 2]; 2]], color: Color, width: f32| {
-                    let path = Path::new(|path| {
-                        for s in segments {
-                            let (a, b) = (s[0].map(f64::from), s[1].map(f64::from));
-                            let Some((a, b)) = (match self.crop {
-                                Some((lo, hi)) => crate::drawing2d::clip(a, b, lo, hi),
-                                None => Some((a, b)),
-                            }) else { continue };
-                            if let (Some(a), Some(b)) = (self.px(&screen, a), self.px(&screen, b)) {
-                                path.move_to(a);
-                                path.line_to(b);
+        // the paper and the cut in its hatch take the time of this canvas: kept while the view,
+        // its camera and its cut stay as they are (the pointer moving over it changes none)
+        let key = crate::kept_canvas::key(
+            &[bounds.width, bounds.height, self.scale as f32, ink.r, ink.g, ink.b],
+            &format!("{:?}{:?}{:?}{:?}{}{}{}", self.camera, self.frame, self.crop, self.cut.as_ref().map(Arc::as_ptr), self.on_paper, self.image.is_none(), p.dark),
+        );
+        let under = state.kept.draw(renderer, bounds.size(), key, |frame| {
+            // as a sheet draws it: on paper, over the model as the 3D view shows it
+            if self.on_paper && self.image.is_none() {
+                let paper = if p.dark { Color::from_rgb(0.16, 0.16, 0.18) } else { Color::WHITE };
+                frame.fill_rectangle(Point::ORIGIN, bounds.size(), paper);
+            }
+            // the cut faces in their hatch, over the model's own cut fill
+            if let Some(cut) = &self.cut {
+                let per_metre = cut.extent.map_or(0.0, |(lo, _)| self.paper(&screen, lo.map(f64::from)) / self.scale as f32);
+                super::hatch::draw_fills(frame, cut, self.crop, &|q| self.px(&screen, q), per_metre, if self.on_paper { None } else { Some(ink) });
+                if self.on_paper {
+                    // its lines within its crop: what is seen beyond the cut thin and grey, the cut
+                    // itself in ink, then those the view's filters give a pen of their own
+                    let mut stroke = |segments: &[[[f32; 2]; 2]], color: Color, width: f32| {
+                        let path = Path::new(|path| {
+                            for s in segments {
+                                let (a, b) = (s[0].map(f64::from), s[1].map(f64::from));
+                                let Some((a, b)) = (match self.crop {
+                                    Some((lo, hi)) => crate::drawing2d::clip(a, b, lo, hi),
+                                    None => Some((a, b)),
+                                }) else { continue };
+                                if let (Some(a), Some(b)) = (self.px(&screen, a), self.px(&screen, b)) {
+                                    path.move_to(a);
+                                    path.line_to(b);
+                                }
                             }
-                        }
-                    });
-                    frame.stroke(&path, Stroke::default().with_color(color).with_width(width));
-                };
-                let beyond = Color { a: 0.55, ..ink };
-                stroke(&cut.below, beyond, 0.5);
-                stroke(&cut.segments, ink, 1.1);
-                for inked in &cut.inked {
-                    let (plain, width) = if inked.cut { (ink, 1.1) } else { (beyond, 0.5) };
-                    let color = inked.ink.color.map_or(plain, |c| Color::from_rgb8(c[0], c[1], c[2]));
-                    stroke(&inked.lines, color, inked.ink.wide(width, inked.cut));
+                        });
+                        frame.stroke(&path, Stroke::default().with_color(color).with_width(width));
+                    };
+                    let beyond = Color { a: 0.55, ..ink };
+                    stroke(&cut.below, beyond, 0.5);
+                    stroke(&cut.segments, ink, 1.1);
+                    for inked in &cut.inked {
+                        let (plain, width) = if inked.cut { (ink, 1.1) } else { (beyond, 0.5) };
+                        let color = inked.ink.color.map_or(plain, |c| Color::from_rgb8(c[0], c[1], c[2]));
+                        stroke(&inked.lines, color, inked.ink.wide(width, inked.cut));
+                    }
                 }
             }
-        }
+        });
+        let mut frame = Frame::new(renderer, bounds.size());
         // the sections drawn on the plan: with the section tool, or over the model (as on a sheet
         // the view shows the marks it has itself)
         for (name, from, to) in self.sections.iter().filter(|_| self.cutting || !self.on_paper) {
@@ -1544,7 +1555,7 @@ impl canvas::Program<Message> for ViewMarks {
         if let Some(a) = state.first.and_then(|q| self.px(&screen, q)) {
             frame.fill(&Path::circle(a, 3.0), p.accent);
         }
-        vec![frame.into_geometry()]
+        vec![under, frame.into_geometry()]
     }
 
     fn mouse_interaction(&self, state: &MarksState, bounds: Rectangle, cursor: mouse::Cursor) -> mouse::Interaction {
