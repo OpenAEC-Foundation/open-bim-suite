@@ -381,6 +381,8 @@ pub struct State {
     pub open_group: Option<usize>,
     /// Colours, sets and takeoffs.
     pub inform: super::inform::State,
+    /// The views made of rules, of the Colours tab.
+    pub views: super::rule_views::State,
     /// A point cloud against the model.
     pub cloud: super::cloud::State,
     /// The PDF report being made.
@@ -482,6 +484,9 @@ pub struct State {
     guids: Option<(u64, Arc<HashMap<String, u64>>)>,
     /// The topic a picture of the view is being taken for.
     shot_for: Option<String>,
+    /// The dimensions and remarks drawn in the view came from an issue's viewpoint: they go
+    /// when another issue is shown, the issue is removed or other issues come in.
+    markup: bool,
 }
 
 impl Default for State {
@@ -510,6 +515,7 @@ impl Default for State {
             open_group: None,
             matrix_amount: String::new(),
             inform: Default::default(),
+            views: Default::default(),
             cloud: Default::default(),
             report_job: None,
             rerun: false,
@@ -572,6 +578,7 @@ impl Default for State {
             run: 0,
             guids: None,
             shot_for: None,
+            markup: false,
         }
     }
 }
@@ -840,6 +847,8 @@ pub enum Event {
     ShowClosed(bool),
     OnlyFailed(bool),
     RemoveTopic,
+    /// Take away the dimensions and remarks of the viewpoint shown.
+    ClearMarkup,
     RuleSet(usize),
     ModelChecks(bool),
     Ils(bool),
@@ -884,6 +893,7 @@ pub enum Event {
     ReportShot(Arc<iced::window::Screenshot>),
     /// Colours, sets and takeoffs.
     Inform(super::inform::Event),
+    Views(super::rule_views::Event),
     /// A point cloud against the model.
     Cloud(super::cloud::Event),
     IssueFromClash(usize),
@@ -1491,6 +1501,7 @@ impl App {
                 self.collab.issues = issues;
                 self.collab.issues_path = None;
                 self.collab.topic = None;
+                self.collab_clear_markup();
                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 self.collab_note(Tone::Success, format!("{count} {} {name}", l.text("issues uit", "issues from")));
             }
@@ -1526,7 +1537,7 @@ impl App {
 
     /// Goes to elements a list names: selects them, alone when the panel isolates, and frames
     /// them.
-    fn collab_go_to(&mut self, ids: impl IntoIterator<Item = u64>) {
+    pub(super) fn collab_go_to(&mut self, ids: impl IntoIterator<Item = u64>) {
         if self.collab.isolate {
             self.show_all_elements();
         }
@@ -1571,6 +1582,15 @@ impl App {
     }
 
     /// Shows a viewpoint: what it hides, selects and cuts, from where it looks.
+    /// Takes away the dimensions and remarks an issue's viewpoint drew, with what was measured
+    /// over them; what was measured while no issue drew any stays.
+    pub(crate) fn collab_clear_markup(&mut self) {
+        if std::mem::take(&mut self.collab.markup) {
+            self.measure.results.clear();
+            self.measure.picks.clear();
+        }
+    }
+
     fn collab_show_viewpoint(&mut self, view: &Viewpoint) {
         let guids = self.collab_guids();
         let ids = |list: &[String]| -> Vec<u64> { list.iter().filter_map(|g| guids.get(g).copied()).collect() };
@@ -1587,12 +1607,19 @@ impl App {
             }
         }
         self.collab_select(ids(&view.selection));
-        // its dimensions and remarks come back in place of what was measured
+        // the panel isolates what is clicked: the issue's own elements alone
+        if self.collab.isolate && view.exceptions.is_empty() && !view.selection.is_empty() && !self.sel.is_empty() {
+            self.isolate_selection();
+        }
+        // its dimensions and remarks come back in place of what was measured; those of the issue
+        // shown before go, also when this one has none
+        self.collab_clear_markup();
         if !(view.lines.is_empty() && view.notes.is_empty() && view.marks.is_empty()) {
             let lines = view.lines.iter().map(|(from, to)| crate::measure::Measurement::Distance(crate::measure::geometry::Distance { p1: self.collab_to_display(*from), p2: self.collab_to_display(*to), extensions: Vec::new() }));
             let notes = view.notes.iter().map(|(at, text)| crate::measure::Measurement::Note { at: self.collab_to_display(*at), text: text.clone() });
             let marks = view.marks.iter().filter_map(|(kind, points)| Some(crate::measure::Measurement::Mark { kind: crate::measure::MarkKind::parse(kind)?, points: points.iter().map(|p| self.collab_to_display(*p)).collect() }));
             self.measure.results = lines.chain(notes).chain(marks).collect();
+            self.collab.markup = true;
         }
         // A clash viewpoint carries six outward-facing planes around its local section.
         let mut lo = Vec3::splat(f32::NEG_INFINITY);
@@ -2431,6 +2458,7 @@ impl App {
             Event::Opened(_, None) => {}
             Event::Opened(File::Bcf, Some(path)) => match std::fs::read(&path).map_err(|e| e.to_string()).and_then(|bytes| Issues::read(&bytes)) {
                 Ok(issues) => {
+                    self.collab_clear_markup();
                     let count = issues.topics.len();
                     let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                     // who it comes from: the name typed, else who wrote most of it
@@ -2534,8 +2562,10 @@ impl App {
                 self.collab.labels_text = guid.as_ref().and_then(|g| self.collab.issues.topics.iter().find(|t| &t.guid == g)).map(|t| t.labels.join(", ")).unwrap_or_default();
                 self.collab.comment.clear();
                 let view = guid.and_then(|g| self.collab.issues.topics.iter().find(|t| t.guid == g)).and_then(|t| t.viewpoints.first().cloned());
-                if let Some(view) = view {
-                    self.collab_show_viewpoint(&view);
+                match view {
+                    Some(view) => self.collab_show_viewpoint(&view),
+                    // another issue, or none: the dimensions of the one before go
+                    None => self.collab_clear_markup(),
                 }
             }
             Event::Viewpoint(guid, k) => {
@@ -2735,6 +2765,7 @@ impl App {
                     topic.comment(draft.trim(), &author, at);
                 }
             }
+            Event::ClearMarkup => self.collab_clear_markup(),
             Event::RemoveTopic => {
                 if let Some(guid) = self.collab.topic.take() {
                     self.collab.share_removed.push(guid.clone());
@@ -2743,6 +2774,7 @@ impl App {
                     }
                     self.collab.issues.topics.retain(|t| t.guid != guid);
                     self.collab.issues_changed = true;
+                    self.collab_clear_markup();
                 }
             }
             Event::RuleSet(k) => {
@@ -3112,6 +3144,7 @@ impl App {
                 return self.collab_clash_shot_next();
             }
             Event::Inform(e) => return self.inform_handle(e),
+            Event::Views(e) => return self.rule_views_handle(e),
             Event::Cloud(e) => return self.cloud_handle(e),
             Event::ReportShot(shot) => {
                 let picture = self.viewport_picture(&shot);
@@ -3495,6 +3528,9 @@ impl App {
                 self.collab.partial_run = false;
                 let mut rows = run_clashes(&model, &models, &rules.clash_rules(), &AtomicBool::new(false));
                 self.collab_take_clashes(&mut rows);
+                // the clash picked in the run before is no longer there, nor its marker
+                self.collab.clash = None;
+                self.collab.open_group = None;
                 self.collab.clashes = rows;
                 group_clashes(&mut self.collab.clashes, self.collab.grouping);
                 self.collab.show_tests = self.collab.clashes.is_empty();
@@ -3503,6 +3539,8 @@ impl App {
                 if !self.collab.clashes.is_empty() {
                     let _ = self.collab_update(Event::PickClash(0));
                     self.finish_animation();
+                } else {
+                    self.refresh_overlay();
                 }
             }
             Some("issues") | None => {}
@@ -3591,7 +3629,7 @@ impl App {
             Tab::Checks => self.collab_checks(look, l),
             Tab::Clashes => self.collab_clashes(look, l),
             Tab::Compare => column![self.collab_compare(look, l), w::divider(look), self.cloud_view(look, l)].spacing(8).into(),
-            Tab::Colours => self.inform_colours(look, l),
+            Tab::Colours => self.inform_colours(look, l, &state.sides),
             Tab::Takeoff => self.inform_takeoffs(look, l, &state.sides),
         };
         body.push(scrollable(container(content).padding(iced::Padding { right: 10.0, ..iced::Padding::ZERO })).height(Length::Fill)).height(Length::Fill).into()
@@ -3829,6 +3867,10 @@ impl App {
             for k in 0..topic.viewpoints.len() {
                 let label = format!("{} {}", l.text("Standpunt", "Viewpoint"), k + 1);
                 views = views.push(named(button(text(label.clone()).size(12)).padding([3, 8]).style(move |_, s| p.ribbon_button(true, s)).on_press(go(Event::Viewpoint(topic.guid.clone(), k))), Node::new(Role::Button, label)));
+            }
+            if self.collab.markup {
+                let label = l.text("Markeringen wissen", "Clear markups");
+                views = views.push(named(button(text(label).size(12)).padding([3, 8]).style(move |_, s| p.ribbon_button(false, s)).on_press(go(Event::ClearMarkup)), Node::new(Role::Button, label)));
             }
             detail = detail.push(views.wrap());
             let mut facts = vec![format!("{} {}", first.selection.len(), l.text("geselecteerd", "selected"))];
@@ -4605,6 +4647,9 @@ impl App {
         if cmd == "collab_cloud" {
             return self.cloud_command(a);
         }
+        if cmd == "collab_views" {
+            return self.rule_views_command(a);
+        }
         if matches!(cmd, "collab_colours" | "collab_sets" | "collab_takeoff") {
             return self.inform_command(cmd, a);
         }
@@ -4968,12 +5013,12 @@ fn spec_tone(status: ValidationStatus, severity: Severity) -> Option<Tone> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::model::Layer;
 
     /// Two boxes as elements 1 and 2 of one layer, the second sunk into the first.
-    pub(super) fn two_blocks() -> Model {
+    pub(crate) fn two_blocks() -> Model {
         let mut layer = Layer { name: "Walls".into(), color: [0.8; 3], positions: Vec::new(), normals: Vec::new(), colors: None, indices: Vec::new(), elements: Vec::new(), props: Vec::new(), hidden: false, points: false, lines: Vec::new(), line_elements: Vec::new(), splats: None, texturing: None };
         for (id, lo, hi) in [(1u64, [0.0f32, 0.0, 0.0], [4.0f32, 0.2, 3.0]), (2, [1.0, -1.0, 1.0], [1.3, 1.0, 1.3])] {
             let first = layer.indices.len() as u32;
@@ -5528,11 +5573,83 @@ mod tests {
         assert!(matches!(&back[2], Measurement::Mark { kind: crate::measure::MarkKind::Cloud, points } if points.len() == 3), "{back:?}");
         assert!(matches!(&back[0], Measurement::Distance(d) if d.p1.distance(Vec3::ZERO) < 1e-4 && d.p2.distance(Vec3::new(3.0, 4.0, 0.0)) < 1e-4), "{back:?}");
         assert!(matches!(&back[1], Measurement::Note { at, text } if at.distance(Vec3::new(1.0, 1.0, 2.0)) < 1e-4 && text == "Te laag"), "{back:?}");
-        // an issue without any leaves what is measured alone
+        // an issue without any takes those of the issue before away
         let plain = Topic::new("Zonder", "an");
         app.collab.issues.topics.push(plain.clone());
         let _ = app.collab_update(Event::Topic(Some(plain.guid.clone())));
-        assert_eq!(app.measure.results.len(), 3);
+        assert!(app.measure.results.is_empty(), "{:?}", app.measure.results);
+        // and leaves what is measured by hand alone
+        app.measure.results.push(Measurement::Note { at: Vec3::ZERO, text: "hier".into() });
+        let _ = app.collab_update(Event::Topic(Some(plain.guid.clone())));
+        assert_eq!(app.measure.results.len(), 1);
+    }
+
+    #[test]
+    fn the_dimensions_of_an_issue_go_when_it_is_removed_or_other_issues_come_in() {
+        use crate::measure::{geometry::Distance, Measurement};
+        let mut app = App::default();
+        app.set_model(Arc::new(two_blocks()));
+        let with_lines = |app: &mut App| {
+            app.measure.results = vec![Measurement::Distance(Distance { p1: Vec3::ZERO, p2: Vec3::new(1.2, 0.0, 0.0), extensions: Vec::new() })];
+            let mut topic = Topic::new("Maat", "an");
+            topic.viewpoints.push(app.collab_viewpoint_now());
+            app.measure.results.clear();
+            app.collab.issues.topics.push(topic.clone());
+            let _ = app.collab_update(Event::Topic(Some(topic.guid.clone())));
+            assert_eq!(app.measure.results.len(), 1);
+        };
+        // removed
+        with_lines(&mut app);
+        let _ = app.collab_update(Event::RemoveTopic);
+        assert!(app.measure.results.is_empty() && app.collab.issues.topics.is_empty());
+        // another BCF opened
+        with_lines(&mut app);
+        let dir = std::env::temp_dir().join(format!("o3v-markup-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let other = dir.join("other.bcf");
+        std::fs::write(&other, Issues::default().write().unwrap()).unwrap();
+        let _ = app.collab_update(Event::Opened(File::Bcf, Some(other)));
+        assert!(app.measure.results.is_empty(), "{:?}", app.measure.results);
+        // by hand, with the button
+        with_lines(&mut app);
+        let _ = app.collab_update(Event::ClearMarkup);
+        assert!(app.measure.results.is_empty() && !app.collab.markup);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_takeoff_row_clicked_while_isolating_shows_its_elements_alone() {
+        let mut app = App::default();
+        app.set_model(Arc::new(two_blocks()));
+        app.schedules = vec![crate::model::Schedule {
+            name: "Takeoff".into(),
+            rows: vec![
+                crate::model::ScheduleRow { elements: vec![1], ..Default::default() },
+                crate::model::ScheduleRow { elements: vec![2], ..Default::default() },
+                crate::model::ScheduleRow { elements: vec![1, 2], total: true, ..Default::default() },
+            ],
+            computed: true,
+            ..Default::default()
+        }];
+        // not isolating: the row only selects
+        let _ = app.update(Message::ScheduleRow(0, 0));
+        assert_eq!(app.sel.items(), [Pickable::Element(1)]);
+        assert!(app.hidden.is_empty());
+        // isolating: the row alone, another row in its place
+        let _ = app.collab_update(Event::Isolate(true));
+        let _ = app.update(Message::ScheduleRow(0, 1));
+        assert_eq!(app.sel.items(), [Pickable::Element(2)]);
+        let alone = app.hidden.len();
+        assert!(alone > 0);
+        // with Ctrl the rows are taken together
+        app.modifiers = iced::keyboard::Modifiers::CTRL;
+        let _ = app.update(Message::ScheduleRow(0, 0));
+        assert_eq!(app.sel.len(), 2);
+        app.modifiers = iced::keyboard::Modifiers::default();
+        // the same row again shows everything
+        let _ = app.update(Message::ScheduleRow(0, 2));
+        let _ = app.update(Message::ScheduleRow(0, 2));
+        assert!(app.hidden.is_empty() && app.sel.is_empty());
     }
 
     #[test]

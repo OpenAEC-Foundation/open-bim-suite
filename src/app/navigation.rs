@@ -54,7 +54,7 @@ pub(crate) struct Navigation {
     /// The levels of 2D drawing of the model shown, found once per model.
     flat: Option<FlatLevels>,
     /// Where looking around holds the hidden cursor (viewport, logical pixels): a crosshair.
-    held: Option<(f32, f32)>,
+    pub(super) held: Option<(f32, f32)>,
 }
 
 /// The levels of 2D drawing of a model (model space): per layer, the line segments that lie

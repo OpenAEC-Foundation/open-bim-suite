@@ -206,7 +206,7 @@ pub fn tools() -> Vec<Value> {
                 "distance": { "type": "number" }, "fov_deg": { "type": "number" },
                 "projection": { "type": "string", "enum": ["perspective", "orthographic"] }
             }), &[], false),
-        tool("navigate", "Move the camera relative to where it is, as dragging and the wheel do: orbit around the target (degrees), pan (metres, screen right/up), move forward (metres) and zoom (factor, 2 = twice as close).",
+        tool("navigate", "Move the camera relative to where it is, as dragging and the wheel do: orbit around the target (degrees), pan (metres, screen right/up), move forward (metres) and zoom (factor, 2 = twice as close). With a sheet open in its tab, zooms that sheet (factor) and pans it (pixels) instead.",
             json!({
                 "orbit_yaw_deg": { "type": "number" }, "orbit_pitch_deg": { "type": "number" },
                 "pan_right": { "type": "number" }, "pan_up": { "type": "number" },
@@ -367,6 +367,12 @@ pub fn tools() -> Vec<Value> {
             json!({
                 "action": { "type": "string", "enum": ["list", "save", "add", "select", "isolate", "hide", "remove"] },
                 "name": { "type": "string" }, "property": { "type": "string" }, "value": { "type": "string" }, "index": { "type": "integer" }
+            }), &[], false),
+        tool("collab_views", "Views made of rules, kept in the rule set: each rule takes elements (take: {classes: [\"IfcWall*\"], models, layers, names}, and/or a property with a value, * for any) and hides them or shows them in a colour ([r, g, b], none: their own) and transparency (per cent); the first rule that takes an element counts; others: as_they_are, see_through or hidden. list them, save one (with index: in its place), show one (gives the elements per rule), off, remove one.",
+            json!({
+                "action": { "type": "string", "enum": ["list", "save", "show", "off", "remove"] },
+                "index": { "type": "integer" },
+                "view": { "type": "object", "description": "{name, rules: [{take, property, value, hide, colour, transparency}], others}" }
             }), &[], false),
         tool("collab_takeoff", "Information takeoff: the elements (by class, e.g. [\"IfcWall*\"], and/or a property value) grouped by up to two properties (model, layer, class, type or a property key), with count, length, area and volume from the geometry. make shows it as a table under the 3D view (Excel from there) and returns its rows; keep stores it in the rule set; list gives those kept.",
             json!({

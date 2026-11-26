@@ -604,8 +604,9 @@ impl App {
             "measure_angle" => self.measure_angle(a),
             "measure_between_elements" => self.measure_between_elements(a),
             "clear_measurements" => {
-                let n = self.measurements.len();
-                self.measurements.clear();
+                // the saved ones and those drawn (also an issue's dimensions), as "Clear all" does
+                let n = self.measurements.len() + self.measure.results.len();
+                let _ = self.update(Message::MeasureClear);
                 Ok(json!({ "cleared": n }))
             }
             #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
@@ -1582,6 +1583,19 @@ impl App {
     }
 
     fn navigate(&mut self, a: &Value) -> Answer {
+        // an open sheet is zoomed and panned as the wheel and the middle button do it: zoom a
+        // factor about its middle (2 = twice as large), pan in pixels
+        if self.active_doc_sheet.is_some() && !self.booklet.shown {
+            if let Some(f) = num(a, "zoom") {
+                if f <= 0.0 {
+                    return Err("zoom is a factor > 0 (2 = twice as large)".into());
+                }
+                self.sheet_zoom = (self.sheet_zoom * f64::from(f)).clamp(0.2, 400.0);
+            }
+            self.sheet_pan[0] += f64::from(num(a, "pan_right").unwrap_or(0.0));
+            self.sheet_pan[1] -= f64::from(num(a, "pan_up").unwrap_or(0.0));
+            return Ok(json!({ "sheet": self.active_doc_sheet, "zoom": self.sheet_zoom, "pan": self.sheet_pan }));
+        }
         self.anim = None;
         let max_pitch = 89.9f32.to_radians();
         let c = &mut self.camera;
@@ -2235,6 +2249,21 @@ mod tests {
         assert_eq!(hit["element"], json!(7));
         assert_eq!(hit["normal"], json!([1.0, 0.0, 0.0]));
         assert!((hit["point"][0].as_f64().unwrap() - 2.0).abs() < 1e-3, "{hit}");
+    }
+
+    #[test]
+    fn navigate_zooms_and_pans_an_open_sheet() {
+        let mut app = App::default();
+        let _ = app.update(crate::app::Message::NewModel("Level 0"));
+        let _ = app.update(crate::app::Message::NewSheet("Sheet"));
+        assert!(app.active_doc_sheet.is_some());
+        let distance = app.camera.distance;
+        let zoomed = run(&mut app, "navigate", json!({ "zoom": 3, "pan_right": 40, "pan_up": 10 })).unwrap();
+        assert_eq!((zoomed["zoom"].as_f64(), app.sheet_zoom, app.sheet_pan), (Some(3.0), 3.0, [40.0, -10.0]));
+        assert_eq!(app.camera.distance, distance, "the 3D camera stays where it was");
+        // as the wheel does, no further than 400 times
+        run(&mut app, "navigate", json!({ "zoom": 1000 })).unwrap();
+        assert_eq!(app.sheet_zoom, 400.0);
     }
 
     /// `pick` names a grid line under the pixel, as a click takes it before what lies behind it,

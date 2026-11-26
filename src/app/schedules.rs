@@ -139,9 +139,30 @@ impl App {
         self.set_structural_selection(Vec::new());
         let Some(r) = self.schedules.get(schedule).and_then(|s| s.rows.get(row)) else { return };
         let drawn: HashSet<u64> = model.layers.iter().flat_map(|l| l.elements.iter().map(|e| e.0)).collect();
-        let items: Vec<Pickable> = r.elements.iter().filter(|id| drawn.contains(id)).map(|&id| Pickable::Element(id)).collect();
-        self.sel.clear();
-        self.sel.extend(items);
+        let ids: Vec<u64> = r.elements.iter().copied().filter(|id| drawn.contains(id)).collect();
+        // with Ctrl or Shift the row's elements join those selected (rows taken together)
+        let add = self.modifiers.control() || self.modifiers.shift();
+        #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
+        if self.collab.isolate {
+            // the Validator isolates what is clicked: this row alone, another row in its place,
+            // the same row again shows everything
+            if !add && self.picked_row == Some((schedule, row)) {
+                self.picked_row = None;
+                self.sel.clear();
+                self.selection_changed();
+                self.show_all_elements();
+                return;
+            }
+            self.picked_row = Some((schedule, row));
+            let mut all: Vec<u64> = if add { self.sel.items().iter().filter_map(|i| if let Pickable::Element(id) = i { Some(*id) } else { None }).collect() } else { Vec::new() };
+            all.extend(ids);
+            self.collab_go_to(all);
+            return;
+        }
+        if !add {
+            self.sel.clear();
+        }
+        self.sel.extend(ids.into_iter().map(Pickable::Element));
         self.selection_changed();
     }
 

@@ -27,14 +27,14 @@ impl Message {
     pub(crate) fn allowed_in_viewer(&self) -> bool {
         use Message::*;
         matches!(self,
-            OpenDialog | OpenFolderDialog | AddDialog | Open(_) | Picked(_) | AddPicked(_) | AddSeveral(_) | Loaded(_) |
+            OpenDialog | OpenFolderDialog | AddDialog | Open(_) | Dropped(_) | Picked(_) | AddPicked(_) | AddSeveral(_) | Loaded(_) |
             ModelVisible(..) | PickModel(_) | ToggleFolder(_) | ViewOrder(_) | ProjectView(_) | Origin(super::origin::Message::Map(..)) |
             BuildFilmDialog | BuildFilmPicked(_) | BuildFilmDone(_) | RenderDialog | RenderPicked(_) | Saved(_) |
             Mode(_) | ToggleGrid | ToggleFlipUp | Theme(_) | Tab(_) | Preset(_) | Ortho(_) | Fit | NavigateSheet { .. } |
             ToggleLayersPanel | TogglePropertiesPanel | Layer(..) | AllLayers(_) | ToggleLayerGroup(_) | LayerGroup(..) |
             LayerFilter(_) | SideTab(_) | LayersQuery(_) | Navigate(_) | Cube(_) | ApplyView(_) | ToggleGrids |
             ToggleExplorer(_) | ToggleViewGroup(_) | ExplorerTab(_) | OpenPlan(_) | OpenDocSheet(_) | ReleaseView(_) |
-            Docs(super::docs::DocsMessage::Close) | Walk { .. } | DrawingOnPaper(_) | PickOnSheet(_) | PickMark(_) |
+            Docs(super::docs::DocsMessage::Close) | WalkKey { .. } | WalkStop | Modifiers(_) | KeyNavigation(_) | MouseButtons(_) | DrawingOnPaper(_) | PickOnSheet(_) | PickMark(_) |
             ToggleViewsIn3d | ToggleAmbient | CloudColor(_) | Field(_) | ToggleCloudDepth | Analysis(_) | AnalysisScale(_) |
             AnalysisScaleDone | ToggleGridHeadsHidden | ToggleGridDims | ToggleLevels3d | ExportMenu(_) | ExportDrawing(_) |
             Exported(_) | SelectTab(_) | CloseTab(_) | OpenSheet(_) | OpenDraft(_) | PickDraft(_) | ShowSheet(_) | CloseSheet(_) |

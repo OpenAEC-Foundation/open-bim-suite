@@ -19,6 +19,8 @@ mod ifc_graph;
 #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
 mod inform;
 #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
+mod rule_views;
+#[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
 mod clash_words;
 #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
 mod room_checks;
@@ -94,6 +96,7 @@ mod sheets;
 mod structural;
 mod underlays;
 mod views_in_3d;
+pub mod walk;
 
 pub use docs::{DocsMessage, DocsTab};
 pub use libraries::LibrariesMessage;
@@ -177,6 +180,13 @@ pub enum Status {
     Error(String),
 }
 
+/// Where Save writes: a model file in a format (and IFC schema), or a project.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum SaveTarget {
+    Model(PathBuf, export::IfcSchema),
+    Project(PathBuf),
+}
+
 pub struct App {
     pub theme: ThemeKind,
     pub model: Option<Arc<Model>>,
@@ -240,6 +250,9 @@ pub struct App {
     /// The schema the next save writes a `.ifc` in (Export IFC 4x3, `save_file` with a schema);
     /// back to IFC 4 once that save starts.
     pub(crate) save_schema: export::IfcSchema,
+    /// Where Save (Ctrl+S) writes without asking: the file or project saved to, or opened as a
+    /// project, last.
+    pub(crate) save_target: Option<SaveTarget>,
     pub viewport_size: (f32, f32),
     /// The last press was a finger's, not the mouse's: the hint shows the touch gestures.
     pub fingers: bool,
@@ -310,8 +323,8 @@ pub struct App {
     /// Sheets of the document open in a document tab (paths), and the one shown.
     pub open_doc_sheets: Vec<String>,
     pub active_doc_sheet: Option<String>,
-    sheet_zoom: f64,
-    sheet_pan: [f64; 2],
+    pub(crate) sheet_zoom: f64,
+    pub(crate) sheet_pan: [f64; 2],
     /// The cut of every floor plan placed on a sheet, by the plan's path.
     pub cuts: std::collections::HashMap<String, Arc<crate::drawing::Cut>>,
     /// The drawings laid on the levels.
@@ -335,6 +348,8 @@ pub struct App {
     pub ambient: bool,
     /// What a drag with each mouse button does in the viewport (kept between sessions).
     pub mouse_buttons: crate::viewport::MouseButtons,
+    /// What W, A, S and D do in the 3D view: fly, walk or nothing (a setting).
+    pub key_navigation: walk::KeyNavigation,
     /// The size a point of a cloud is drawn at (pixels).
     pub point_size: f32,
     /// Shade the points of a cloud by depth (eye-dome lighting).
@@ -414,7 +429,7 @@ pub struct App {
     /// The IFC tab: how the model's IFCX file is built up.
     pub ifc: IfcTab,
     /// The booklet: every sheet of the document in one tab.
-    pub booklet: paper::Booklet,
+    pub(crate) booklet: paper::Booklet,
     /// Docs: the documents of the project folder.
     pub docs: DocsTab,
     /// Library, the product: the source and the country its page shows.
@@ -519,6 +534,13 @@ pub struct App {
     /// The navigation under way: the point a drag orbits about, the depth it pans at, the
     /// point the wheel moves towards.
     nav: navigation::Navigation,
+    /// The keys that walk through the model (W, A, S, D, Q, E), held now.
+    walking: walk::Walking,
+    /// Ctrl, Shift and Alt as they are held now.
+    pub(crate) modifiers: keyboard::Modifiers,
+    /// The row of a schedule (or takeoff) clicked last, while the Validator isolates what is
+    /// clicked: clicking it again shows everything.
+    pub(crate) picked_row: Option<(usize, usize)>,
     /// The selection and hover of structural nodes and members.
     pub(crate) structural: structural::StructuralView,
     /// The modelled elements and the tool placing them.
@@ -555,6 +577,11 @@ pub enum Message {
     OpenFolderDialog,
     AddDialog,
     Open(PathBuf),
+    /// Save where it was saved last, else ask where (Save as, or Save project with more models).
+    Save,
+    /// A file dropped on the window: added to the model that is open, else opened (a project
+    /// opens as itself).
+    Dropped(PathBuf),
     Picked(Option<loaders::Source>),
     AddPicked(Option<loaders::Source>),
     /// Several files to add at once: read one after the other, shown together.
@@ -705,6 +732,8 @@ pub enum Message {
     ShowBooklet,
     /// Writes every sheet of the document as one PDF, a page per sheet.
     ExportBooklet,
+    /// The modelled elements as one STEP file of their exact solids.
+    ExportStep,
     RemoveSheet(Arc<str>),
     /// Place a floor plan on a sheet: sheet, plan.
     PlaceOnSheet(Arc<str>, Arc<str>),
@@ -712,9 +741,13 @@ pub enum Message {
     MoveOnSheet(Arc<str>, usize, [f64; 2]),
     /// Switch the dimension tool of the sheets on or off.
     DimensionTool(bool),
-    /// A step through the model as the camera looks (W, A, S, D; Q and E down and up):
-    /// forward, to the right and up, in steps; `fast` with Shift.
-    Walk { forward: f32, right: f32, up: f32, fast: bool },
+    /// A key that walks through the model went down or up (W, A, S, D; Q and E down and up),
+    /// `fast` with Shift: the camera moves every frame while one is held (`app::walk`).
+    WalkKey { key: char, down: bool, fast: bool },
+    /// Every walking key let go (the window lost the keyboard).
+    WalkStop,
+    /// Ctrl, Shift or Alt went down or up: a row clicked with Ctrl or Shift adds to the selection.
+    Modifiers(keyboard::Modifiers),
     /// A view's tab draws it as on a sheet, or over the model.
     DrawingOnPaper(bool),
     /// Crop a floor plan (its path) to a rectangle in plan, or show all of it (`None`).
@@ -785,6 +818,8 @@ pub enum Message {
     ToggleAmbient,
     /// What a drag with each mouse button does in the viewport.
     MouseButtons(crate::viewport::MouseButtons),
+    /// The setting of what W, A, S and D do in the 3D view.
+    KeyNavigation(walk::KeyNavigation),
     /// Colour the points of the clouds another way.
     CloudColor(crate::cloud_color::CloudColor),
     /// Colour the mesh of a simulation file by another field, or show another time step.
@@ -1151,6 +1186,7 @@ impl Default for App {
             parked_histories: Default::default(),
             status: Status::Ready,
             save_schema: export::IfcSchema::default(),
+            save_target: None,
             viewport_size: (1000.0, 700.0),
             fingers: false,
             initial_view: None,
@@ -1199,6 +1235,7 @@ impl Default for App {
             views_in_3d: false,
             ambient: false,
             mouse_buttons: Default::default(),
+            key_navigation: Default::default(),
             point_size: 2.5,
             cloud_depth: true,
             analysis: crate::structural::diagrams::Shown { scale: 1.0, ..Default::default() },
@@ -1293,6 +1330,9 @@ impl Default for App {
             hover_scene: None,
             pick_index: None,
             nav: Default::default(),
+            walking: Default::default(),
+            modifiers: keyboard::Modifiers::default(),
+            picked_row: None,
             structural: Default::default(),
             modeller: Default::default(),
         }
@@ -1832,23 +1872,6 @@ impl App {
         true
     }
 
-    /// A step through the model in the 3D view: level, the way the camera looks (`forward`) and
-    /// to its right, or straight up. The camera turns to perspective, as one walks in a
-    /// building; the eye and what it looks at move together, so the view keeps its direction.
-    fn walk(&mut self, forward: f32, right: f32, up: f32, fast: bool) {
-        if self.model.is_none() || self.shown_view().is_some() || self.active_sheet.is_some() || self.active_doc_sheet.is_some() {
-            return;
-        }
-        self.anim = None;
-        self.camera.ortho = false;
-        // a pace, or three with Shift
-        let step = if fast { 1.8 } else { 0.6 };
-        let (sin, cos) = self.camera.yaw.sin_cos();
-        let ahead = Vec3::new(-cos, -sin, 0.0);
-        let aside = Vec3::new(-sin, cos, 0.0);
-        self.camera.target += (ahead * forward + aside * right + Vec3::Z * up) * step;
-    }
-
     /// Turns the camera to (yaw, pitch) and frames the model, animated.
     fn turn_to(&mut self, yaw: f32, pitch: f32) {
         let mut to = self.camera;
@@ -2115,6 +2138,10 @@ impl App {
         if matches!(self.status, Status::Loading { .. }) {
             return Task::none();
         }
+        // another model: Save no longer writes over the file of the one before
+        if !add {
+            self.save_target = None;
+        }
         // a project file: the files it names, each put back where the project had it
         #[cfg(not(target_arch = "wasm32"))]
         if let (loaders::Source::File(path), false) = (&source, add) {
@@ -2267,6 +2294,29 @@ impl App {
                 return self.open(first, true);
             }
             Message::Open(path) => return self.open(loaders::Source::File(path), false),
+            Message::Dropped(path) => {
+                // issues and information requirements go to the Validator, beside the models
+                #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
+                {
+                    use collab::{Event, File};
+                    match path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).as_deref() {
+                        Some("bcf" | "bcfzip") => return self.collab_update(Event::Opened(File::Bcf, Some(path))),
+                        Some("ids") => return self.collab_update(Event::Opened(File::Ids, Some(path))),
+                        _ => {}
+                    }
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                if project_file::Project::peek(&path).is_some() {
+                    return self.open(loaders::Source::File(path), false);
+                }
+                // several files dropped at once come one by one: they follow the one loading
+                if matches!(self.status, Status::Loading { .. }) {
+                    self.add_queue.push(loaders::Source::File(path));
+                    return Task::none();
+                }
+                let add = self.model.is_some();
+                return self.open(loaders::Source::File(path), add);
+            }
             Message::Loaded(Ok(model)) => {
                 let drawings = self.read_drawings(&model);
                 let (mut stack, restack) = std::mem::take(&mut self.loading_stack);
@@ -2325,7 +2375,10 @@ impl App {
             Message::Remote(call) => return self.remote(call),
             Message::RemoteShot(shot) => self.remote_shot(shot),
             Message::ClearMeasurements => self.measurements.clear(),
-            Message::NewModel(level) => self.new_model(level),
+            Message::NewModel(level) => {
+                self.save_target = None;
+                self.new_model(level);
+            }
             Message::Reinforcement(action) => self.rebar_action(action),
             Message::ModelTool(tool) => self.start_model_tool(tool),
             Message::GridTool => self.toggle_grid_tool(),
@@ -2449,7 +2502,21 @@ impl App {
                 };
             }
             // the dialog asked before replacing a file
-            Message::SavePicked(Some(path)) => return self.start_save(path, true),
+            Message::SavePicked(Some(path)) => {
+                if self.model.is_some() && !matches!(self.status, Status::Loading { .. } | Status::Saving { .. }) {
+                    self.save_target = Some(SaveTarget::Model(path.clone(), self.save_schema));
+                }
+                return self.start_save(path, true);
+            }
+            Message::Save => match self.save_target.clone() {
+                Some(SaveTarget::Model(path, schema)) => {
+                    self.save_schema = schema;
+                    return self.start_save(path, true);
+                }
+                Some(SaveTarget::Project(path)) => return self.update(Message::SaveProjectPicked(Some(path))),
+                None if self.models.len() > 1 => return self.update(Message::SaveProjectDialog),
+                None => return self.update(Message::SaveDialog),
+            },
             Message::SaveProjectDialog => {
                 if !self.models.is_empty() || self.model.is_some() {
                     return project_file::save_dialog_task(self);
@@ -2537,7 +2604,9 @@ impl App {
             Message::Ortho(o) => self.camera.ortho = o,
             Message::Fit => self.fit(),
             Message::NavigateSheet { zoom, pan } => { self.sheet_zoom = zoom; self.sheet_pan = pan; }
-            Message::Walk { forward, right, up, fast } => self.walk(forward, right, up, fast),
+            Message::WalkKey { key, down, fast } => self.walk_key(key, down, fast),
+            Message::WalkStop => self.walk_stop(),
+            Message::Modifiers(m) => self.modifiers = m,
             Message::ToggleLayersPanel => self.show_layers = !self.show_layers,
             Message::TogglePropertiesPanel => self.show_properties = !self.show_properties,
             Message::Layer(i, v) => self.switch_layers(&[i], v),
@@ -2818,6 +2887,7 @@ impl App {
             Message::OpenDocSheet(sheet) => self.open_doc_sheet(&sheet),
             Message::ShowBooklet => self.show_booklet(),
             Message::ExportBooklet => return self.export_booklet(),
+            Message::ExportStep => return self.export_step(),
             Message::RemoveSheet(sheet) => {
                 self.close_doc_sheet(&sheet);
                 self.document.remove_sheet(&sheet);
@@ -2938,6 +3008,10 @@ impl App {
             }
             Message::ToggleAmbient => self.ambient = !self.ambient,
             Message::MouseButtons(buttons) => self.mouse_buttons = buttons,
+            Message::KeyNavigation(nav) => {
+                self.key_navigation = nav;
+                self.walk_stop();
+            }
             Message::CloudColor(color) => self.cloud_color = color,
             Message::Field(change) => self.change_field(change),
             Message::ToggleCloudDepth => self.cloud_depth = !self.cloud_depth,
@@ -3163,6 +3237,7 @@ impl App {
             }
             Message::Pressed(fingers) => self.fingers = fingers,
             Message::Tick => {
+                self.walk_frame(Instant::now());
                 if let Some((from, to, start)) = self.anim {
                     let t = (start.elapsed().as_secs_f32() / ANIM_SECONDS).min(1.0);
                     let eased = t * t * (3.0 - 2.0 * t);
@@ -3370,13 +3445,15 @@ impl App {
             || self.anim.is_some()
             || self.hover_request.is_some()
             || self.heads_stale()
+            || self.walking.any()
         {
             window::frames().map(|_| Message::Tick)
         } else {
             Subscription::none()
         };
         let events = event::listen_with(|event, status, _window| match event {
-            iced::Event::Window(window::Event::FileDropped(path)) => Some(Message::Open(path)),
+            iced::Event::Window(window::Event::FileDropped(path)) => Some(Message::Dropped(path)),
+            iced::Event::Keyboard(keyboard::Event::ModifiersChanged(m)) => Some(Message::Modifiers(m)),
             iced::Event::Touch(iced::touch::Event::FingerPressed { .. }) => Some(Message::Pressed(true)),
             iced::Event::Mouse(iced::mouse::Event::ButtonPressed(_)) => Some(Message::Pressed(false)),
             iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
@@ -3413,7 +3490,20 @@ impl App {
         } else {
             Subscription::none()
         };
-        Subscription::batch([events, ticks, remote, letting_go])
+        // a walking key is let go wherever the keyboard is, and all of them when the window
+        // loses it (its release would go elsewhere)
+        let walking = if self.walking.any() {
+            event::listen_with(|event, _, _| match event {
+                iced::Event::Keyboard(keyboard::Event::KeyReleased { key: keyboard::Key::Character(c), .. }) => {
+                    c.chars().next().and_then(|c| Message::walk(c, false, false))
+                }
+                iced::Event::Window(window::Event::Unfocused) => Some(Message::WalkStop),
+                _ => None,
+            })
+        } else {
+            Subscription::none()
+        };
+        Subscription::batch([events, ticks, remote, letting_go, walking])
     }
 
     pub fn view(&self) -> Element<'_, Message> {
@@ -3733,6 +3823,13 @@ impl App {
         // the Validator's colours (the web build leaves them out)
         #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
         {
+            // a view by rules: what it hides, and how it draws the rest
+            if let Some((shown, hidden)) = self.rule_view_looks(index.len(), |u| index.owner(u)) {
+                for (f, _) in flags.iter_mut().zip(&hidden).filter(|(_, h)| **h) {
+                    *f |= UNIT_HIDDEN;
+                }
+                looks = shown;
+            }
             // coloured by a property: each element in the colour of its value
             if let Some(painted) = self.painted_looks(index.len(), |u| index.owner(u)) {
                 looks = painted;
@@ -6715,6 +6812,43 @@ mod tests {
         let _ = app.update(Message::ResetSection);
         assert_eq!(app.plane, Some(placed));
         assert!(!app.plane_picking);
+    }
+
+    #[test]
+    fn save_writes_where_it_saved_last_and_another_model_forgets_it() {
+        let mut app = App::default();
+        app.set_model(two_squares());
+        // nothing saved yet: Save asks where (a test has no dialog, it names the file)
+        let _ = app.update(Message::Save);
+        assert_eq!(app.save_target, None);
+        let path = PathBuf::from("walls.ifc");
+        let _ = app.update(Message::SavePicked(Some(path.clone())));
+        assert_eq!(app.save_target, Some(SaveTarget::Model(path.clone(), export::IfcSchema::Ifc4)));
+        assert!(matches!(app.status, Status::Saving { .. }));
+        // saved: Save writes there again, in the same schema
+        app.status = Status::Loaded(String::new());
+        app.save_schema = export::IfcSchema::Ifc4x3;
+        let _ = app.update(Message::Save);
+        assert!(matches!(&app.status, Status::Saving { file, .. } if file == "walls.ifc"), "{:?}", app.status);
+        assert_eq!(app.save_schema, export::IfcSchema::default(), "the schema saved with is taken for the save");
+        // another model opened: Save asks again
+        app.status = Status::Loaded(String::new());
+        let _ = app.open(loaders::Source::File(PathBuf::from("other.obj")), false);
+        assert_eq!(app.save_target, None);
+    }
+
+    #[test]
+    fn a_file_dropped_beside_an_open_model_is_added() {
+        let mut app = App::default();
+        let _ = app.update(Message::Dropped(PathBuf::from("first.obj")));
+        assert!(!app.adding_model, "nothing open: it opens");
+        app.status = Status::Loaded(String::new());
+        app.set_model(two_squares());
+        let _ = app.update(Message::Dropped(PathBuf::from("second.obj")));
+        assert!(app.adding_model, "a model is open: the file is added to it");
+        // a second file dropped while the first loads follows it
+        let _ = app.update(Message::Dropped(PathBuf::from("third.obj")));
+        assert_eq!(app.add_queue.len(), 1);
     }
 
     #[test]

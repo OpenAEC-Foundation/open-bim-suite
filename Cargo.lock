@@ -400,6 +400,7 @@ dependencies = [
  "robust",
  "serde",
  "serde_json",
+ "springrep",
 ]
 
 [[package]]
@@ -2572,7 +2573,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.58.0",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
@@ -4373,7 +4374,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "open-3d-viewer"
-version = "2026.47.5"
+version = "2026.48.1"
 dependencies = [
  "base64 0.22.1",
  "bim-bcf",
@@ -6200,6 +6201,12 @@ dependencies = [
  "ruzstd 0.9.1",
  "serde_json",
 ]
+
+[[package]]
+name = "springrep"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "39bf794647f9bb3471416b8bb2c8541959e6425758e72283416e13d303e1d7dd"
 
 [[package]]
 name = "stable_deref_trait"

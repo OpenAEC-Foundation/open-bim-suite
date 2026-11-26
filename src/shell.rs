@@ -10,6 +10,7 @@ use crate::measure::Tool;
 use crate::product::{Edition, Product, RibbonPage, PLANNED};
 use crate::theme::{Palette, ThemeKind};
 use crate::viewport::camera::ViewPreset;
+use crate::app::walk::KeyNavigation;
 use crate::viewport::{MouseAction, MouseButtons};
 use crate::viewport::render::RenderMode;
 use openaec_ui::design::chrome::{self as ch, WindowActions, WindowIcons};
@@ -252,6 +253,28 @@ const MOUSE_ACTIONS: [[Named<MouseAction>; 3]; LANGUAGES] = [
     [named(MouseAction::Orbit, "Nokta etrafında döndür"), named(MouseAction::Look, "Etrafa bak"), named(MouseAction::Pan, "Kaydır")],
 ];
 
+/// A page of the settings, scrolling within their height, with room on the right for the bar.
+fn settings_scrolled(content: Element<'_, Msg>) -> Element<'_, Msg> {
+    iced::widget::scrollable(container(content).padding(iced::Padding { top: 0.0, right: 22.0, bottom: 0.0, left: 0.0 })).height(iced::Length::Fill).into()
+}
+
+/// The height of the settings' pages (logical pixels): each scrolls within it, so the dialog
+/// keeps one size whichever tab is open.
+const SETTINGS_BODY_HEIGHT: f32 = 560.0;
+
+const KEY_NAVIGATION: [[Named<KeyNavigation>; 3]; LANGUAGES] = [
+    [named(KeyNavigation::Fly, "Vliegen in de kijkrichting"), named(KeyNavigation::Walk, "Lopen, horizontaal"), named(KeyNavigation::Off, "Uit")],
+    [named(KeyNavigation::Fly, "Fly where you look"), named(KeyNavigation::Walk, "Walk, level"), named(KeyNavigation::Off, "Off")],
+    [named(KeyNavigation::Fly, "In Blickrichtung fliegen"), named(KeyNavigation::Walk, "Gehen, waagerecht"), named(KeyNavigation::Off, "Aus")],
+    [named(KeyNavigation::Fly, "Voler dans la direction du regard"), named(KeyNavigation::Walk, "Marcher, à niveau"), named(KeyNavigation::Off, "Désactivé")],
+    [named(KeyNavigation::Fly, "Volar hacia donde miras"), named(KeyNavigation::Walk, "Caminar, en horizontal"), named(KeyNavigation::Off, "Desactivado")],
+    [named(KeyNavigation::Fly, "Volare dove guardi"), named(KeyNavigation::Walk, "Camminare, in piano"), named(KeyNavigation::Off, "Disattivato")],
+    [named(KeyNavigation::Fly, "Voar para onde olhas"), named(KeyNavigation::Walk, "Andar, na horizontal"), named(KeyNavigation::Off, "Desligado")],
+    [named(KeyNavigation::Fly, "Lot w kierunku patrzenia"), named(KeyNavigation::Walk, "Chodzenie, poziomo"), named(KeyNavigation::Off, "Wyłączone")],
+    [named(KeyNavigation::Fly, "Flyg dit du tittar"), named(KeyNavigation::Walk, "Gå, vågrätt"), named(KeyNavigation::Off, "Av")],
+    [named(KeyNavigation::Fly, "Baktığın yöne uç"), named(KeyNavigation::Walk, "Yürü, yatay"), named(KeyNavigation::Off, "Kapalı")],
+];
+
 /// A row of the settings: what a drag with one mouse button does.
 fn mouse_button_row<'a>(look: Look, l: Language, label: &'a str, chosen: MouseAction, with: impl Fn(MouseAction) -> MouseButtons + 'a) -> Element<'a, Msg> {
     let (list, picked) = options(&MOUSE_ACTIONS, l, chosen);
@@ -296,6 +319,8 @@ struct Prefs {
     ambient: bool,
     /// What a drag with each mouse button does in the viewport.
     mouse_buttons: MouseButtons,
+    /// What W, A, S and D do in the 3D view.
+    key_navigation: KeyNavigation,
 }
 
 impl Default for Prefs {
@@ -320,6 +345,7 @@ impl Default for Prefs {
             levels_3d: false,
             ambient: false,
             mouse_buttons: MouseButtons::default(),
+            key_navigation: KeyNavigation::default(),
         }
     }
 }
@@ -957,6 +983,7 @@ impl Studio {
         self.apply_extensions();
         (self.app.grid_heads_hidden, self.app.grid_dims, self.app.levels_3d, self.app.ambient) = (self.prefs.grid_heads_hidden, self.prefs.grid_dims, self.prefs.levels_3d, self.prefs.ambient);
         self.app.mouse_buttons = self.prefs.mouse_buttons;
+        self.app.key_navigation = self.prefs.key_navigation;
         self.prefs_path = Some(prefs);
         let keymap = dir.join("shortcuts.json");
         self.keymap = Keymap::load(&keymap);
@@ -1232,7 +1259,10 @@ impl Studio {
                                 Some(Named::Enter) => vec![Msg::App(Message::MeasureFinish)],
                                 Some(Named::Delete | Named::Backspace) => vec![Msg::App(Message::DeletePicked)],
                                 Some(named) => vec![Msg::Key(openaec_ui::keyboard::KeyPress { key: Key::Named(named), modifiers })],
-                                None => vec![Msg::Key(openaec_ui::keyboard::KeyPress { key: Key::Character(key.to_lowercase().into()), modifiers })],
+                                // a walking key is let go again at once: no key goes up after a typed one
+                                None => std::iter::once(Msg::Key(openaec_ui::keyboard::KeyPress { key: Key::Character(key.to_lowercase().into()), modifiers }))
+                                    .chain(key.chars().next().and_then(|c| Message::walk(c, false, false)).map(Msg::App))
+                                    .collect(),
                             };
                         }
                         // nothing answered: the control may lie past the end of the list it is in,
@@ -1315,6 +1345,10 @@ impl Studio {
                 .icon(small("file.import"), large("file.import"))
                 .shortcut(Shortcut::ctrl_shift('o'))
                 .dialog(),
+            Command::new("file.save", l.text("Opslaan", "Save"), go(Message::Save))
+                .icon(small("file.save-as"), large("file.save-as"))
+                .shortcut(Shortcut::ctrl('s'))
+                .enabled(loaded),
             Command::new("file.save-as", l.text("Opslaan als…", "Save as…"), go(Message::SaveDialog))
                 .icon(small("file.save-as"), large("file.save-as"))
                 .shortcut(Shortcut::ctrl_shift('s'))
@@ -1334,21 +1368,26 @@ impl Studio {
                 .enabled(loaded && cfg!(not(target_arch = "wasm32")))
                 .detail(l.text("Schrijft een film waarin het model wordt opgebouwd (Blender rendert hem)", "Writes a film in which the model is built up (Blender renders it)"))
                 .dialog(),
+            Command::new("file.export-step", l.text("Exporteren als STEP…", "Export STEP…"), go(Message::ExportStep))
+                .icon(small("file.save-as"), large("file.save-as"))
+                .enabled(self.product() == Product::Modeller && !self.app.modeller.model.is_empty())
+                .detail(l.text("Schrijft de gemodelleerde elementen als exacte solids voor CAD: ronde kolommen en gebogen randen als echte cilinders en bogen", "Writes the modelled elements as exact solids for CAD: round columns and bowed edges as true cylinders and arcs"))
+                .dialog(),
             Command::new("file.export-ifc4x3", l.text("Exporteren als IFC 4x3…", "Export IFC 4x3…"), go(Message::SaveIfcDialog(crate::export::IfcSchema::Ifc4x3)))
                 .icon(small("file.save-as"), large("file.save-as"))
                 .enabled(loaded)
                 .dialog(),
             Command::new("view.solid", l.text("Volledig", "Solid"), go(Message::Mode(RenderMode::Solid)))
                 .icon(small("mesh.surface"), large("mesh.surface"))
-                .shortcut(key('s'))
+                .shortcut(key('4'))
                 .mode(app.mode == RenderMode::Solid),
             Command::new("view.wireframe", l.text("Draadmodel", "Wireframe"), go(Message::Mode(RenderMode::Wireframe)))
                 .icon(small("mesh.faces"), large("mesh.faces"))
-                .shortcut(key('w'))
+                .shortcut(key('5'))
                 .mode(app.mode == RenderMode::Wireframe),
             Command::new("view.edges", l.text("Randen", "Edges"), go(Message::Mode(RenderMode::SolidEdges)))
                 .icon(small("mesh.closed"), large("mesh.closed"))
-                .shortcut(key('e'))
+                .shortcut(key('6'))
                 .mode(app.mode == RenderMode::SolidEdges),
             Command::new("view.hidden", l.text("Verborgen lijnen", "Hidden line"), go(Message::Mode(RenderMode::HiddenLine)))
                 .icon(small("drawing.plan"), large("drawing.plan"))
@@ -1548,7 +1587,7 @@ impl Studio {
             Command::new("clash.next", l.text("Volgende clash", "Next clash"), go(Message::Collab(crate::app::collab::Event::Step(1)))).shortcut(key('j')).enabled(!app.collab.clashes.is_empty()),
             Command::new("clash.previous", l.text("Vorige clash", "Previous clash"), go(Message::Collab(crate::app::collab::Event::Step(-1)))).shortcut(key('k')).enabled(!app.collab.clashes.is_empty()),
             Command::new("clash.accept", l.text("Clash akkoord", "Accept clash"), go(Message::Collab(crate::app::collab::Event::DecidePicked(crate::app::collab::Decision::Accepted))))
-                .shortcut(key('a'))
+                .shortcut(key('y'))
                 .enabled(app.collab.clash.is_some() || app.collab.open_group.is_some()),
             Command::new("clash.reject", l.text("Clash afwijzen", "Reject clash"), go(Message::Collab(crate::app::collab::Event::DecidePicked(crate::app::collab::Decision::Rejected))))
                 .shortcut(key('r'))
@@ -1931,8 +1970,9 @@ impl Studio {
                     self.save_prefs();
                 }
                 // and what the mouse buttons do
-                if self.app.mouse_buttons != self.prefs.mouse_buttons {
+                if self.app.mouse_buttons != self.prefs.mouse_buttons || self.app.key_navigation != self.prefs.key_navigation {
                     self.prefs.mouse_buttons = self.app.mouse_buttons;
+                    self.prefs.key_navigation = self.app.key_navigation;
                     self.save_prefs();
                 }
                 // what opens in the explorer shows it
@@ -1989,11 +2029,18 @@ impl Studio {
                     self.l().text("Aantal", "Number"),
                 ];
                 self.app.modeller.snap_words = crate::app::modeller::snaps::Snap::ALL.map(|s| s.label(self.l()));
+                // a project dropped on the window opens as a project does, in a tab of its own
+                // beside a model; another file dropped is added to the model shown
+                #[cfg(not(target_arch = "wasm32"))]
+                let message = match message {
+                    Message::Dropped(path) if crate::app::project_file::Project::peek(&path).is_some() => Message::Open(path),
+                    message => message,
+                };
                 let opened = match &message {
-                    Message::Open(path) => Some(path.clone()),
+                    Message::Open(path) | Message::Dropped(path) => Some(path.clone()),
                     _ => None,
                 };
-                if opened.is_some() || matches!(message, Message::OpenDialog | Message::SaveDialog | Message::SaveProjectDialog | Message::SaveIfcDialog(_) | Message::BlenderRender) {
+                if opened.is_some() || matches!(message, Message::OpenDialog | Message::Save | Message::SaveDialog | Message::SaveProjectDialog | Message::SaveIfcDialog(_) | Message::BlenderRender) {
                     self.backstage = false;
                 }
                 if let Some(path) = opened {
@@ -2222,6 +2269,19 @@ impl Studio {
                     }
                     return self.update(Msg::App(Message::Escape));
                 }
+                // W, A, S and D walk through the model in the 3D view, Q and E go down and up,
+                // running with Shift (`app::walk`): outside the Modeller whenever the 3D view
+                // shows, and in the Modeller, whose letters are its tools, while the right button
+                // looks around
+                if self.dialog.is_none() && !self.backstage && !press.modifiers.control() && !press.modifiers.alt() {
+                    if let Key::Character(c) = &press.key {
+                        let walks = self.app.can_walk() && self.app.key_navigation != KeyNavigation::Off && (self.app.looking() || !matches!(self.product(), Product::Modeller | Product::Docs | Product::Library | Product::Planner));
+                        if let Some(walk) = c.chars().next().filter(|_| walks).and_then(|c| Message::walk(c, true, press.modifiers.shift())) {
+                            self.keys.clear();
+                            return self.update(Msg::App(walk));
+                        }
+                    }
+                }
                 // in edit mode G, X, Y, Z and A are its own keys
                 // while elements are grabbed (G), X, Y and Z hold the move and digits type its distance
                 let grabbing = self.app.modeller.grab.is_some();
@@ -2300,22 +2360,6 @@ impl Studio {
                 if self.dialog.is_none() {
                     if let Some(message) = cm::find(&self.commands(), &press.key, press.modifiers) {
                         return self.update(message);
-                    }
-                    // no command of its own: W, A, S and D walk through the model in the Viewer, Q
-                    // and E go down and up, faster with Shift
-                    if let (Product::Viewer, false, false, Key::Character(c)) = (self.product(), press.modifiers.control(), press.modifiers.alt(), &press.key) {
-                        let (forward, right, up) = match c.to_lowercase().as_str() {
-                            "w" => (1.0, 0.0, 0.0),
-                            "s" => (-1.0, 0.0, 0.0),
-                            "d" => (0.0, 1.0, 0.0),
-                            "a" => (0.0, -1.0, 0.0),
-                            "e" => (0.0, 0.0, 1.0),
-                            "q" => (0.0, 0.0, -1.0),
-                            _ => (0.0, 0.0, 0.0),
-                        };
-                        if (forward, right, up) != (0.0, 0.0, 0.0) {
-                            return self.update(Msg::App(Message::Walk { forward, right, up, fast: press.modifiers.shift() }));
-                        }
                     }
                 }
             }
@@ -2622,7 +2666,7 @@ impl Studio {
     fn title_bar(&self, look: Look) -> Element<'_, Msg> {
         // the Modeller changes the model, so taking a step back or forth is at hand there
         let modelling = self.product() == Product::Modeller;
-        let ids: &[&str] = if self.product() == Product::Viewer { &["file.open"] } else if modelling { &["file.new", "file.open", "file.save-as", "edit.undo", "edit.redo"] } else { &["file.new", "file.open", "file.save-as"] };
+        let ids: &[&str] = if self.product() == Product::Viewer { &["file.open"] } else if modelling { &["file.new", "file.open", "file.save", "edit.undo", "edit.redo"] } else { &["file.new", "file.open", "file.save"] };
         let mut quick = vec![cm::button(look, &self.command("view.3d"), K::Quiet, D::Compact)];
         quick.extend(ids.iter().map(|id| cm::icon_button(look, &self.command(id), 28.0)));
         let mut extra = Vec::new();
@@ -2990,18 +3034,22 @@ impl Studio {
         let c = look.color;
         let writable = self.product() != Product::Viewer;
         let loaded = writable && self.app.model.is_some();
-        #[allow(unused_mut)]
         let mut nav = column![
             t::file_nav_row(look, small("file.new"), l.text("Nieuw", "New"), false, writable.then_some(Msg::App(Message::NewModel(l.text("Niveau 0", "Level 0"))))),
             t::file_nav_row(look, small("file.open"), l.text("Openen", "Open"), false, Some(Msg::App(Message::OpenDialog))),
             t::file_nav_row(look, small("file.open"), l.text("Map openen", "Open folder"), false, Some(Msg::App(Message::OpenFolderDialog))),
             t::file_nav_row(look, small("file.import"), l.text("Toevoegen", "Add"), false, Some(Msg::App(Message::AddDialog))),
+            t::file_nav_row(look, small("file.save-as"), l.text("Opslaan", "Save"), false, loaded.then_some(Msg::App(Message::Save))),
             t::file_nav_row(look, small("file.save-as"), l.text("Opslaan als", "Save as"), false, loaded.then_some(Msg::App(Message::SaveDialog))),
             t::file_nav_row(look, small("file.save-as"), l.text("Project opslaan", "Save project"), false, loaded.then_some(Msg::App(Message::SaveProjectDialog))),
             t::file_nav_row(look, small("file.save-as"), l.text("Exporteren als IFC 4x3", "Export IFC 4x3"), false, loaded.then_some(Msg::App(Message::SaveIfcDialog(crate::export::IfcSchema::Ifc4x3)))),
-            t::file_nav_row(look, small("ui.settings"), l.text("Instellingen", "Settings"), false, Some(Msg::Dialog(Some(Dialog::Settings)))),
         ]
         .width(260);
+        // the Modeller's elements out to CAD, as exact solids
+        if self.product() == Product::Modeller {
+            nav = nav.push(t::file_nav_row(look, small("file.save-as"), l.text("Exporteren als STEP", "Export STEP"), false, (!self.app.modeller.model.is_empty()).then_some(Msg::App(Message::ExportStep))));
+        }
+        nav = nav.push(t::file_nav_row(look, small("ui.settings"), l.text("Instellingen", "Settings"), false, Some(Msg::Dialog(Some(Dialog::Settings)))));
         #[cfg(target_arch = "wasm32")]
         if crate::host::renders() {
             nav = nav.push(t::file_nav_row(look, small("mesh.surface"), l.text("Renderen met Blender", "Render with Blender"), false, crate::host::can_render().then_some(Msg::App(Message::BlenderRender))));
@@ -3263,8 +3311,12 @@ impl Studio {
                 let statusbars = options(&STATUSBARS, l, self.prefs.statusbar());
                 let text_sizes = options(&TEXT_SIZES, l, self.prefs.text_size());
                 let buttons = self.app.mouse_buttons;
+                // every page scrolls in the same height, so the dialog keeps its size from tab to
+                // tab; a low window makes it lower (the room over and under the body: title, tabs,
+                // footer and margins)
+                let body_height = SETTINGS_BODY_HEIGHT.min((self.height / self.prefs.scale() as f32 - 230.0).max(200.0));
                 let body: Element<'_, Msg> = match self.settings_page {
-                    SettingsPage::General => column![
+                    SettingsPage::General => settings_scrolled(column![
                         w::mono_label(look, l.text("Weergave", "Appearance")),
                         w::property_row(look, l.text("Thema", "Theme"), w::select(look, themes.0, themes.1, |n| Msg::Theme(n.value), D::Regular)),
                         w::property_row(look, l.text("Werkruimte", "Workspace"), w::select(look, workspaces.0, workspaces.1, |n| Msg::Workspace(n.value), D::Regular)),
@@ -3281,11 +3333,17 @@ impl Studio {
                         mouse_button_row(look, l, l.text("Wiel ingedrukt slepen", "Wheel pressed drag"), buttons.middle, move |a| MouseButtons { middle: a, ..buttons }),
                         mouse_button_row(look, l, l.text("Rechtermuisknop slepen", "Right button drag"), buttons.right, move |a| MouseButtons { right: a, ..buttons }),
                         w::secondary(look, l.text("Draaien gaat om het punt onder de muis. Een dubbelklik of het rechtermuismenu zet een vast draaipunt; dat blijft staan tot een dubbelklik in de lucht of het menu het opheft. Bij rondkijken blijft de muis op zijn plek, zoals in een game. Shift + links pant, Shift + wiel draait.", "Orbiting turns about the point under the cursor. A double click or the right-click menu sets a fixed pivot; it stays until a double click in empty space or the menu clears it. Looking around holds the cursor in place, as in a game. Shift + left pans, Shift + wheel orbits.")),
+                        w::mono_label(look, l.text("Bewegen met toetsen", "Moving with keys")),
+                        {
+                            let (list, picked) = options(&KEY_NAVIGATION, l, self.app.key_navigation);
+                            w::property_row(look, l.text("W A S D", "W A S D"), w::select(look, list, picked, |n: Named<KeyNavigation>| Msg::App(Message::KeyNavigation(n.value)), D::Regular))
+                        },
+                        w::secondary(look, l.text("W, A, S en D bewegen zolang je ze vasthoudt, Q en E gaan recht omlaag en omhoog, met Shift ga je sneller. Vliegen gaat waar je kijkt, ook omhoog en omlaag; lopen blijft horizontaal. In de Modeller, waar de letters gereedschappen zijn, werken ze terwijl je met de rechtermuisknop rondkijkt.", "W, A, S and D move as long as you hold them, Q and E go straight down and up, Shift goes faster. Flying goes where you look, also up and down; walking stays level. In the Modeller, whose letters are its tools, they work while you look around with the right mouse button.")),
                         w::mono_label(look, l.text("Taal", "Language")),
                         w::property_row(look, l.text("Taal", "Language"), w::select(look, &Language::ALL, Some(l), Msg::Language, D::Regular)),
                     ]
                     .spacing(6)
-                    .into(),
+                    .into()),
                     // the groups of the ribbon tab shown: each on or off
                     SettingsPage::Ribbon => {
                         let hidden = &self.prefs.ribbon_hidden;
@@ -3296,7 +3354,7 @@ impl Studio {
                             let shown = !hidden.iter().any(|k| k == key);
                             list = list.push(w::checkbox(look, group.0, shown, Some(move |on| Msg::RibbonGroup(key, on))));
                         }
-                        list.push(w::button(look, l.text("Alle groepen tonen", "Show all groups"), K::Secondary, D::Compact, None, (!hidden.is_empty()).then_some(Msg::RibbonReset))).into()
+                        settings_scrolled(list.push(w::button(look, l.text("Alle groepen tonen", "Show all groups"), K::Secondary, D::Compact, None, (!hidden.is_empty()).then_some(Msg::RibbonReset))).into())
                     }
                     // the extension manager: every integrated tool, on the switch or not
                     SettingsPage::Extensions => {
@@ -3318,20 +3376,22 @@ impl Studio {
                             entry = entry.push(container(tools).padding(iced::Padding { top: 2.0, right: 0.0, bottom: 4.0, left: 28.0 }));
                             list = list.push(entry);
                         }
-                        iced::widget::scrollable(container(list.push(w::secondary(look, l.text("Onder elke extensie staan de tools die erop draaien. Een tool die uit staat, verdwijnt van het lint.", "Under each extension are the tools that run on it. A tool that is switched off leaves the ribbon."))).padding(iced::Padding { top: 0.0, right: 22.0, bottom: 0.0, left: 0.0 }))).height(iced::Length::Fixed(460.0)).into()
+                        iced::widget::scrollable(container(list.push(w::secondary(look, l.text("Onder elke extensie staan de tools die erop draaien. Een tool die uit staat, verdwijnt van het lint.", "Under each extension are the tools that run on it. A tool that is switched off leaves the ribbon."))).padding(iced::Padding { top: 0.0, right: 22.0, bottom: 0.0, left: 0.0 }))).height(iced::Length::Fill).into()
                     }
                     // in the Modeller its own keys follow the commands' shortcuts
-                    SettingsPage::Shortcuts => column![sc::page(look, &self.shortcuts, &self.commands(), &self.keymap, &groups, Msg::Shortcuts)]
-                        .push((self.product() == Product::Modeller).then(|| crate::app::modeller::key_actions::key_list(look, l)))
-                        .spacing(14)
-                        .into(),
+                    SettingsPage::Shortcuts => settings_scrolled(
+                        column![sc::page(look, &self.shortcuts, &self.commands(), &self.keymap, &groups, Msg::Shortcuts)]
+                            .push((self.product() == Product::Modeller).then(|| crate::app::modeller::key_actions::key_list(look, l)))
+                            .spacing(14)
+                            .into(),
+                    ),
                 };
                 w::dialog(
                     look,
                     l.text("Instellingen", "Settings"),
                     close_icon,
                     Some(Msg::Dialog(None)),
-                    column![tabs, body].spacing(14).into(),
+                    column![tabs, container(body).height(iced::Length::Fixed(body_height))].spacing(14).into(),
                     None,
                     vec![w::button(look, l.text("Sluiten", "Close"), K::Primary, D::Regular, None, Some(Msg::Dialog(None)))],
                     true,
@@ -4590,6 +4650,34 @@ mod tests {
         let _ = studio.update(Msg::Key(KeyPress { key: Key::Named(iced::keyboard::key::Named::Escape), modifiers: Modifiers::empty() }));
         let _ = studio.update(Msg::Navigate(Navigation::Next));
         assert!(studio.app.modeller.edit.is_none(), "Tab leaves");
+    }
+
+    #[test]
+    fn w_a_s_d_walk_in_the_validator_and_in_the_modeller_while_looking_around() {
+        use crate::viewport::Navigate;
+        use iced::keyboard::{Key, Modifiers};
+        let press = |c: &str| Msg::Key(KeyPress { key: Key::Character(c.into()), modifiers: Modifiers::empty() });
+        let mut app = App::default();
+        app.set_model(std::sync::Arc::new(crate::model::Model::new(PathBuf::from("box.obj"), "OBJ", Vec::new())));
+        let mut studio = Studio::new(app);
+        for product in [Product::Viewer, Product::Validator] {
+            studio.set_product(product);
+            let mode = studio.app.mode;
+            let _ = studio.update(press("w"));
+            assert!(studio.app.is_walking(), "{product:?}: W walks");
+            assert_eq!(studio.app.mode, mode, "{product:?}: W is no longer the wireframe");
+            let _ = studio.update(Msg::App(Message::WalkStop));
+        }
+        // the render modes moved to 4, 5 and 6, beside the views on 0 to 3
+        let _ = studio.update(press("5"));
+        assert_eq!(studio.app.mode, RenderMode::Wireframe);
+        // in the Modeller a letter is a tool, unless the right button looks around
+        studio.set_product(Product::Modeller);
+        let _ = studio.update(press("d"));
+        assert!(!studio.app.is_walking());
+        let _ = studio.update(Msg::App(Message::Navigate(Navigate::Hold { x: 100.0, y: 100.0 })));
+        let _ = studio.update(press("d"));
+        assert!(studio.app.is_walking(), "D walks while looking around");
     }
 
     #[test]
