@@ -129,6 +129,7 @@ impl<Message> canvas::Program<Message> for ViewLabels {
     type State = ();
 
     fn draw(&self, _state: &(), renderer: &iced::Renderer, _theme: &iced::Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<canvas::Geometry> {
+        let _timed = crate::frame_log::canvas("ViewLabels");
         let mut frame = Frame::new(renderer, bounds.size());
         for (name, at) in &self.labels {
             let clip = self.view_proj * Vec3::from_array(*at).extend(1.0);

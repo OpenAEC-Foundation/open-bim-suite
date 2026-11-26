@@ -136,6 +136,7 @@ impl<M> canvas::Program<M> for Cursor3dMark {
     type State = ();
 
     fn draw(&self, _state: &(), renderer: &iced::Renderer, _theme: &iced::Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<canvas::Geometry> {
+        let _timed = crate::frame_log::canvas("Cursor3dMark");
         let mut frame = Frame::new(renderer, bounds.size());
         let c = self.view_proj.project_point3(self.at);
         if !(0.0..=1.0).contains(&c.z) {

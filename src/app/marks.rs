@@ -1364,6 +1364,7 @@ impl canvas::Program<Message> for ViewMarks {
     }
 
     fn draw(&self, state: &MarksState, renderer: &iced::Renderer, _theme: &iced::Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<canvas::Geometry> {
+        let _timed = crate::frame_log::canvas("ViewMarks");
         let p = self.palette;
         let screen = self.screen(bounds);
         let mut frame = Frame::new(renderer, bounds.size());

@@ -1305,6 +1305,7 @@ impl canvas::Program<Message> for PaperDrawing {
     }
 
     fn draw(&self, state: &PaperState, renderer: &iced::Renderer, _theme: &iced::Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<canvas::Geometry> {
+        let _timed = crate::frame_log::canvas("PaperDrawing");
         let p = self.palette;
         let fit = Fit::of(self.sheet.paper, bounds.size()).navigated(bounds.size(), self.zoom, self.pan);
         let mut frame = Frame::new(renderer, bounds.size());

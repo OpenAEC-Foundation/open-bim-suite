@@ -456,6 +456,7 @@ impl canvas::Program<Message> for SheetDrawing {
     }
 
     fn draw(&self, state: &DrawingState, renderer: &iced::Renderer, _theme: &iced::Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<canvas::Geometry> {
+        let _timed = crate::frame_log::canvas("SheetDrawing");
         let p = self.palette;
         let mut frame = Frame::new(renderer, bounds.size());
         let label = |frame: &mut Frame, content: String, position: Point, size: f32, color: Color, align: alignment::Horizontal, vertical: alignment::Vertical| {

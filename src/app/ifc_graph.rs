@@ -185,6 +185,7 @@ impl canvas::Program<Message> for IfcGraph<'_> {
     }
 
     fn draw(&self, state: &GraphState, renderer: &iced::Renderer, _theme: &iced::Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<canvas::Geometry> {
+        let _timed = crate::frame_log::canvas("IfcGraph");
         let mut frame = Frame::new(renderer, bounds.size());
         let p = self.palette;
         let seen = |q: Point, margin: f32| q.x >= -margin && q.y >= -margin && q.x <= bounds.width + margin && q.y <= bounds.height + margin;

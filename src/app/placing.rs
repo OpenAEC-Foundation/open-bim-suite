@@ -197,6 +197,7 @@ impl<M> canvas::Program<M> for PlacingOverlay {
     type State = ();
 
     fn draw(&self, _state: &(), renderer: &iced::Renderer, _theme: &iced::Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<canvas::Geometry> {
+        let _timed = crate::frame_log::canvas("PlacingOverlay");
         let mut frame = Frame::new(renderer, bounds.size());
         let size = bounds.size();
         // the faces far to near, each filled lightly and outlined

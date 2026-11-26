@@ -34,6 +34,7 @@ pub mod hatching;
 pub mod phasing;
 pub mod element_class;
 mod explode;
+mod frame_log;
 pub mod export;
 mod history;
 pub mod i18n;

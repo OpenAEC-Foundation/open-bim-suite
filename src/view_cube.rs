@@ -765,6 +765,7 @@ where
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
+        let _timed = crate::frame_log::canvas("CubeOverlay");
         let mut frame = Frame::new(renderer, bounds.size());
         draw(&mut frame, bounds, self.yaw, self.pitch, state.hover, self.ortho);
         vec![frame.into_geometry()]

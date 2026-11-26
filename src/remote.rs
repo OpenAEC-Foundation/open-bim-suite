@@ -525,6 +525,22 @@ impl App {
                 let _ = self.update(message);
                 Ok(json!({ "opened": name, "kind": kind }))
             }
+            "place_view" => {
+                let named = |all: Vec<(String, String)>, key: &str, what: &str| -> Result<(String, String), String> {
+                    let wanted = a.get(key).and_then(|v| v.as_str()).ok_or_else(|| format!("{key} is required"))?.to_lowercase();
+                    all.iter().find(|d| d.0.to_lowercase() == wanted).or_else(|| all.iter().find(|d| d.0.to_lowercase().contains(&wanted))).cloned().ok_or_else(|| format!("no {what} named '{wanted}'; call open_drawing without a name to list them"))
+                };
+                let (sheet, sheet_path) = named(self.document.sheets().iter().map(|s| (s.title.clone(), s.path.clone())).collect(), "sheet", "sheet")?;
+                let views = self.document.plans().iter().map(|p| (p.name.clone(), p.path.clone())).chain(self.document.sections().iter().map(|s| (s.name.clone(), s.path.clone()))).collect();
+                let (view, view_path) = named(views, "view", "view")?;
+                let before = self.document.sheet(&sheet_path).map_or(0, |s| s.views.len());
+                let _ = self.update(Message::PlaceOnSheet(sheet_path.as_str().into(), view_path.as_str().into()));
+                let now = self.document.sheet(&sheet_path).map_or(0, |s| s.views.len());
+                if now <= before {
+                    return Err(format!("'{view}' was not placed on '{sheet}'"));
+                }
+                Ok(json!({ "sheet": sheet, "placed": view, "views_on_sheet": now }))
+            }
             #[cfg(not(target_arch = "wasm32"))]
             "export_drawing" => {
                 let path = a.get("path").and_then(|v| v.as_str()).ok_or("path is required")?;

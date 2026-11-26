@@ -185,6 +185,7 @@ impl<Message> canvas::Program<Message> for GridOverlay {
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
+        let _timed = crate::frame_log::canvas("GridOverlay");
         let mut frame = Frame::new(renderer, bounds.size());
         let size = (bounds.width, bounds.height);
         // the levels' marks, named where they are not too close together
@@ -323,6 +324,7 @@ impl<Message> canvas::Program<Message> for MeasureOverlay<'_> {
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
+        let _timed = crate::frame_log::canvas("MeasureOverlay");
         let mut frame = Frame::new(renderer, bounds.size());
         let size = (bounds.width, bounds.height);
         for m in self.items {

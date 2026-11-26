@@ -420,6 +420,7 @@ impl<Message> canvas::Program<Message> for MeasureOverlay<'_> {
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
+        let _timed = crate::frame_log::canvas("MeasureOverlay");
         let mut frame = Frame::new(renderer, bounds.size());
         let pr = Projector { view_proj: self.view_proj, size: (bounds.width, bounds.height) };
         // the model's own labels first, under the measurements

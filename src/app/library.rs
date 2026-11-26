@@ -755,6 +755,7 @@ impl canvas::Program<Message> for Section {
     type State = ();
 
     fn draw(&self, _state: &(), renderer: &iced::Renderer, _theme: &iced::Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<canvas::Geometry> {
+        let _timed = crate::frame_log::canvas("Section");
         let mut frame = Frame::new(renderer, bounds.size());
         let width = (bounds.width - 2.0).min(220.0);
         let scale = (bounds.height - 2.0) / self.depth.max(1e-6) as f32; // px per metre
@@ -899,6 +900,7 @@ impl<M> canvas::Program<M> for Outline {
     type State = ();
 
     fn draw(&self, _state: &(), renderer: &iced::Renderer, _theme: &iced::Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<canvas::Geometry> {
+        let _timed = crate::frame_log::canvas("Outline");
         let mut frame = Frame::new(renderer, bounds.size());
         if self.outer.len() < 3 {
             return vec![frame.into_geometry()];
@@ -933,6 +935,7 @@ impl canvas::Program<Message> for Elevation {
     type State = ();
 
     fn draw(&self, _state: &(), renderer: &iced::Renderer, _theme: &iced::Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<canvas::Geometry> {
+        let _timed = crate::frame_log::canvas("Elevation");
         let mut frame = Frame::new(renderer, bounds.size());
         let room = (bounds.width.min(260.0) - 8.0, bounds.height - 8.0);
         let scale = (room.0 / self.size[0].max(1e-6) as f32).min(room.1 / self.size[1].max(1e-6) as f32);
