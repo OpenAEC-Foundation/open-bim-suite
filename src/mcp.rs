@@ -247,6 +247,14 @@ pub fn tools() -> Vec<Value> {
                 "offset": { "type": "number", "description": "Set the position along the normal" },
                 "remove": { "type": "boolean" }
             }), &[], false),
+        tool("export_sheets", "Export a series of sheets at once (those of the file, such as a Revit model's, and the project's own): list gives their titles; otherwise the sheets named (by number, name or title, * for a pattern; none: all) are written as format pdf, dwg, dxf, svg or png. With path: one PDF, a page per sheet in their order, to print the series. With folder: a file per sheet, named after it.",
+            json!({
+                "action": { "type": "string", "enum": ["list", "export"] },
+                "sheets": { "type": "array", "items": { "type": "string" } },
+                "format": { "type": "string", "enum": ["pdf", "dwg", "dxf", "svg", "png"] },
+                "path": { "type": "string", "description": "One PDF of all the sheets" },
+                "folder": { "type": "string", "description": "A file per sheet in this folder" }
+            }), &[], false),
         tool("place_model", "Where the open models lie, each moved, turned about Z and with its zero point as the project keeps them (the files are not changed). list gives each model's place; set gives a model (index or file name) a move [x, y, z] (metres), a turn (degrees, anticlockwise from above, about its zero point) or a zero point; align turns and moves it so two of its points land on two others (pairs: [{from: [x,y,z], to: [x,y,z]}, {from, to}], in the coordinates the viewport and measure_distance use); replace puts a new revision of its file (path) in its place, moved and turned as before.",
             json!({
                 "action": { "type": "string", "enum": ["list", "set", "align", "replace"] },

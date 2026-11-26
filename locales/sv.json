@@ -2131,6 +2131,20 @@
     "Unlock": "Lås upp",
     "Locked": "Låst",
     "Lock new grid lines": "Lås nya rutnätslinjer",
-    "The grid line is locked: unlock it to change it.": "Rutnätslinjen är låst: lås upp den för att ändra den."
+    "The grid line is locked: unlock it to change it.": "Rutnätslinjen är låst: lås upp den för att ändra den.",
+    "One PDF, a page per sheet": "En PDF, en sida per blad",
+    "A PDF per sheet": "En PDF per blad",
+    "A DWG per sheet": "En DWG per blad",
+    "A DXF per sheet": "En DXF per blad",
+    "An SVG per sheet": "En SVG per blad",
+    "A file per sheet": "En fil per blad",
+    "This model has no sheets.": "Den här modellen har inga blad.",
+    "sheets picked": "blad valda",
+    "As": "Som",
+    "Export sheets…": "Exportera blad…",
+    "Export sheets": "Exportera blad",
+    "Several sheets at once: as one PDF to print, or a PDF, DWG, DXF or SVG per sheet.": "Flera blad på en gång: en PDF att skriva ut, eller en PDF, DWG, DXF eller SVG per blad.",
+    "One PDF is to print the series; per sheet asks for the folder and names each file after its sheet.": "En PDF är för att skriva ut serien; per blad frågar efter mappen och namnger varje fil efter sitt blad.",
+    "The model's drawings are still being read; in a moment you can.": "Modellens ritningar läses fortfarande; om en stund går det."
   }
 }

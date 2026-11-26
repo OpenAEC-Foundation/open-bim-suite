@@ -2131,6 +2131,20 @@
     "Unlock": "Entsperren",
     "Locked": "Gesperrt",
     "Lock new grid lines": "Neue Rasterlinien sperren",
-    "The grid line is locked: unlock it to change it.": "Die Rasterlinie ist gesperrt: Zum Ändern entsperren."
+    "The grid line is locked: unlock it to change it.": "Die Rasterlinie ist gesperrt: Zum Ändern entsperren.",
+    "One PDF, a page per sheet": "Ein PDF, eine Seite je Blatt",
+    "A PDF per sheet": "Ein PDF je Blatt",
+    "A DWG per sheet": "Ein DWG je Blatt",
+    "A DXF per sheet": "Ein DXF je Blatt",
+    "An SVG per sheet": "Ein SVG je Blatt",
+    "A file per sheet": "Eine Datei je Blatt",
+    "This model has no sheets.": "Dieses Modell hat keine Blätter.",
+    "sheets picked": "Blätter gewählt",
+    "As": "Als",
+    "Export sheets…": "Blätter exportieren…",
+    "Export sheets": "Blätter exportieren",
+    "Several sheets at once: as one PDF to print, or a PDF, DWG, DXF or SVG per sheet.": "Mehrere Blätter auf einmal: als ein PDF zum Drucken oder ein PDF, DWG, DXF oder SVG je Blatt.",
+    "One PDF is to print the series; per sheet asks for the folder and names each file after its sheet.": "Ein PDF dient zum Drucken der Serie; je Blatt fragt nach dem Ordner und benennt jede Datei nach ihrem Blatt.",
+    "The model's drawings are still being read; in a moment you can.": "Die Zeichnungen des Modells werden noch gelesen; gleich geht es."
   }
 }

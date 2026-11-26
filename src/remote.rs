@@ -618,6 +618,8 @@ impl App {
             "section_plane" => self.remote_section_plane(a),
             "measure_distance" => self.measure_distance(a),
             "place_model" => self.place_model_command(a),
+            #[cfg(not(target_arch = "wasm32"))]
+            "export_sheets" => self.export_sheets_command(a),
             "measure_angle" => self.measure_angle(a),
             "measure_between_elements" => self.measure_between_elements(a),
             "clear_measurements" => {

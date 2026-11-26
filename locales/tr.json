@@ -2131,6 +2131,20 @@
     "Unlock": "Kilidi aç",
     "Locked": "Kilitli",
     "Lock new grid lines": "Yeni aks çizgilerini kilitle",
-    "The grid line is locked: unlock it to change it.": "Aks çizgisi kilitli: değiştirmek için kilidini açın."
+    "The grid line is locked: unlock it to change it.": "Aks çizgisi kilitli: değiştirmek için kilidini açın.",
+    "One PDF, a page per sheet": "Tek PDF, pafta başına bir sayfa",
+    "A PDF per sheet": "Pafta başına bir PDF",
+    "A DWG per sheet": "Pafta başına bir DWG",
+    "A DXF per sheet": "Pafta başına bir DXF",
+    "An SVG per sheet": "Pafta başına bir SVG",
+    "A file per sheet": "Pafta başına bir dosya",
+    "This model has no sheets.": "Bu modelin paftası yok.",
+    "sheets picked": "pafta seçildi",
+    "As": "Biçim",
+    "Export sheets…": "Paftaları dışa aktar…",
+    "Export sheets": "Paftaları dışa aktar",
+    "Several sheets at once: as one PDF to print, or a PDF, DWG, DXF or SVG per sheet.": "Birden çok pafta aynı anda: yazdırmak için tek bir PDF ya da pafta başına bir PDF, DWG, DXF veya SVG.",
+    "One PDF is to print the series; per sheet asks for the folder and names each file after its sheet.": "Tek PDF seriyi yazdırmak içindir; pafta başına seçeneği klasörü sorar ve her dosyayı paftasının adıyla adlandırır.",
+    "The model's drawings are still being read; in a moment you can.": "Modelin çizimleri hâlâ okunuyor; birazdan yapılabilir."
   }
 }

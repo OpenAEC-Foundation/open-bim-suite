@@ -36,7 +36,7 @@ impl Message {
             ToggleExplorer(_) | ToggleViewGroup(_) | ExplorerTab(_) | OpenPlan(_) | OpenDocSheet(_) | ReleaseView(_) |
             Docs(super::docs::DocsMessage::Close) | WalkKey { .. } | WalkStop | Modifiers(_) | KeyNavigation(_) | MouseButtons(_) | DrawingOnPaper(_) | PickOnSheet(_) | PickMark(_) |
             ToggleViewsIn3d | ToggleAmbient | CloudColor(_) | Field(_) | ToggleCloudDepth | Analysis(_) | AnalysisScale(_) |
-            AnalysisScaleDone | ToggleGridHeadsHidden | ToggleGridDims | ToggleLevels3d | ExportMenu(_) | ExportDrawing(_) |
+            AnalysisScaleDone | ToggleGridHeadsHidden | ToggleGridDims | ToggleLevels3d | ExportMenu(_) | ExportDrawing(_) | SheetExport(_) | SheetsExported(_) |
             Exported(_) | SelectTab(_) | CloseTab(_) | OpenSheet(_) | OpenDraft(_) | PickDraft(_) | ShowSheet(_) | CloseSheet(_) |
             SheetView(_) | OpenSchedule(_) | ShowSchedule(_) | CloseSchedule(_) | ExportSchedules | ScheduleRow(..) |
             ScheduleScroll(_) | Schedules(..) | Drawings(..) | CutAhead(..) | CutFaces(..) | OpenIfc | CloseIfc | IfcView(_) |
