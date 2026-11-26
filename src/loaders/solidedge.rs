@@ -227,4 +227,13 @@ mod tests {
         assert_eq!(&layer.positions[18..21], [10.0, 0.0, 0.0]);
         assert_eq!(&layer.normals[..3], [0.0, 0.0, 1.0]);
     }
+
+    #[test]
+    fn damaged_files_do_not_panic() {
+        use super::super::Loader;
+        crate::loaders::damage::assert_robust("Solid Edge", &plate(), |bytes| {
+            let source = Source::Bytes { name: "Plate.par".into(), data: Arc::new(bytes.to_vec()) };
+            let _ = super::SolidEdgeLoader.load_with(&source, &Progress::default());
+        });
+    }
 }

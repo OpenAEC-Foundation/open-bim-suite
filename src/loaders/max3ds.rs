@@ -236,4 +236,11 @@ mod tests {
     fn rejects_other_files() {
         assert!(read(b"not a 3ds file").is_err());
     }
+
+    #[test]
+    fn damaged_files_do_not_panic() {
+        crate::loaders::damage::assert_robust("3DS", &file(), |bytes| {
+            let _ = read(bytes);
+        });
+    }
 }

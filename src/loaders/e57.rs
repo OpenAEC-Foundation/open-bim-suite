@@ -233,4 +233,12 @@ mod tests {
         // every third of 15 points: 4 of the first scan, 1 of the second
         assert_eq!(layers.iter().map(Layer::vertex_count).collect::<Vec<_>>(), [4, 1]);
     }
+
+    #[test]
+    fn damaged_files_do_not_panic() {
+        crate::loaders::damage::assert_robust("E57", &sample(), |bytes| {
+            let source = Source::Bytes { name: "x.e57".into(), data: Arc::new(bytes.to_vec()) };
+            let _ = E57Loader.load_with(&source, &Progress::default());
+        });
+    }
 }
