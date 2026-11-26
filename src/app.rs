@@ -21,6 +21,8 @@ mod inform;
 #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
 mod rule_views;
 #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
+mod classify;
+#[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
 mod clash_words;
 #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
 mod room_checks;

@@ -2080,6 +2080,23 @@
     "See-through": "Transparente",
     "Show view": "Mostrar vista",
     "The first rule that takes an element says how it shows.": "La primera regla que toma un elemento decide cómo se muestra.",
-    "Views by rules": "Vistas por reglas"
+    "Views by rules": "Vistas por reglas",
+    "classes read": "clases leídas",
+    "Classification saved in": "Clasificación guardada en",
+    "Classification by rules": "Clasificación por reglas",
+    "NL-SfB example": "Ejemplo NL-SfB",
+    "classified": "clasificados",
+    "not": "no",
+    "rule": "regla",
+    "not classified": "sin clasificar",
+    "Remove class": "Quitar clase",
+    "and": "y",
+    "value, * ? |": "valor, * ? |",
+    "Add condition": "Añadir condición",
+    "Not classified": "Sin clasificar",
+    "Add class": "Añadir clase",
+    "(not classified)": "(sin clasificar)",
+    "A classification puts every element of every model in a class by rules (class, type, layer, properties), without changing the files. The class becomes a property to colour, count and select by. It goes with the rule set.": "Una clasificación pone cada elemento de cada modelo en una clase según reglas (clase, tipo, capa, propiedades), sin cambiar los archivos. La clase se convierte en una propiedad para colorear, contar y seleccionar. Va con el conjunto de reglas.",
+    "The first class that takes an element wins: put the narrowest on top. Values: * for anything, ? for one character, | between choices, any case.": "Gana la primera clase que toma un elemento: pon la más estrecha arriba. Valores: * para todo, ? para un carácter, | entre opciones, sin distinguir mayúsculas."
   }
 }
