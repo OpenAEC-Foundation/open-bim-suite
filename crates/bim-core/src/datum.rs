@@ -11,11 +11,17 @@ use glam::DVec2;
 use serde::{Deserialize, Serialize};
 
 /// A grid line: its name and its ends in plan, in project coordinates.
+///
+/// A locked (pinned) grid line keeps its name and its ends, and cannot be removed, until it is
+/// unlocked: a grid line is what a project is set out on, and moving one by a slip of the hand
+/// moves what hangs on it. Files from before the lock have none locked.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GridDef {
     pub name: String,
     pub start: DVec2,
     pub end: DVec2,
+    #[serde(default)]
+    pub locked: bool,
 }
 
 impl GridDef {
@@ -79,7 +85,7 @@ impl Model {
     /// index. A line without length is refused.
     pub fn add_grid(&mut self, start: DVec2, end: DVec2) -> Result<usize, Refusal> {
         let name = self.next_grid_name(start, end);
-        self.insert_grid(GridDef { name, start, end })
+        self.insert_grid(GridDef { name, start, end, locked: false })
     }
 
     /// Adds grid line `grid` as it is (reading a file); returns its index. A line without length
@@ -93,17 +99,34 @@ impl Model {
     }
 
     /// Changes grid line `index`; a line without length, or an index out of range, is refused.
+    /// A locked line keeps its name and ends: a change of them is refused (`Locked`); only the
+    /// lock itself can change (see [`Model::lock_grid`]).
     pub fn set_grid(&mut self, index: usize, grid: GridDef) -> Result<(), Refusal> {
         if (grid.end - grid.start).length() <= LINEAR_TOLERANCE || !grid.start.is_finite() || !grid.end.is_finite() {
             return Err(Refusal::ZeroLength);
         }
-        *self.grids.get_mut(index).ok_or(Refusal::Missing)? = grid;
+        let old = self.grids.get_mut(index).ok_or(Refusal::Missing)?;
+        if old.locked && (old.name != grid.name || old.start != grid.start || old.end != grid.end) {
+            return Err(Refusal::Locked);
+        }
+        *old = grid;
         Ok(())
     }
 
-    /// Removes grid line `index`; returns it.
+    /// Locks or unlocks grid line `index`.
+    pub fn lock_grid(&mut self, index: usize, locked: bool) -> Result<(), Refusal> {
+        self.grids.get_mut(index).ok_or(Refusal::Missing)?.locked = locked;
+        Ok(())
+    }
+
+    /// Whether grid line `index` is locked; a missing one is not.
+    pub fn grid_locked(&self, index: usize) -> bool {
+        self.grids.get(index).is_some_and(|g| g.locked)
+    }
+
+    /// Removes grid line `index`; returns it. A locked line stays, and so does a missing one.
     pub fn remove_grid(&mut self, index: usize) -> Option<GridDef> {
-        (index < self.grids.len()).then(|| self.grids.remove(index))
+        (index < self.grids.len() && !self.grids[index].locked).then(|| self.grids.remove(index))
     }
 }
 
@@ -134,12 +157,12 @@ mod tests {
         m.add_grid(p(0.0, 9.0), p(10.0, 9.0)).unwrap();
         assert_eq!(names(&m), ["2", "B", "C", "3", "D"]);
         // after Z comes A2
-        m.insert_grid(GridDef { name: "Z".into(), start: p(0.0, 20.0), end: p(10.0, 20.0) }).unwrap();
+        m.insert_grid(GridDef { name: "Z".into(), start: p(0.0, 20.0), end: p(10.0, 20.0), locked: false }).unwrap();
         assert_eq!(m.next_grid_name(p(0.0, 0.0), p(1.0, 0.0)), "A2");
-        m.insert_grid(GridDef { name: "Z2".into(), start: p(0.0, 21.0), end: p(10.0, 21.0) }).unwrap();
+        m.insert_grid(GridDef { name: "Z2".into(), start: p(0.0, 21.0), end: p(10.0, 21.0), locked: false }).unwrap();
         assert_eq!(m.next_grid_name(p(0.0, 0.0), p(1.0, 0.0)), "A3");
         // names of one's own do not count
-        m.insert_grid(GridDef { name: "Gevel".into(), start: p(0.0, 22.0), end: p(10.0, 22.0) }).unwrap();
+        m.insert_grid(GridDef { name: "Gevel".into(), start: p(0.0, 22.0), end: p(10.0, 22.0), locked: false }).unwrap();
         assert_eq!(m.next_grid_name(p(0.0, 0.0), p(1.0, 0.0)), "A3");
     }
 
@@ -155,9 +178,9 @@ mod tests {
         assert_eq!(g[one].crossing(&g[short]), None, "it ends before the other");
         assert_eq!(g[a].crossing(&g[short]), None, "parallel");
         // moved, renamed, removed
-        m.set_grid(one, GridDef { name: "X".into(), start: p(3.0, -1.0), end: p(3.0, 6.0) }).unwrap();
+        m.set_grid(one, GridDef { name: "X".into(), start: p(3.0, -1.0), end: p(3.0, 6.0), locked: false }).unwrap();
         assert_eq!(m.grids()[one].name, "X");
-        assert_eq!(m.set_grid(9, GridDef { name: "Y".into(), start: p(0.0, 0.0), end: p(1.0, 0.0) }), Err(Refusal::Missing));
+        assert_eq!(m.set_grid(9, GridDef { name: "Y".into(), start: p(0.0, 0.0), end: p(1.0, 0.0), locked: false }), Err(Refusal::Missing));
         assert_eq!(m.remove_grid(one).map(|g| g.name), Some("X".into()));
         assert_eq!(m.grids().len(), 2);
     }
@@ -171,5 +194,41 @@ mod tests {
         // a model written before grid lines were kept has none
         let old: Model = serde_json::from_str(&serde_json::to_string(&Model::new(TileGrid::default())).unwrap().replace(",\"grids\":[]", "")).unwrap();
         assert!(old.grids().is_empty());
+    }
+
+    #[test]
+    fn a_locked_grid_line_keeps_its_name_and_ends_and_cannot_be_removed() {
+        let mut m = Model::new(TileGrid::default());
+        let a = m.add_grid(p(0.0, 0.0), p(0.0, 10.0)).unwrap();
+        let b = m.add_grid(p(5.0, 0.0), p(5.0, 10.0)).unwrap();
+        assert!(!m.grid_locked(a), "a new one is free");
+        m.lock_grid(a, true).unwrap();
+        assert!(m.grid_locked(a) && !m.grid_locked(b) && !m.grid_locked(9));
+        let moved = GridDef { name: "1".into(), start: p(1.0, 0.0), end: p(1.0, 10.0), locked: true };
+        assert_eq!(m.set_grid(a, moved.clone()), Err(Refusal::Locked));
+        // a longer line, a new name and a free one with other ends are refused all the same
+        assert_eq!(m.set_grid(a, GridDef { end: p(0.0, 12.0), ..m.grids()[a].clone() }), Err(Refusal::Locked));
+        assert_eq!(m.set_grid(a, GridDef { name: "X".into(), ..m.grids()[a].clone() }), Err(Refusal::Locked));
+        assert_eq!(m.set_grid(a, GridDef { locked: false, ..moved }), Err(Refusal::Locked), "unlocking is its own step");
+        assert_eq!((m.grids()[a].start, m.grids()[a].end), (p(0.0, 0.0), p(0.0, 10.0)));
+        assert!(m.remove_grid(a).is_none() && m.grids().len() == 2);
+        // the other is free
+        m.set_grid(b, GridDef { end: p(5.0, 12.0), ..m.grids()[b].clone() }).unwrap();
+        // unlocked, it changes and goes
+        m.lock_grid(a, false).unwrap();
+        m.set_grid(a, GridDef { end: p(0.0, 12.0), ..m.grids()[a].clone() }).unwrap();
+        assert_eq!(m.remove_grid(a).map(|g| g.name), Some("1".into()));
+        assert_eq!(m.lock_grid(9, true), Err(Refusal::Missing));
+    }
+
+    #[test]
+    fn the_lock_is_written_and_a_file_from_before_it_has_none_locked() {
+        let mut m = Model::new(TileGrid::default());
+        let a = m.add_grid(p(0.0, 0.0), p(0.0, 10.0)).unwrap();
+        m.lock_grid(a, true).unwrap();
+        let read: Model = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert!(read.grid_locked(0));
+        let line: GridDef = serde_json::from_str(r#"{"name":"A","start":[0.0,0.0],"end":[1.0,0.0]}"#).unwrap();
+        assert!(!line.locked);
     }
 }

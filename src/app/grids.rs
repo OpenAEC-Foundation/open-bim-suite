@@ -12,8 +12,9 @@ use crate::document::SectionView;
 use crate::model::GridLine;
 use crate::theme::Palette;
 use glam::Vec3;
-use iced::widget::column;
-use iced::{Element, Point};
+use iced::widget::{button, column, container, text, text_input};
+use iced::{Center, Element, Length, Point};
+use openaec_ui::design::a11y;
 use openaec_ui::Language;
 
 /// How far in front of a view's cut its grid lines and levels are drawn (metres): over the cut
@@ -279,7 +280,9 @@ impl App {
     }
 
     /// The picked grid's properties: its name, length, direction (degrees from x, 0 to 180),
-    /// elevation and ends (x, y in metres).
+    /// elevation and ends (x, y in metres). For a grid line of the modelled project the length is
+    /// a field (it sets the length of every grid line picked), and the lock is shown, with the
+    /// button that sets it and the switch for new grid lines.
     pub(super) fn grid_properties(&self, p: Palette, l: Language) -> Option<Element<'static, Message>> {
         let grid = self.model.as_ref()?.project.grids.get(self.picked_grid?)?;
         let (a, b) = (Vec3::from_array(grid.a), Vec3::from_array(grid.b));
@@ -287,18 +290,55 @@ impl App {
         let direction = along.y.atan2(along.x).to_degrees().rem_euclid(180.0);
         let end = |q: Vec3| format!("{:.3}; {:.3}", q.x, q.y);
         let row = |k: &str, v: String| prop_row(p, k.to_string(), v);
-        Some(
-            column![
-                row(l.text("Naam", "Name"), grid.name.clone()),
-                row(l.text("Lengte", "Length"), format!("{:.3} m", along.length())),
-                row(l.text("Richting", "Direction"), format!("{direction:.1}°")),
-                row(l.text("Hoogte", "Elevation"), format!("{:+.3} m", a.z)),
-                row(l.text("Begin", "Start"), end(a)),
-                row(l.text("Eind", "End"), end(b)),
-            ]
-            .spacing(5)
-            .into(),
-        )
+        let picked = self.picked_modelled_grids();
+        let modelled = self.picked_modelled_grid().is_some();
+        let mut rows = column![].spacing(5);
+        if self.grids_picked().len() > 1 {
+            rows = rows.push(row(l.text("Geselecteerd", "Selected"), self.grids_picked().len().to_string()));
+        }
+        rows = rows.push(row(l.text("Naam", "Name"), grid.name.clone()));
+        if modelled {
+            // the length of every one picked: one field
+            let label = l.text("Lengte (m)", "Length (m)");
+            let value = self.grid_length_text();
+            rows = rows.push(
+                iced::widget::row![
+                    text(label.to_string()).size(12).color(p.text_secondary).width(Length::FillPortion(2)),
+                    container(a11y::node(
+                        text_input("", &value).on_input(Message::GridLength).on_submit(Message::GridLengthDone).size(12).padding([2, 6]),
+                        a11y::Node::new(a11y::Role::TextField, label).value(value.clone()),
+                    ))
+                    .width(Length::FillPortion(3)),
+                ]
+                .spacing(8)
+                .align_y(Center),
+            );
+        } else {
+            rows = rows.push(row(l.text("Lengte", "Length"), format!("{:.3} m", along.length())));
+        }
+        rows = rows
+            .push(row(l.text("Richting", "Direction"), format!("{direction:.1}°")))
+            .push(row(l.text("Hoogte", "Elevation"), format!("{:+.3} m", a.z)))
+            .push(row(l.text("Begin", "Start"), end(a)))
+            .push(row(l.text("Eind", "End"), end(b)));
+        if modelled {
+            let locked = picked.iter().filter(|&&i| self.modeller.model.grid_locked(i)).count();
+            let state = match locked {
+                0 => l.text("Nee", "No").to_string(),
+                n if n == picked.len() => l.text("Ja", "Yes").to_string(),
+                n => format!("{n} / {}", picked.len()),
+            };
+            let all = self.picked_grids_locked();
+            let press = |label: &'static str, on: bool, message: Message| {
+                a11y::named(button(text(label).size(12)).padding([3, 10]).style(move |_, s| p.ribbon_button(on, s)).on_press(message), a11y::Role::Button, label)
+            };
+            let toggle = if all { l.text("Ontgrendelen", "Unlock") } else { l.text("Vergrendelen", "Lock") };
+            rows = rows
+                .push(row(l.text("Vergrendeld", "Locked"), state))
+                .push(press(toggle, false, Message::GridLock))
+                .push(press(l.text("Nieuwe stramienen vergrendelen", "Lock new grid lines"), self.modeller.lock_new_grids, Message::GridLockNew(!self.modeller.lock_new_grids)));
+        }
+        Some(rows.into())
     }
 }
 

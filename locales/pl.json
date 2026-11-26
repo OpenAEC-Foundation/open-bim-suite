@@ -2125,6 +2125,12 @@
     "Cancel sketch": "Anuluj szkic",
     "Finish sketch": "Zakończ szkic",
     "Hung the other way": "Zawieszone odwrotnie",
-    "Frame": "Ościeżnica"
+    "Frame": "Ościeżnica",
+    "All grid lines": "Wszystkie osie siatki",
+    "Lock": "Zablokuj",
+    "Unlock": "Odblokuj",
+    "Locked": "Zablokowana",
+    "Lock new grid lines": "Blokuj nowe osie siatki",
+    "The grid line is locked: unlock it to change it.": "Oś siatki jest zablokowana: odblokuj ją, aby ją zmienić."
   }
 }

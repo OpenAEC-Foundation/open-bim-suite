@@ -2125,6 +2125,12 @@
     "Cancel sketch": "Cancelar esboço",
     "Finish sketch": "Concluir esboço",
     "Hung the other way": "Com dobradiças no outro lado",
-    "Frame": "Caixilho"
+    "Frame": "Caixilho",
+    "All grid lines": "Todas as linhas de grelha",
+    "Lock": "Bloquear",
+    "Unlock": "Desbloquear",
+    "Locked": "Bloqueada",
+    "Lock new grid lines": "Bloquear as novas linhas de grelha",
+    "The grid line is locked: unlock it to change it.": "A linha de grelha está bloqueada: desbloqueie-a para a alterar."
   }
 }

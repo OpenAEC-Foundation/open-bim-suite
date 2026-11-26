@@ -15,8 +15,20 @@
 //! - **Moving.** A drag that starts on a picked grid line moves the picked ones with the cursor;
 //!   Move, Copy, Rotate and Mirror take them as they take elements. Rotate has a field for the
 //!   angle: Enter turns them by it about the centre clicked, else about their own middle.
+//! - **All at once.** Ctrl+A, or All grid lines on the ribbon, picks every grid line.
+//! - **Length.** A grid line has the length it was drawn with until it is changed: the properties
+//!   pane has a Length field, which sets the length of every grid line picked (each keeps its
+//!   start and its direction), and a drag that starts on a bubble of a picked grid line moves that
+//!   end along its line, every grid line picked following by the same distance (to within 10 mm,
+//!   and not past its other end).
+//! - **Locking.** A locked (pinned) grid line keeps its place, its length and its name: it is not
+//!   moved, turned, mirrored, dragged, lengthened or deleted, and the status line says so when
+//!   such a change spared it. The Lock button (ribbon, properties pane) locks the picked grid
+//!   lines, or unlocks them when all of them are locked; it is a step to take back. A copy or a new
+//!   line is free, or locked as it is made when "Lock new grid lines" is on (off to begin with,
+//!   kept while the app runs). Locked grid lines show in amber with a padlock at the bubbles.
 //! - **Removing.** Delete (or Delete in the menu of the right button) removes the picked grid
-//!   lines.
+//!   lines that are not locked.
 //! - **A series.** A picked grid line has a plus past its end: it opens a field for the
 //!   spacings of the lines to add beside it, in millimetres ("5000 3000 3x5400": 5 m on, 3 m
 //!   further, then three times 5.4 m). The new lines are parallel copies with the next free
@@ -48,9 +60,15 @@ const DRAG_ROUND: f64 = 0.01;
 pub struct GridDrag {
     /// The one the drag took hold of: it is the one that lands on a wall's line.
     held: usize,
+    /// The grid lines that follow (the locked ones among the picked are not here).
     indices: Vec<usize>,
+    /// All the grid lines picked, locked or not: they stay picked while the others follow.
+    picked: Vec<usize>,
     before: Vec<bim_core::GridDef>,
     origin: DVec2,
+    /// Which end (0: start, 1: end) the drag took by its bubble: then only that end moves, along
+    /// its line, and every grid line picked follows by the same distance. `None`: the lines move.
+    end: Option<usize>,
 }
 
 /// A message of the series field of the picked grid line.
@@ -108,7 +126,9 @@ impl App {
         let mut offset = 0.0;
         for d in apart {
             offset += d;
-            let _ = self.modeller.model.add_grid(line.start + side * offset, line.end + side * offset);
+            if let Ok(made) = self.modeller.model.add_grid(line.start + side * offset, line.end + side * offset) {
+                self.lock_if_asked(made);
+            }
         }
         self.show_modelled();
         let shown = self.shown_grid(index);
@@ -124,18 +144,131 @@ impl App {
             return;
         }
         let mut now = Vec::new();
+        let mut refused = false;
         for &index in indices {
             let Some(line) = self.modeller.model.grids().get(index).cloned() else { continue };
             let (start, end) = (map.plan(line.start), map.plan(line.end));
             let made = if copy {
-                self.modeller.model.add_grid(start, end).ok()
+                // a copy is a line of its own: free, or locked at once when new ones are
+                let made = self.modeller.model.add_grid(start, end).ok();
+                if let Some(made) = made {
+                    self.lock_if_asked(made);
+                }
+                made
             } else {
-                self.modeller.model.set_grid(index, bim_core::GridDef { start, end, ..line }).ok().map(|_| index)
+                match self.modeller.model.set_grid(index, bim_core::GridDef { start, end, ..line }) {
+                    Ok(()) => Some(index),
+                    // a locked line stays where it is, and stays picked
+                    Err(bim_core::Refusal::Locked) => {
+                        refused = true;
+                        Some(index)
+                    }
+                    Err(_) => None,
+                }
             };
             now.extend(made);
         }
+        self.modeller.refusal = refused.then_some(bim_core::Refusal::Locked);
         self.show_modelled();
         self.pick_modelled_grids(&now);
+    }
+
+    /// Locks grid line `index` of the modelled project when new grid lines are locked as they are
+    /// made.
+    fn lock_if_asked(&mut self, index: usize) {
+        if self.modeller.lock_new_grids {
+            let _ = self.modeller.model.lock_grid(index, true);
+        }
+    }
+
+    /// Locks (pins) the picked grid lines of the modelled project, or unlocks them when every one
+    /// of them is locked. False when none is picked.
+    pub(in crate::app) fn toggle_grid_lock(&mut self) -> bool {
+        let indices = self.picked_modelled_grids();
+        if indices.is_empty() {
+            return false;
+        }
+        let lock = !self.picked_grids_locked();
+        for &index in &indices {
+            let _ = self.modeller.model.lock_grid(index, lock);
+        }
+        self.modeller.refusal = None;
+        self.show_modelled();
+        self.pick_modelled_grids(&indices);
+        true
+    }
+
+    /// Whether every picked grid line of the modelled project is locked (and one is picked).
+    pub(crate) fn picked_grids_locked(&self) -> bool {
+        let indices = self.picked_modelled_grids();
+        !indices.is_empty() && indices.iter().all(|&i| self.modeller.model.grid_locked(i))
+    }
+
+    /// Which of the grid lines shown are locked ones of the modelled project, for the viewport.
+    pub(in crate::app) fn locked_shown_grids(&self) -> Vec<usize> {
+        (0..self.modeller.model.grids().len()).filter(|&i| self.modeller.model.grid_locked(i)).filter_map(|i| self.shown_grid(i)).collect()
+    }
+
+    /// Picks every grid line of the modelled project, instead of what is selected. False when it
+    /// has none.
+    pub(in crate::app) fn select_all_grids(&mut self) -> bool {
+        let all: Vec<usize> = (0..self.modeller.model.grids().len()).collect();
+        if all.is_empty() {
+            return false;
+        }
+        self.pick_grid(None);
+        self.modeller.grid_length = None;
+        self.pick_modelled_grids(&all);
+        true
+    }
+
+    /// The length of the picked grid lines as the field shows it: the length typed, else theirs
+    /// when they have one length, else nothing.
+    pub(in crate::app) fn grid_length_text(&self) -> String {
+        if let Some(typed) = &self.modeller.grid_length {
+            return typed.clone();
+        }
+        let lengths: Vec<f64> = self.picked_modelled_grids().iter().filter_map(|&i| self.modeller.model.grids().get(i)).map(|g| (g.end - g.start).length()).collect();
+        match lengths.first() {
+            Some(first) if lengths.iter().all(|l| (l - first).abs() < 0.0005) => format!("{first:.3}"),
+            _ => String::new(),
+        }
+    }
+
+    /// Enter in the length field: sets what was typed (metres).
+    pub(in crate::app) fn apply_grid_length(&mut self) {
+        let Some(typed) = self.modeller.grid_length.take() else { return };
+        let Ok(length) = typed.trim().replace(',', ".").parse::<f64>() else { return };
+        self.set_picked_grid_length(length);
+    }
+
+    /// Gives the picked grid lines of the modelled project the length `length` (metres): each keeps
+    /// its start and its direction, its end moves. The locked ones stay as they are; the rest
+    /// change in one step to take back.
+    pub(in crate::app) fn set_picked_grid_length(&mut self, length: f64) {
+        let indices = self.picked_modelled_grids();
+        if indices.is_empty() {
+            return;
+        }
+        if !length.is_finite() || length <= 0.0 {
+            self.modeller.refusal = Some(bim_core::Refusal::NotPositive);
+            return;
+        }
+        let (mut changed, mut refused) = (false, false);
+        for &index in &indices {
+            let Some(line) = self.modeller.model.grids().get(index).cloned() else { continue };
+            let along = (line.end - line.start).normalize_or_zero();
+            match self.modeller.model.set_grid(index, bim_core::GridDef { end: line.start + along * length, ..line }) {
+                Ok(()) => changed = true,
+                Err(bim_core::Refusal::Locked) => refused = true,
+                Err(_) => {}
+            }
+        }
+        self.modeller.refusal = refused.then_some(bim_core::Refusal::Locked);
+        if changed {
+            self.show_modelled();
+            self.pick_modelled_grids(&indices);
+        }
     }
 
     /// Picks the modelled grid lines `indices`, beside what is selected.
@@ -190,32 +323,76 @@ impl App {
                 return false;
             }
             let Some(under) = self.grid_under(from.0, from.1, width, height, None) else { return false };
-            let indices = self.picked_modelled_grids();
-            if !self.grids_picked().contains(&under) || indices.is_empty() {
+            let picked = self.picked_modelled_grids();
+            if !self.grids_picked().contains(&under) || picked.is_empty() {
                 return false;
             }
+            // the locked ones among the picked stay where they are
+            let (indices, locked): (Vec<usize>, Vec<usize>) = picked.iter().copied().partition(|&i| !self.modeller.model.grid_locked(i));
+            if indices.is_empty() {
+                // nothing could move: the drag is theirs, so no selection box starts, and the status line says why
+                self.modeller.refusal = Some(bim_core::Refusal::Locked);
+                return true;
+            }
+            self.modeller.refusal = (!locked.is_empty()).then_some(bim_core::Refusal::Locked);
             let Some(origin) = self.plane_point(from.0, from.1, width, height, z) else { return false };
-            let held = self.model.as_ref().and_then(|m| m.project.grids.get(under)).and_then(|line| self.modelled_grid_lines().iter().position(|g| g == line)).unwrap_or(indices[0]);
-            self.modeller.grid_drag = Some(GridDrag { held, indices, before: self.modeller.model.grids().to_vec(), origin: origin.truncate() });
+            let held = self.model.as_ref().and_then(|m| m.project.grids.get(under)).and_then(|line| self.modelled_grid_lines().iter().position(|g| g == line)).filter(|h| indices.contains(h)).unwrap_or(indices[0]);
+            let end = self.grid_end_at(under, from.0, from.1, width, height);
+            self.modeller.grid_drag = Some(GridDrag { held, indices, picked, before: self.modeller.model.grids().to_vec(), origin: origin.truncate(), end });
         }
         let Some(drag) = self.modeller.grid_drag.clone() else { return false };
         if let Some(at) = self.plane_point(to.0, to.1, width, height, z) {
-            let by = ((at.truncate() - drag.origin) / DRAG_ROUND).round() * DRAG_ROUND;
-            // near the axis or a side of a wall that runs its way (or the edge of a floor), the
-            // line held lands on it
-            let by = by + drag.before.get(drag.held).map_or(DVec2::ZERO, |line| self.onto_parallel(line, by, width, height, z));
-            for &index in &drag.indices {
-                let Some(line) = drag.before.get(index).cloned() else { continue };
-                let _ = self.modeller.model.set_grid(index, bim_core::GridDef { start: line.start + by, end: line.end + by, ..line });
+            match drag.end {
+                None => {
+                    let by = ((at.truncate() - drag.origin) / DRAG_ROUND).round() * DRAG_ROUND;
+                    // near the axis or a side of a wall that runs its way (or the edge of a floor), the
+                    // line held lands on it
+                    let by = by + drag.before.get(drag.held).map_or(DVec2::ZERO, |line| self.onto_parallel(line, by, width, height, z));
+                    for &index in &drag.indices {
+                        let Some(line) = drag.before.get(index).cloned() else { continue };
+                        let _ = self.modeller.model.set_grid(index, bim_core::GridDef { start: line.start + by, end: line.end + by, ..line });
+                    }
+                }
+                Some(end) => {
+                    // the bubble of one end: that end of every grid line follows along its own line by the
+                    // distance the cursor went along the one held, rounded to 10 mm
+                    let way = |line: &bim_core::GridDef| {
+                        let along = (line.end - line.start).normalize_or_zero();
+                        if end == 1 { along } else { -along }
+                    };
+                    let outward = drag.before.get(drag.held).map_or(DVec2::ZERO, way);
+                    let by = ((at.truncate() - drag.origin).dot(outward) / DRAG_ROUND).round() * DRAG_ROUND;
+                    for &index in &drag.indices {
+                        let Some(line) = drag.before.get(index).cloned() else { continue };
+                        let moved = match end {
+                            1 => bim_core::GridDef { end: line.end + way(&line) * by, ..line.clone() },
+                            _ => bim_core::GridDef { start: line.start + way(&line) * by, ..line.clone() },
+                        };
+                        // it may shorten to a hand's width, not to nothing or past its other end
+                        if (moved.end - moved.start).dot((line.end - line.start).normalize_or_zero()) < 0.01 {
+                            continue;
+                        }
+                        let _ = self.modeller.model.set_grid(index, moved);
+                    }
+                }
             }
             self.show_modelled();
-            self.pick_modelled_grids(&drag.indices);
+            self.pick_modelled_grids(&drag.picked);
         }
         if done {
             self.modeller.grid_drag = None;
             self.modeller.touched = true;
         }
         true
+    }
+
+    /// Which end of the shown grid line `shown` (0: start, 1: end) the viewport point (x, y) lies
+    /// on by its bubble; `None` when it lies on the line.
+    fn grid_end_at(&self, shown: usize, x: f32, y: f32, width: f32, height: f32) -> Option<usize> {
+        let view_proj = self.camera.view_proj(width / height);
+        let datum = self.datums().into_iter().find(|d| matches!(d.kind, crate::annotations::DatumKind::Grid(g) if g == shown))?;
+        let ends = crate::annotations::bubble_centres(&view_proj, (width, height), &datum.line)?;
+        ends.iter().position(|c| c.distance(iced::Point::new(x, y)) <= crate::annotations::RADIUS)
     }
 
     /// How much further grid line `line`, moved by `by`, goes to lie on the nearest line of an
@@ -405,8 +582,9 @@ impl App {
 
     /// Adds a grid line from `start` to `end` (scene coordinates) to the modelled project, shows
     /// it and picks it; returns its index among the project's grid lines.
-    pub(in crate::app) fn add_grid_line(&mut self, start: DVec2, end: DVec2) -> Result<usize, bim_core::Refusal> {
+    pub(crate) fn add_grid_line(&mut self, start: DVec2, end: DVec2) -> Result<usize, bim_core::Refusal> {
         let index = self.modeller.model.add_grid(start, end)?;
+        self.lock_if_asked(index);
         self.show_modelled();
         let shown = self.shown_grid(index);
         self.pick_grid(shown);
@@ -451,11 +629,20 @@ impl App {
         // from the last on, so the others keep their place
         indices.sort_unstable();
         indices.dedup();
-        for index in indices.into_iter().rev() {
+        // a locked grid line stays, picked, and the status line says why
+        let (kept, removed): (Vec<usize>, Vec<usize>) = indices.iter().copied().partition(|&i| self.modeller.model.grid_locked(i));
+        for &index in removed.iter().rev() {
             self.modeller.model.remove_grid(index);
         }
+        self.modeller.refusal = (!kept.is_empty()).then_some(bim_core::Refusal::Locked);
+        self.modeller.grid_length = None;
+        // the places of those that stay, after the others went
+        let kept: Vec<usize> = kept.iter().map(|&i| i - removed.iter().filter(|&&r| r < i).count()).collect();
         self.set_picked_grids(Vec::new());
         self.show_modelled();
+        if !kept.is_empty() {
+            self.pick_modelled_grids(&kept);
+        }
         true
     }
 
@@ -710,5 +897,214 @@ mod tests {
         assert!(app.modeller.grid_tool && app.modeller.points.is_empty());
         let _ = app.update(Message::Escape);
         assert!(!app.modeller.grid_tool);
+    }
+
+    /// Three vertical grid lines at x = 2, 5 and 8, from y = -1 up to 8, 4 and 8.
+    fn three_grid_lines() -> crate::app::App {
+        let mut app = modelling();
+        app.modeller.in_modeller = true;
+        for (x, top) in [(2.0, 8.0), (5.0, 4.0), (8.0, 8.0)] {
+            app.add_grid_line(DVec2::new(x, -1.0), DVec2::new(x, top)).unwrap();
+        }
+        app
+    }
+
+    fn drag(app: &mut crate::app::App, from: (f32, f32), to: (f32, f32)) {
+        use crate::viewport::Navigate;
+        let (w, h) = app.viewport_size;
+        for done in [false, true] {
+            let _ = app.update(Message::Navigate(Navigate::Box { x0: from.0, y0: from.1, x1: to.0, y1: to.1, width: w, height: h, done, add: false }));
+        }
+    }
+
+    /// Where the bubble at the end `end` (0 or 1) of modelled grid line `index` is on screen.
+    fn bubble(app: &crate::app::App, index: usize, end: usize) -> (f32, f32) {
+        let (w, h) = app.viewport_size;
+        let shown = app.shown_grid(index).unwrap();
+        let view_proj = app.camera.view_proj(w / h);
+        let datum = app.datums().into_iter().find(|d| matches!(d.kind, crate::annotations::DatumKind::Grid(g) if g == shown)).unwrap();
+        let c = crate::annotations::bubble_centres(&view_proj, (w, h), &datum.line).unwrap()[end];
+        (c.x, c.y)
+    }
+
+    #[test]
+    fn every_grid_line_is_picked_at_once() {
+        let mut app = three_grid_lines();
+        app.pick_grid(None);
+        let _ = app.update(Message::GridSelectAll);
+        assert_eq!(app.picked_modelled_grids(), [0, 1, 2]);
+        // grid lines and elements are not picked together
+        assert!(app.selected_modelled().is_empty());
+        // none to pick in a project without
+        let mut app = modelling();
+        assert!(!app.select_all_grids());
+    }
+
+    #[test]
+    fn the_length_typed_goes_to_every_grid_line_picked_and_is_one_step() {
+        let mut app = three_grid_lines();
+        let _ = app.update(Message::GridSelectAll);
+        // they differ in length (9, 5, 9): the field shows nothing until one is typed
+        assert_eq!(app.grid_length_text(), "");
+        let _ = app.update(Message::GridLength("12".into()));
+        assert_eq!(app.grid_length_text(), "12", "what is typed shows as typed");
+        let _ = app.update(Message::GridLengthDone);
+        let ends: Vec<(DVec2, DVec2)> = app.modeller.model.grids().iter().map(|g| (g.start, g.end)).collect();
+        assert_eq!(
+            ends,
+            [(DVec2::new(2.0, -1.0), DVec2::new(2.0, 11.0)), (DVec2::new(5.0, -1.0), DVec2::new(5.0, 11.0)), (DVec2::new(8.0, -1.0), DVec2::new(8.0, 11.0))],
+            "the starts stay, the ends go to 12 m"
+        );
+        assert_eq!(app.grid_length_text(), "12.000", "they have one length now");
+        assert_eq!(app.picked_modelled_grids(), [0, 1, 2], "they stay picked");
+        let _ = app.update(Message::Undo);
+        assert_eq!(app.modeller.model.grids()[1].end, DVec2::new(5.0, 4.0), "one step back");
+        // a comma is a decimal point, and a length of nothing is refused
+        let _ = app.update(Message::GridLength("6,5".into()));
+        let _ = app.update(Message::GridLengthDone);
+        assert_eq!(app.modeller.model.grids()[1].end, DVec2::new(5.0, 5.5));
+        let _ = app.update(Message::GridLength("0".into()));
+        let _ = app.update(Message::GridLengthDone);
+        assert_eq!(app.modeller.refusal, Some(bim_core::Refusal::NotPositive));
+        assert_eq!(app.modeller.model.grids()[1].end, DVec2::new(5.0, 5.5));
+        // what is not a number leaves them alone
+        let _ = app.update(Message::GridLength("abc".into()));
+        let _ = app.update(Message::GridLengthDone);
+        assert_eq!(app.modeller.model.grids()[0].end, DVec2::new(2.0, 5.5));
+    }
+
+    #[test]
+    fn a_drag_by_a_bubble_changes_the_length_of_every_grid_line_picked_by_the_same_distance() {
+        let mut app = three_grid_lines();
+        let _ = app.update(Message::GridSelectAll);
+        let (w, h) = app.viewport_size;
+        let at = |app: &crate::app::App, x: f64, y: f64| app.on_screen(glam::DVec3::new(x, y, 0.0), w, h).unwrap();
+        // the bubble at the far end of the first line, pulled 2 m on
+        let from = bubble(&app, 0, 1);
+        let (a, b) = (at(&app, 2.0, 8.0), at(&app, 2.0, 10.0));
+        drag(&mut app, from, (from.0 + b.0 - a.0, from.1 + b.1 - a.1));
+        let tops: Vec<f64> = app.modeller.model.grids().iter().map(|g| g.end.y).collect();
+        assert!((tops[0] - 10.0).abs() < 0.05 && (tops[1] - 6.0).abs() < 0.05 && (tops[2] - 10.0).abs() < 0.05, "{tops:?}");
+        assert!(app.modeller.model.grids().iter().all(|g| g.start.y == -1.0), "the starts stay");
+        assert_eq!(names(&app), ["1", "2", "3"]);
+        assert_eq!(app.picked_modelled_grids(), [0, 1, 2], "they stay picked");
+        assert!(app.modeller.grid_drag.is_none());
+        let _ = app.update(Message::Undo);
+        assert_eq!(app.modeller.model.grids()[0].end, DVec2::new(2.0, 8.0), "one step");
+        // the bubble at the start end moves the start; a line that would shrink to nothing stays as it is
+        let from = bubble(&app, 0, 0);
+        let (a, b) = (at(&app, 2.0, -1.0), at(&app, 2.0, 5.0));
+        drag(&mut app, from, (from.0 + b.0 - a.0, from.1 + b.1 - a.1));
+        let g = app.modeller.model.grids();
+        assert!((g[0].start.y - 5.0).abs() < 0.05 && g[0].end.y == 8.0, "{:?}", g[0]);
+        assert!(g[1].start.y == -1.0 && g[1].end.y == 4.0, "the short one would pass its other end: it stays {:?}", g[1]);
+    }
+
+    #[test]
+    fn a_locked_grid_line_is_not_moved_dragged_lengthened_or_deleted() {
+        use crate::app::transform::TransformKind;
+        let mut app = three_grid_lines();
+        // the middle one is locked
+        app.set_picked_grids(vec![1]);
+        let _ = app.update(Message::GridLock);
+        assert!(app.modeller.model.grid_locked(1) && app.picked_grids_locked());
+        assert_eq!(app.locked_shown_grids(), [app.shown_grid(1).unwrap()]);
+        let _ = app.update(Message::GridSelectAll);
+        // a drag of all three moves the free ones, the locked one stays, picked, and the status line says why
+        let (w, h) = app.viewport_size;
+        let at = |app: &crate::app::App, x: f64, y: f64| app.on_screen(glam::DVec3::new(x, y, 0.0), w, h).unwrap();
+        let (from, to) = (at(&app, 2.0, 3.0), at(&app, 3.5, 3.0));
+        drag(&mut app, from, to);
+        let xs: Vec<f64> = app.modeller.model.grids().iter().map(|g| g.start.x).collect();
+        assert!((xs[0] - 3.5).abs() < 0.011 && xs[1] == 5.0 && (xs[2] - 9.5).abs() < 0.011, "{xs:?}");
+        assert_eq!(app.modeller.refusal, Some(bim_core::Refusal::Locked));
+        assert_eq!(app.picked_modelled_grids(), [0, 1, 2]);
+        // a drag that starts on the locked one alone moves nothing, and starts no selection box
+        app.set_picked_grids(vec![1]);
+        let (from, to) = (at(&app, 5.0, 2.0), at(&app, 6.0, 2.0));
+        drag(&mut app, from, to);
+        assert_eq!(app.modeller.model.grids()[1].start.x, 5.0);
+        assert!(app.box_select.is_none());
+        // a length typed leaves it too
+        let _ = app.update(Message::GridSelectAll);
+        let _ = app.update(Message::GridLength("20".into()));
+        let _ = app.update(Message::GridLengthDone);
+        let tops: Vec<f64> = app.modeller.model.grids().iter().map(|g| g.end.y).collect();
+        assert_eq!(tops, [19.0, 4.0, 19.0]);
+        assert_eq!(app.modeller.refusal, Some(bim_core::Refusal::Locked));
+        // Move takes the free ones as well
+        let _ = app.update(Message::Transform(TransformKind::Move));
+        click(&mut app, 3.5, -1.0);
+        click(&mut app, 4.5, -1.0);
+        assert_eq!(app.modeller.model.grids()[1].start.x, 5.0);
+        // Delete takes the free ones; the locked one stays, picked, under its own name
+        let _ = app.update(Message::GridSelectAll);
+        let _ = app.update(Message::DeletePicked);
+        assert_eq!(names(&app), ["2"]);
+        assert_eq!(app.picked_modelled_grids(), [0]);
+        assert_eq!(app.modeller.refusal, Some(bim_core::Refusal::Locked));
+        // unlocked (the button again, all being locked), it goes
+        let _ = app.update(Message::GridLock);
+        assert!(!app.modeller.model.grid_locked(0));
+        let _ = app.update(Message::DeletePicked);
+        assert!(names(&app).is_empty());
+    }
+
+    #[test]
+    fn the_lock_button_locks_all_picked_unless_all_are_locked_and_is_a_step_to_take_back() {
+        let mut app = three_grid_lines();
+        // nothing picked: nothing to lock
+        app.pick_grid(None);
+        assert!(!app.toggle_grid_lock());
+        app.set_picked_grids(vec![0]);
+        let _ = app.update(Message::GridLock);
+        let _ = app.update(Message::GridSelectAll);
+        // one of three is locked: the button locks the rest
+        assert!(!app.picked_grids_locked());
+        let _ = app.update(Message::GridLock);
+        assert!((0..3).all(|i| app.modeller.model.grid_locked(i)));
+        let _ = app.update(Message::Undo);
+        assert_eq!((0..3).map(|i| app.modeller.model.grid_locked(i)).collect::<Vec<_>>(), [true, false, false], "one step back");
+        let _ = app.update(Message::Redo);
+        // all locked: it unlocks them
+        let _ = app.update(Message::GridLock);
+        assert!((0..3).all(|i| !app.modeller.model.grid_locked(i)));
+        assert!(app.locked_shown_grids().is_empty());
+    }
+
+    #[test]
+    fn new_grid_lines_are_locked_when_asked() {
+        use crate::app::transform::TransformKind;
+        let mut app = modelling();
+        // not to begin with
+        app.add_grid_line(DVec2::new(2.0, -1.0), DVec2::new(2.0, 8.0)).unwrap();
+        assert!(!app.modeller.model.grid_locked(0));
+        let _ = app.update(Message::GridLockNew(true));
+        // one drawn, a series beside it, a copy of it
+        app.add_grid_line(DVec2::new(4.0, -1.0), DVec2::new(4.0, 8.0)).unwrap();
+        assert!(app.modeller.model.grid_locked(1));
+        app.set_picked_grids(vec![0]);
+        assert!(app.add_grid_series(&[3.0, 3.0]));
+        assert_eq!(app.modeller.model.grids().len(), 4);
+        assert!(!app.modeller.model.grid_locked(0) && (1..4).all(|i| app.modeller.model.grid_locked(i)));
+        app.set_picked_grids(vec![0]);
+        let _ = app.update(Message::Transform(TransformKind::Copy));
+        click(&mut app, 2.0, -1.0);
+        click(&mut app, 9.0, -1.0);
+        assert_eq!(app.modeller.model.grids().len(), 5);
+        assert!(app.modeller.model.grid_locked(4) && !app.modeller.model.grid_locked(0));
+        let _ = app.update(Message::GridLockNew(false));
+        app.add_grid_line(DVec2::new(12.0, -1.0), DVec2::new(12.0, 8.0)).unwrap();
+        assert!(!app.modeller.model.grid_locked(5));
+    }
+
+    #[test]
+    fn a_locked_grid_line_is_written_with_the_project_and_read_back_locked() {
+        let mut app = three_grid_lines();
+        app.set_picked_grids(vec![2]);
+        let _ = app.update(Message::GridLock);
+        let json = serde_json::to_value(app.modeller.model.grids()).unwrap();
+        let read: Vec<bim_core::GridDef> = serde_json::from_value(json).unwrap();
+        assert_eq!(read.iter().map(|g| g.locked).collect::<Vec<_>>(), [false, false, true]);
     }
 }

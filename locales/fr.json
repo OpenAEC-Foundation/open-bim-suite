@@ -2125,6 +2125,12 @@
     "Cancel sketch": "Annuler l'esquisse",
     "Finish sketch": "Terminer l'esquisse",
     "Hung the other way": "Ferrée de l'autre côté",
-    "Frame": "Châssis"
+    "Frame": "Châssis",
+    "All grid lines": "Toutes les lignes de grille",
+    "Lock": "Verrouiller",
+    "Unlock": "Déverrouiller",
+    "Locked": "Verrouillée",
+    "Lock new grid lines": "Verrouiller les nouvelles lignes de grille",
+    "The grid line is locked: unlock it to change it.": "La ligne de grille est verrouillée : déverrouillez-la pour la modifier."
   }
 }

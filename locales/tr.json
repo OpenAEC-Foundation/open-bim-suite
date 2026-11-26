@@ -2125,6 +2125,12 @@
     "Cancel sketch": "Eskizi iptal et",
     "Finish sketch": "Eskizi bitir",
     "Hung the other way": "Diğer taraftan menteşeli",
-    "Frame": "Kasa"
+    "Frame": "Kasa",
+    "All grid lines": "Tüm aks çizgileri",
+    "Lock": "Kilitle",
+    "Unlock": "Kilidi aç",
+    "Locked": "Kilitli",
+    "Lock new grid lines": "Yeni aks çizgilerini kilitle",
+    "The grid line is locked: unlock it to change it.": "Aks çizgisi kilitli: değiştirmek için kilidini açın."
   }
 }
