@@ -10,7 +10,7 @@ use iced::widget::canvas::{self, Frame, Path};
 use iced::{alignment, mouse, Color, Point, Rectangle};
 
 /// Bubble radius (logical pixels).
-const RADIUS: f32 = 10.0;
+pub const RADIUS: f32 = 10.0;
 /// How close a click must come to a grid line to pick it (logical pixels).
 pub const PICK: f32 = 5.0;
 /// How far apart on screen two levels must be to both be named: a name above and a height below
@@ -45,6 +45,8 @@ pub struct GridOverlay {
     pub ink: Color,
     /// The picked grids (of the model), drawn over in light blue.
     pub picked: Vec<usize>,
+    /// The locked grids (of the model): drawn in amber with a padlock at each bubble.
+    pub locked: Vec<usize>,
     pub accent: Color,
     /// Per grid of the model, whether the head at its first and at its second end is seen (not
     /// behind the model); a grid it does not hold shows both.
@@ -74,6 +76,25 @@ fn project_w(view_proj: &Mat4, size: (f32, f32), world: Vec3) -> Option<(Point, 
 
 /// The colour of a picked grid line: light blue, apart from the accent of what is being placed.
 pub const PICKED: iced::Color = iced::Color { r: 0.25, g: 0.66, b: 1.0, a: 1.0 };
+
+/// The colour of a locked grid line that is not picked: amber.
+pub const LOCKED: iced::Color = iced::Color { r: 0.85, g: 0.52, b: 0.08, a: 1.0 };
+
+/// A small padlock with its body's top left corner at `at`: a shackle over a body, in `ink`.
+fn draw_padlock(frame: &mut Frame, at: Point, ink: Color, fill: Color) {
+    let (w, h) = (9.0, 6.0);
+    // the shackle: three sides of a box over the body
+    let shackle = Path::new(|b| {
+        b.move_to(Point::new(at.x + 1.5, at.y));
+        b.line_to(Point::new(at.x + 1.5, at.y - 4.0));
+        b.line_to(Point::new(at.x + w - 1.5, at.y - 4.0));
+        b.line_to(Point::new(at.x + w - 1.5, at.y));
+    });
+    frame.stroke(&shackle, canvas::Stroke::default().with_color(ink).with_width(1.3));
+    let body = Path::rectangle(at, iced::Size::new(w, h));
+    frame.fill(&body, ink);
+    frame.stroke(&body, canvas::Stroke::default().with_color(fill).with_width(0.5));
+}
 
 /// The grid (of the model) under screen point `cursor` among the datum lines drawn: inside one of
 /// its bubbles (always seen: they are drawn on top), or within `PICK` pixels of its line where
@@ -254,7 +275,14 @@ impl<Message> canvas::Program<Message> for GridOverlay {
             let grid = &datum.line;
             let picked = is_picked(datum);
             let Some(ends) = bubble_centres(&self.view_proj, size, grid) else { continue };
-            let (ink, width) = if picked { (PICKED, 2.5) } else { (self.ink, 1.2) };
+            let locked = matches!(datum.kind, DatumKind::Grid(g) if self.locked.contains(&g));
+            let (ink, width) = if picked {
+                (PICKED, 2.5)
+            } else if locked {
+                (LOCKED, 1.6)
+            } else {
+                (self.ink, 1.2)
+            };
             if picked {
                 // its whole line, over what hides it
                 let a = project(&self.view_proj, size, Vec3::from_array(grid.a));
@@ -284,6 +312,10 @@ impl<Message> canvas::Program<Message> for GridOverlay {
                     font: openaec_ui::fonts::MEDIUM,
                     ..canvas::Text::default()
                 });
+                if locked {
+                    // the padlock sits at the bubble's outer shoulder
+                    draw_padlock(&mut frame, Point::new(c.x + RADIUS * 0.55, c.y - RADIUS * 1.15), if picked { PICKED } else { LOCKED }, self.fill);
+                }
             }
         }
         vec![frame.into_geometry()]

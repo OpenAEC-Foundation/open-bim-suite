@@ -1644,6 +1644,22 @@ impl Studio {
             );
         }
         list.push(Command::new("project.level", l.text("Bouwlaagpeil", "Level datum"), go(Message::NewLevel(l.text("Niveau", "Level")))).icon(small("modeller.level"), large("modeller.level")).enabled(loaded));
+        // every grid line of the modelled project picked at once, and the picked ones pinned
+        // (locked) or released: a locked grid line keeps its place, its length and its name
+        let grids_in_project = !app.modeller.model.grids().is_empty();
+        let all_locked = app.picked_grids_locked();
+        list.push(
+            Command::new("grid.select-all", l.text("Alle stramienen", "All grid lines"), go(Message::GridSelectAll))
+                .icon(small("view.grid"), large("view.grid"))
+                .shortcut(Shortcut::ctrl('a'))
+                .enabled(grids_in_project),
+        );
+        list.push(
+            Command::new("grid.lock", if all_locked { l.text("Ontgrendelen", "Unlock") } else { l.text("Vergrendelen", "Lock") }, go(Message::GridLock))
+                .icon(small("grid.end-couple"), large("grid.end-couple"))
+                .toggle(all_locked)
+                .enabled(!app.picked_modelled_grids().is_empty()),
+        );
         // a grid line of the modelled project: two clicks on the work plane
         list.push(Command::new("project.grid", l.text("Stramienas", "Grid axis"), go(Message::GridTool)).icon(small("modeller.axis"), large("modeller.axis")).mode(app.modeller.grid_tool).enabled(app.modeller.shown.is_some()));
         list.push(plan("project.floor-plan", l.text("Plattegrond", "Floor plan"), PlanKind::Floor));
@@ -2889,7 +2905,7 @@ impl Studio {
             // what the model is drawn on and in: its levels, its views and sheets, its types
             RibbonPage::Project => vec![
                 (l.text("Niveaus", "Levels"), vec![large("project.level")]),
-                (l.text("Stramien", "Grid"), vec![large("project.grid")]),
+                (l.text("Stramien", "Grid"), vec![large("project.grid"), smalls(&["grid.select-all", "grid.lock"])]),
                 (l.text("Weergaven", "Views"), vec![large("project.floor-plan"), smalls(&["project.structural-plan", "project.ceiling-plan", "annotate.section"])]),
                 (l.text("Tekenbladen", "Sheets"), vec![large("project.sheet"), smalls(&["project.booklet", "project.booklet-pdf"])]),
                 (l.text("Bibliotheek", "Library"), vec![large("project.library")]),
@@ -4419,6 +4435,37 @@ mod tests {
         let groups = studio.ribbon_groups_of(RibbonPage::Model);
         let group = groups.iter().find(|(_, parts)| parts.iter().flat_map(part_ids).any(|c| c == id)).unwrap_or_else(|| panic!("{id} is on no group of the Model tab"));
         group.1.iter().flat_map(part_ids).collect()
+    }
+
+    #[test]
+    fn the_grid_buttons_pick_all_grid_lines_and_lock_the_picked_ones() {
+        let mut app = App::default();
+        app.add_demo_building();
+        let mut studio = Studio::new(app);
+        studio.set_product(Product::Modeller);
+        // the Grid tool is with the datums on the Model tab; picking all and locking are in the Grid group of the Project tab
+        // (on the Model tab two more small buttons would make it too wide for the labels of the others)
+        assert_eq!(model_group_with(&studio, "project.grid"), ["project.grid", "project.level"]);
+        let project = studio.ribbon_groups_of(RibbonPage::Project);
+        let group = project.iter().find(|g| g.1.iter().any(|p| matches!(p, RibbonPart::Large("project.grid")))).expect("a Grid group on the Project tab");
+        let ids: Vec<&str> = group.1.iter().flat_map(|p| match p { RibbonPart::Large(id) => vec![*id], RibbonPart::Smalls(ids) => ids.clone() }).collect();
+        assert_eq!(ids, ["project.grid", "grid.select-all", "grid.lock"]);
+        // no grid lines: nothing to pick or lock
+        assert!(!studio.command("grid.select-all").enabled && !studio.command("grid.lock").enabled);
+        studio.app.add_grid_line(glam::DVec2::new(0.0, 0.0), glam::DVec2::new(0.0, 9.0)).unwrap();
+        studio.app.add_grid_line(glam::DVec2::new(4.0, 0.0), glam::DVec2::new(4.0, 9.0)).unwrap();
+        studio.app.pick_grid(None);
+        // (the shell keeps its command list until the next message: the app was changed behind its back)
+        *studio.commands_kept.lock().unwrap() = None;
+        assert!(studio.command("grid.select-all").enabled, "Ctrl+A is on it");
+        assert!(!studio.command("grid.lock").enabled, "none picked");
+        let _ = studio.update(studio.command("grid.select-all").message);
+        assert_eq!(studio.app.picked_modelled_grids(), [0, 1]);
+        assert!(studio.command("grid.lock").enabled);
+        let _ = studio.update(studio.command("grid.lock").message);
+        assert!(studio.app.modeller.model.grid_locked(0) && studio.app.modeller.model.grid_locked(1));
+        // all locked: the same button is Unlock, and shows as on
+        assert!(studio.command("grid.lock").kind == openaec_ui::design::command::CommandKind::Toggle(true));
     }
 
     #[test]

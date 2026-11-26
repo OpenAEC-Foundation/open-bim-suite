@@ -113,6 +113,8 @@ pub enum Refusal {
     TooShortForFitting,
     /// A sloped roof over an outline that turns inwards.
     NotConvex,
+    /// A grid line that is locked (pinned) was to be changed or removed.
+    Locked,
 }
 
 impl Refusal {
@@ -152,6 +154,7 @@ impl Refusal {
             Refusal::SystemJoin => "Two framed systems are joined butt or kept apart.",
             Refusal::TooShortForFitting => "A run is too short for the fitting at its end.",
             Refusal::NotConvex => "A sloped roof needs an outline without inward corners: draw each wing as a roof of its own.",
+            Refusal::Locked => "The grid line is locked: unlock it to change it.",
         }
     }
 }

@@ -178,9 +178,9 @@ impl App {
         let grids = self.modeller.model.grids();
         rows.push(branch(1, "grids", l.text("Stramienen", "Grid lines"), grids.len()));
         if open("grids") {
-            let picked_grid = self.picked_modelled_grid();
+            let picked_grids = self.picked_modelled_grids();
             for (i, g) in grids.iter().enumerate().take(MOST) {
-                rows.push(ExplorerRow { depth: 2, key: String::new(), label: g.name.clone(), beside: format!("{:.3} m", (g.end - g.start).length()), count: None, open: None, picked: picked_grid == Some(i), on_click: ExplorerMessage::Grid(i) });
+                rows.push(ExplorerRow { depth: 2, key: String::new(), label: g.name.clone(), beside: if g.locked { format!("{:.3} m · {}", (g.end - g.start).length(), l.text("Vergrendeld", "Locked")) } else { format!("{:.3} m", (g.end - g.start).length()) }, count: None, open: None, picked: picked_grids.contains(&i), on_click: ExplorerMessage::Grid(i) });
             }
         }
         // the types the elements use, by name

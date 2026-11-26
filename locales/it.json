@@ -2125,6 +2125,12 @@
     "Cancel sketch": "Annulla schizzo",
     "Finish sketch": "Termina schizzo",
     "Hung the other way": "Incernierata dall'altro lato",
-    "Frame": "Telaio"
+    "Frame": "Telaio",
+    "All grid lines": "Tutte le linee di griglia",
+    "Lock": "Blocca",
+    "Unlock": "Sblocca",
+    "Locked": "Bloccata",
+    "Lock new grid lines": "Blocca le nuove linee di griglia",
+    "The grid line is locked: unlock it to change it.": "La linea di griglia è bloccata: sbloccala per modificarla."
   }
 }

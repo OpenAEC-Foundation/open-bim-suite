@@ -1021,6 +1021,15 @@ pub enum Message {
     ToolDigit(char),
     /// The series field of the picked grid line.
     GridSeries(modeller::grids::SeriesMessage),
+    /// All the grid lines of the modelled project are picked.
+    GridSelectAll,
+    /// The picked grid lines are locked (pinned), or unlocked when all of them are locked.
+    GridLock,
+    /// New grid lines are locked as they are made, or not.
+    GridLockNew(bool),
+    /// The length typed for the picked grid lines (metres); Enter sets it.
+    GridLength(String),
+    GridLengthDone,
     /// A tool on the grid of curtain walls: on, or off when it is on.
     CurtainTool(modeller::curtain::CurtainTool),
     /// Grid line `index` of the selected curtain wall goes: an upright one (true) or a level one.
@@ -2422,6 +2431,15 @@ impl App {
                 self.tool_digit(c);
             }
             Message::GridSeries(message) => self.series_message(message),
+            Message::GridSelectAll => {
+                self.select_all_grids();
+            }
+            Message::GridLock => {
+                self.toggle_grid_lock();
+            }
+            Message::GridLockNew(on) => self.modeller.lock_new_grids = on,
+            Message::GridLength(typed) => self.modeller.grid_length = Some(typed),
+            Message::GridLengthDone => self.apply_grid_length(),
             Message::CurtainTool(tool) => self.toggle_curtain_tool(tool),
             Message::RemoveGridLine(upright, index) => self.remove_grid_line(upright, index),
             Message::EqualGrid => self.equal_grid(),
@@ -5235,6 +5253,7 @@ impl App {
                     fill: p.surface,
                     ink: p.text_secondary,
                     picked: self.grids_picked(),
+                    locked: self.locked_shown_grids(),
                     accent: p.accent,
                     seen: if self.shown_view().is_none() { self.heads_seen.1.clone() } else { Vec::new() },
                     dims: self.grid_dimensions(),

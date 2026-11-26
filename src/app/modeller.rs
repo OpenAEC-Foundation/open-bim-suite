@@ -285,6 +285,10 @@ pub struct Modeller {
     pub snap_words: [&'static str; 8],
     /// The series of grid lines being typed beside the picked one (see `grids`); `None`: closed.
     pub grid_series: Option<String>,
+    /// New grid lines are locked as they are made (see `grids`); off to begin with.
+    pub lock_new_grids: bool,
+    /// The length being typed for the picked grid lines, in metres; `None`: showing theirs.
+    pub grid_length: Option<String>,
     /// The tool on the grid of curtain walls that is on (see `curtain`).
     pub curtain: Option<curtain::CurtainTool>,
     /// The picked grid lines being dragged (see `grids::GridDrag`).

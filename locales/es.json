@@ -2125,6 +2125,12 @@
     "Cancel sketch": "Cancelar boceto",
     "Finish sketch": "Terminar boceto",
     "Hung the other way": "Abisagrada al otro lado",
-    "Frame": "Marco"
+    "Frame": "Marco",
+    "All grid lines": "Todas las líneas de rejilla",
+    "Lock": "Bloquear",
+    "Unlock": "Desbloquear",
+    "Locked": "Bloqueada",
+    "Lock new grid lines": "Bloquear las líneas de rejilla nuevas",
+    "The grid line is locked: unlock it to change it.": "La línea de rejilla está bloqueada: desbloquéela para cambiarla."
   }
 }

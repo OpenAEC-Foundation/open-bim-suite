@@ -2125,6 +2125,12 @@
     "Cancel sketch": "Avbryt skiss",
     "Finish sketch": "Slutför skiss",
     "Hung the other way": "Hängd åt andra hållet",
-    "Frame": "Karm"
+    "Frame": "Karm",
+    "All grid lines": "Alla rutnätslinjer",
+    "Lock": "Lås",
+    "Unlock": "Lås upp",
+    "Locked": "Låst",
+    "Lock new grid lines": "Lås nya rutnätslinjer",
+    "The grid line is locked: unlock it to change it.": "Rutnätslinjen är låst: lås upp den för att ändra den."
   }
 }

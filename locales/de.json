@@ -2125,6 +2125,12 @@
     "Cancel sketch": "Skizze abbrechen",
     "Finish sketch": "Skizze fertigstellen",
     "Hung the other way": "Andersherum angeschlagen",
-    "Frame": "Rahmen"
+    "Frame": "Rahmen",
+    "All grid lines": "Alle Rasterlinien",
+    "Lock": "Sperren",
+    "Unlock": "Entsperren",
+    "Locked": "Gesperrt",
+    "Lock new grid lines": "Neue Rasterlinien sperren",
+    "The grid line is locked: unlock it to change it.": "Die Rasterlinie ist gesperrt: Zum Ändern entsperren."
   }
 }
