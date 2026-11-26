@@ -48,6 +48,12 @@ pub(super) fn colour_choices(l: Language) -> &'static [Pick<Option<[u8; 3]>>] {
     &lists(l).colours
 }
 
+impl<T> Pick<T> {
+    pub fn new(value: T, label: String) -> Self {
+        Pick { value, label }
+    }
+}
+
 impl<T> std::fmt::Display for Pick<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.label)

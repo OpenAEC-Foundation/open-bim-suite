@@ -2097,6 +2097,16 @@
     "Add class": "Lägg till klass",
     "(not classified)": "(inte klassad)",
     "A classification puts every element of every model in a class by rules (class, type, layer, properties), without changing the files. The class becomes a property to colour, count and select by. It goes with the rule set.": "En klassificering delar in varje element i varje modell i en klass enligt regler (klass, typ, lager, egenskaper) utan att ändra filerna. Klassen blir en egenskap att färga, räkna och välja efter. Den följer med regeluppsättningen.",
-    "The first class that takes an element wins: put the narrowest on top. Values: * for anything, ? for one character, | between choices, any case.": "Den första klassen som tar ett element vinner: lägg den snävaste överst. Värden: * för allt, ? för ett tecken, | mellan val, oavsett skiftläge."
+    "The first class that takes an element wins: put the narrowest on top. Values: * for anything, ? for one character, | between choices, any case.": "Den första klassen som tar ett element vinner: lägg den snävaste överst. Värden: * för allt, ? för ett tecken, | mellan val, oavsett skiftläge.",
+    "Moderate": "Måttlig",
+    "critical": "kritisk",
+    "moderate": "måttlig",
+    "low": "låg",
+    "Clash matrix by class": "Krockmatris per klass",
+    "Agreed at once": "Godkänd direkt",
+    "no elements on one of the sides": "inga element på en av sidorna",
+    "elements in the test": "element i testet",
+    "Add pair": "Lägg till par",
+    "Test classes against each other, by codes or groups (5* against 2*): per pair a tolerance, how much a clash weighs and whether it is agreed to at once (a socket box in a wall). The pairs run with Find clashes.": "Testa klasser mot varandra, efter koder eller grupper (5* mot 2*): per par en tolerans, hur tungt en krock väger och om den godkänns direkt (en uttagsdosa i en vägg). Paren körs med Sök krockar."
   }
 }

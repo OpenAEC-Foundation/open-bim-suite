@@ -2097,6 +2097,16 @@
     "Add class": "Aggiungi classe",
     "(not classified)": "(non classificato)",
     "A classification puts every element of every model in a class by rules (class, type, layer, properties), without changing the files. The class becomes a property to colour, count and select by. It goes with the rule set.": "Una classificazione mette ogni elemento di ogni modello in una classe secondo regole (classe, tipo, layer, proprietà), senza modificare i file. La classe diventa una proprietà per colorare, contare e selezionare. Segue il set di regole.",
-    "The first class that takes an element wins: put the narrowest on top. Values: * for anything, ? for one character, | between choices, any case.": "Vince la prima classe che prende un elemento: metti la più stretta in alto. Valori: * per tutto, ? per un carattere, | tra le scelte, maiuscole indifferenti."
+    "The first class that takes an element wins: put the narrowest on top. Values: * for anything, ? for one character, | between choices, any case.": "Vince la prima classe che prende un elemento: metti la più stretta in alto. Valori: * per tutto, ? per un carattere, | tra le scelte, maiuscole indifferenti.",
+    "Moderate": "Moderato",
+    "critical": "critico",
+    "moderate": "moderato",
+    "low": "basso",
+    "Clash matrix by class": "Matrice delle interferenze per classe",
+    "Agreed at once": "Accettato subito",
+    "no elements on one of the sides": "nessun elemento su uno dei lati",
+    "elements in the test": "elementi nel test",
+    "Add pair": "Aggiungi coppia",
+    "Test classes against each other, by codes or groups (5* against 2*): per pair a tolerance, how much a clash weighs and whether it is agreed to at once (a socket box in a wall). The pairs run with Find clashes.": "Testare classi l'una contro l'altra, per codici o gruppi (5* contro 2*): per coppia una tolleranza, quanto pesa un'interferenza e se è accettata subito (una scatola per presa in un muro). Le coppie girano con Cerca interferenze."
   }
 }

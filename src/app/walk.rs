@@ -61,6 +61,7 @@ impl App {
     }
 
     /// A walking key is held.
+    #[cfg(test)]
     pub(crate) fn is_walking(&self) -> bool {
         self.walking.any()
     }

@@ -2097,6 +2097,16 @@
     "Add class": "Dodaj klasę",
     "(not classified)": "(niesklasyfikowany)",
     "A classification puts every element of every model in a class by rules (class, type, layer, properties), without changing the files. The class becomes a property to colour, count and select by. It goes with the rule set.": "Klasyfikacja przydziela każdy element każdego modelu do klasy według reguł (klasa, typ, warstwa, właściwości), bez zmiany plików. Klasa staje się właściwością do kolorowania, liczenia i zaznaczania. Należy do zestawu reguł.",
-    "The first class that takes an element wins: put the narrowest on top. Values: * for anything, ? for one character, | between choices, any case.": "Wygrywa pierwsza klasa, która obejmuje element: najwęższą umieść na górze. Wartości: * dla wszystkiego, ? dla jednego znaku, | między opcjami, wielkość liter bez znaczenia."
+    "The first class that takes an element wins: put the narrowest on top. Values: * for anything, ? for one character, | between choices, any case.": "Wygrywa pierwsza klasa, która obejmuje element: najwęższą umieść na górze. Wartości: * dla wszystkiego, ? dla jednego znaku, | między opcjami, wielkość liter bez znaczenia.",
+    "Moderate": "Umiarkowany",
+    "critical": "krytyczny",
+    "moderate": "umiarkowany",
+    "low": "niski",
+    "Clash matrix by class": "Macierz kolizji według klas",
+    "Agreed at once": "Od razu zaakceptowane",
+    "no elements on one of the sides": "brak elementów po jednej ze stron",
+    "elements in the test": "elementów w teście",
+    "Add pair": "Dodaj parę",
+    "Test classes against each other, by codes or groups (5* against 2*): per pair a tolerance, how much a clash weighs and whether it is agreed to at once (a socket box in a wall). The pairs run with Find clashes.": "Testuj klasy wzajemnie, według kodów lub grup (5* przeciw 2*): dla każdej pary tolerancja, waga kolizji i czy jest od razu akceptowana (puszka gniazdka w ścianie). Pary działają razem z Szukaj kolizji."
   }
 }

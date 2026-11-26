@@ -2097,6 +2097,16 @@
     "Add class": "Klasse hinzufügen",
     "(not classified)": "(nicht eingeteilt)",
     "A classification puts every element of every model in a class by rules (class, type, layer, properties), without changing the files. The class becomes a property to colour, count and select by. It goes with the rule set.": "Eine Klassifikation teilt jedes Element jedes Modells nach Regeln (Klasse, Typ, Ebene, Eigenschaften) in eine Klasse ein, ohne die Dateien zu ändern. Die Klasse wird eine Eigenschaft zum Einfärben, Zählen und Auswählen. Sie gehört zum Regelsatz.",
-    "The first class that takes an element wins: put the narrowest on top. Values: * for anything, ? for one character, | between choices, any case.": "Die erste Klasse, die ein Element erfasst, gewinnt: die engste nach oben. Werte: * für alles, ? für ein Zeichen, | zwischen Möglichkeiten, Groß- und Kleinschreibung egal."
+    "The first class that takes an element wins: put the narrowest on top. Values: * for anything, ? for one character, | between choices, any case.": "Die erste Klasse, die ein Element erfasst, gewinnt: die engste nach oben. Werte: * für alles, ? für ein Zeichen, | zwischen Möglichkeiten, Groß- und Kleinschreibung egal.",
+    "Moderate": "Mittel",
+    "critical": "kritisch",
+    "moderate": "mittel",
+    "low": "gering",
+    "Clash matrix by class": "Kollisionsmatrix nach Klasse",
+    "Agreed at once": "Sofort akzeptiert",
+    "no elements on one of the sides": "keine Elemente auf einer der Seiten",
+    "elements in the test": "Elemente im Test",
+    "Add pair": "Paar hinzufügen",
+    "Test classes against each other, by codes or groups (5* against 2*): per pair a tolerance, how much a clash weighs and whether it is agreed to at once (a socket box in a wall). The pairs run with Find clashes.": "Klassen gegeneinander prüfen, nach Codes oder Gruppen (5* gegen 2*): je Paar eine Toleranz, wie schwer eine Kollision wiegt und ob sie sofort akzeptiert ist (eine Steckdosendose in einer Wand). Die Paare laufen mit Kollisionen suchen."
   }
 }
