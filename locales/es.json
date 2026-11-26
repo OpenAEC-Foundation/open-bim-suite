@@ -2131,6 +2131,20 @@
     "Unlock": "Desbloquear",
     "Locked": "Bloqueada",
     "Lock new grid lines": "Bloquear las líneas de rejilla nuevas",
-    "The grid line is locked: unlock it to change it.": "La línea de rejilla está bloqueada: desbloquéela para cambiarla."
+    "The grid line is locked: unlock it to change it.": "La línea de rejilla está bloqueada: desbloquéela para cambiarla.",
+    "One PDF, a page per sheet": "Un PDF, una página por hoja",
+    "A PDF per sheet": "Un PDF por hoja",
+    "A DWG per sheet": "Un DWG por hoja",
+    "A DXF per sheet": "Un DXF por hoja",
+    "An SVG per sheet": "Un SVG por hoja",
+    "A file per sheet": "Un archivo por hoja",
+    "This model has no sheets.": "Este modelo no tiene hojas.",
+    "sheets picked": "hojas elegidas",
+    "As": "Como",
+    "Export sheets…": "Exportar hojas…",
+    "Export sheets": "Exportar hojas",
+    "Several sheets at once: as one PDF to print, or a PDF, DWG, DXF or SVG per sheet.": "Varias hojas a la vez: un solo PDF para imprimir, o un PDF, DWG, DXF o SVG por hoja.",
+    "One PDF is to print the series; per sheet asks for the folder and names each file after its sheet.": "Un solo PDF sirve para imprimir la serie; por hoja pide la carpeta y nombra cada archivo según su hoja.",
+    "The model's drawings are still being read; in a moment you can.": "Los planos del modelo aún se están leyendo; en un momento se podrá."
   }
 }

@@ -396,6 +396,8 @@ pub enum Dialog {
     Feedback,
     /// The card of the Pointcloud product: what the cloud's file holds and how its jobs are done.
     Cloud,
+    /// A series of sheets exported at once: which, and as what.
+    SheetsExport,
 }
 
 /// The feedback form: what is written in it, and how sending it goes.
@@ -1674,6 +1676,13 @@ impl Studio {
                 .enabled(sheets),
         );
         list.push(
+            Command::new("sheets.export", l.text("Sheets exporteren…", "Export sheets…"), Msg::Dialog(Some(Dialog::SheetsExport)))
+                .icon(small("file.save-as"), large("file.save-as"))
+                .detail(l.text("Meerdere sheets tegelijk: als één PDF om te printen, of een PDF, DWG, DXF of SVG per sheet.", "Several sheets at once: as one PDF to print, or a PDF, DWG, DXF or SVG per sheet."))
+                .dialog()
+                .enabled(!app.exportable_sheets().is_empty()),
+        );
+        list.push(
             Command::new("project.booklet-pdf", l.text("Boekje als PDF", "Booklet as PDF"), go(Message::ExportBooklet))
                 .icon(small("file.save-as"), large("file.save-as"))
                 .detail(l.text("Alle tekenbladen als één PDF, een pagina per blad.", "Every sheet as one PDF, a page per sheet."))
@@ -2012,6 +2021,10 @@ impl Studio {
             Msg::App(Message::Remote(call)) if call.cmd.starts_with("ui_") => return self.ui_command(call),
             Msg::App(message) if self.product() == Product::Viewer && !message.allowed_in_viewer() => return Task::none(),
             Msg::App(message) => {
+                // exporting the sheets picked closes their dialog; the save dialog follows
+                if matches!(message, Message::SheetExport(crate::app::sheet_export::Event::Go)) {
+                    self.dialog = None;
+                }
                 // how the 3D view draws its grids and levels is kept between sessions
                 let kept = (self.app.grid_heads_hidden, self.app.grid_dims, self.app.levels_3d, self.app.ambient);
                 if kept != (self.prefs.grid_heads_hidden, self.prefs.grid_dims, self.prefs.levels_3d, self.prefs.ambient) {
@@ -2862,6 +2875,10 @@ impl Studio {
                 if self.app.shown_fields().is_some() {
                     groups.push((l.text("Velden", "Fields"), vec![smalls(&["field.next", "field.previous"]), smalls(&["field.step-next", "field.step-previous"])]));
                 }
+                // a model with sheets (a Revit model's): the series exported or printed at once
+                if !self.app.exportable_sheets().is_empty() {
+                    groups.push((l.text("Sheets", "Sheets"), vec![large("sheets.export")]));
+                }
                 groups.extend(view_groups());
                 groups.push((l.text("Visualisatie", "Visualisation"), vec![smalls(&["file.render", "file.build-film"])]));
                 groups
@@ -2907,7 +2924,7 @@ impl Studio {
                 (l.text("Niveaus", "Levels"), vec![large("project.level")]),
                 (l.text("Stramien", "Grid"), vec![large("project.grid"), smalls(&["grid.select-all", "grid.lock"])]),
                 (l.text("Weergaven", "Views"), vec![large("project.floor-plan"), smalls(&["project.structural-plan", "project.ceiling-plan", "annotate.section"])]),
-                (l.text("Tekenbladen", "Sheets"), vec![large("project.sheet"), smalls(&["project.booklet", "project.booklet-pdf"])]),
+                (l.text("Tekenbladen", "Sheets"), vec![large("project.sheet"), smalls(&["project.booklet", "project.booklet-pdf", "sheets.export"])]),
                 (l.text("Bibliotheek", "Library"), vec![large("project.library")]),
             ],
             // drawing in the floor plan, section or sheet shown, in the order of a drawing program's
@@ -3518,6 +3535,22 @@ impl Studio {
                     vec![
                         w::button(look, l.text("Annuleren", "Cancel"), K::Quiet, D::Regular, None, Some(Msg::Dialog(None))),
                         w::button(look, if sending { l.text("Bezig met verzenden…", "Sending…") } else { l.text("Verzenden", "Send") }, K::Primary, D::Regular, None, form.ready().then(|| send(FeedbackMsg::Send))),
+                    ],
+                    true,
+                )
+            }
+            Dialog::SheetsExport => {
+                let can = !self.app.picked_sheets().is_empty() && !self.app.sheets_not_ready();
+                w::dialog(
+                    look,
+                    l.text("Sheets exporteren", "Export sheets"),
+                    close_icon,
+                    Some(Msg::Dialog(None)),
+                    self.app.sheet_export_card(look, l).map(Msg::App),
+                    None,
+                    vec![
+                        w::button(look, l.text("Annuleren", "Cancel"), K::Quiet, D::Regular, None, Some(Msg::Dialog(None))),
+                        w::button(look, l.text("Exporteren…", "Export…"), K::Primary, D::Regular, None, can.then_some(Msg::App(Message::SheetExport(crate::app::sheet_export::Event::Go)))),
                     ],
                     true,
                 )

@@ -7,6 +7,7 @@ mod caps;
 #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
 mod cloud;
 mod export_drawing;
+pub mod sheet_export;
 pub mod fields;
 #[cfg(all(feature = "pointcloud", not(target_arch = "wasm32")))]
 pub mod pointcloud;
@@ -387,6 +388,8 @@ pub struct App {
     views_3d_labels: Vec<(String, [f32; 3])>,
     /// The bar's Export button is open: the formats to export the drawing shown in follow it.
     pub export_menu: bool,
+    /// The sheets picked to export together, and as what.
+    pub(crate) sheet_export: sheet_export::State,
     /// The dimension tool of the sheets is on.
     pub dimension_tool: bool,
     reference_target: Option<(Arc<str>, usize)>,
@@ -743,6 +746,10 @@ pub enum Message {
     ShowBooklet,
     /// Writes every sheet of the document as one PDF, a page per sheet.
     ExportBooklet,
+    /// The dialog that exports a series of sheets at once.
+    SheetExport(sheet_export::Event),
+    /// A file per sheet written: the folder, how many, how long it took.
+    SheetsExported(Option<Result<(PathBuf, usize, f32), String>>),
     /// The modelled elements as one STEP file of their exact solids.
     ExportStep,
     RemoveSheet(Arc<str>),
@@ -1275,6 +1282,7 @@ impl Default for App {
             views_3d_key: Vec::new(),
             views_3d_labels: Vec::new(),
             export_menu: false,
+            sheet_export: Default::default(),
             dimension_tool: false,
             reference_target: None,
             annotates: true,
@@ -2922,6 +2930,14 @@ impl App {
             Message::OpenDocSheet(sheet) => self.open_doc_sheet(&sheet),
             Message::ShowBooklet => self.show_booklet(),
             Message::ExportBooklet => return self.export_booklet(),
+            Message::SheetExport(event) => return self.sheet_export_handle(event),
+            Message::SheetsExported(None) => {}
+            Message::SheetsExported(Some(result)) => {
+                self.status = match result {
+                    Ok((folder, count, secs)) => Status::Loaded(format!("Exported {count} sheets to {} in {secs:.2} s", folder.display())),
+                    Err(e) => Status::Error(e),
+                };
+            }
             Message::ExportStep => return self.export_step(),
             Message::RemoveSheet(sheet) => {
                 self.close_doc_sheet(&sheet);

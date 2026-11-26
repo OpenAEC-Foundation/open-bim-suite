@@ -183,7 +183,7 @@ fn export_task(drawing: Drawing2d, format: DrawingFormat, folder: Option<PathBuf
 
 /// The booklet as one PDF, a page per sheet, where the save dialog says.
 #[cfg(not(target_arch = "wasm32"))]
-fn booklet_task(drawings: Vec<Drawing2d>, title: String, folder: Option<PathBuf>) -> Task<Message> {
+pub(super) fn booklet_task(drawings: Vec<Drawing2d>, title: String, folder: Option<PathBuf>) -> Task<Message> {
     let mut dialog = rfd::AsyncFileDialog::new().set_title("Export").set_file_name(format!("{title}.pdf")).add_filter("PDF", &["pdf"]);
     if let Some(folder) = folder {
         dialog = dialog.set_directory(folder);
@@ -208,7 +208,7 @@ fn booklet_task(drawings: Vec<Drawing2d>, title: String, folder: Option<PathBuf>
 
 /// The browser has no save dialog: the booklet goes to the downloads.
 #[cfg(target_arch = "wasm32")]
-fn booklet_task(drawings: Vec<Drawing2d>, title: String, _folder: Option<PathBuf>) -> Task<Message> {
+pub(super) fn booklet_task(drawings: Vec<Drawing2d>, title: String, _folder: Option<PathBuf>) -> Task<Message> {
     Task::perform(
         async move {
             crate::web::next_frame().await;

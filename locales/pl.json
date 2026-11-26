@@ -2131,6 +2131,20 @@
     "Unlock": "Odblokuj",
     "Locked": "Zablokowana",
     "Lock new grid lines": "Blokuj nowe osie siatki",
-    "The grid line is locked: unlock it to change it.": "Oś siatki jest zablokowana: odblokuj ją, aby ją zmienić."
+    "The grid line is locked: unlock it to change it.": "Oś siatki jest zablokowana: odblokuj ją, aby ją zmienić.",
+    "One PDF, a page per sheet": "Jeden PDF, strona na arkusz",
+    "A PDF per sheet": "PDF na każdy arkusz",
+    "A DWG per sheet": "DWG na każdy arkusz",
+    "A DXF per sheet": "DXF na każdy arkusz",
+    "An SVG per sheet": "SVG na każdy arkusz",
+    "A file per sheet": "Plik na każdy arkusz",
+    "This model has no sheets.": "Ten model nie ma arkuszy.",
+    "sheets picked": "arkuszy wybrano",
+    "As": "Jako",
+    "Export sheets…": "Eksportuj arkusze…",
+    "Export sheets": "Eksportuj arkusze",
+    "Several sheets at once: as one PDF to print, or a PDF, DWG, DXF or SVG per sheet.": "Kilka arkuszy naraz: jeden PDF do druku albo PDF, DWG, DXF lub SVG na każdy arkusz.",
+    "One PDF is to print the series; per sheet asks for the folder and names each file after its sheet.": "Jeden PDF służy do wydruku serii; na arkusz pyta o folder i nazywa każdy plik jak jego arkusz.",
+    "The model's drawings are still being read; in a moment you can.": "Rysunki modelu są jeszcze wczytywane; za chwilę będzie można."
   }
 }

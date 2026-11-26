@@ -2131,6 +2131,20 @@
     "Unlock": "Sblocca",
     "Locked": "Bloccata",
     "Lock new grid lines": "Blocca le nuove linee di griglia",
-    "The grid line is locked: unlock it to change it.": "La linea di griglia è bloccata: sbloccala per modificarla."
+    "The grid line is locked: unlock it to change it.": "La linea di griglia è bloccata: sbloccala per modificarla.",
+    "One PDF, a page per sheet": "Un PDF, una pagina per tavola",
+    "A PDF per sheet": "Un PDF per tavola",
+    "A DWG per sheet": "Un DWG per tavola",
+    "A DXF per sheet": "Un DXF per tavola",
+    "An SVG per sheet": "Un SVG per tavola",
+    "A file per sheet": "Un file per tavola",
+    "This model has no sheets.": "Questo modello non ha tavole.",
+    "sheets picked": "tavole scelte",
+    "As": "Come",
+    "Export sheets…": "Esporta tavole…",
+    "Export sheets": "Esporta tavole",
+    "Several sheets at once: as one PDF to print, or a PDF, DWG, DXF or SVG per sheet.": "Più tavole insieme: un solo PDF da stampare, o un PDF, DWG, DXF o SVG per tavola.",
+    "One PDF is to print the series; per sheet asks for the folder and names each file after its sheet.": "Un solo PDF serve a stampare la serie; per tavola chiede la cartella e nomina ogni file come la sua tavola.",
+    "The model's drawings are still being read; in a moment you can.": "I disegni del modello sono ancora in lettura; tra un momento si potrà."
   }
 }
