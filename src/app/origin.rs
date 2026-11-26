@@ -91,6 +91,80 @@ pub(crate) fn aligned_by_pairs(by: DVec3, turned: f64, pivot: DVec3, from: [DVec
     Some((moved, degrees))
 }
 
+impl App {
+    /// The remote's `place_model`: where each open model is placed (`list`), a model's move,
+    /// turn and zero point set (`set`), a model aligned by two pairs of points (`align`), or a
+    /// new revision of its file put in its place (`replace`). A model by its place in the list
+    /// or its file name.
+    pub(crate) fn place_model_command(&mut self, a: &serde_json::Value) -> Result<serde_json::Value, String> {
+        use serde_json::json;
+        let list = |app: &App| -> serde_json::Value {
+            json!(app.models.iter().enumerate().map(|(k, e)| json!({
+                "index": k, "file": e.model.file_name(), "visible": e.visible,
+                "moved": e.placed.moved.to_array(), "turned": e.placed.turned, "zero": e.placed.zero.to_array(),
+            })).collect::<Vec<_>>())
+        };
+        let action = a.get("action").and_then(|v| v.as_str()).unwrap_or("list");
+        if action == "list" {
+            return Ok(json!({ "models": list(self) }));
+        }
+        if self.models.is_empty() {
+            // one model shown alone is not yet among the models: it becomes the first
+            if let Some(shown) = self.model.clone() {
+                self.models.push(ModelEntry::new(shown, 0));
+            }
+        }
+        let i = match a.get("model") {
+            Some(serde_json::Value::Number(n)) => n.as_u64().map(|n| n as usize).filter(|&n| n < self.models.len()).ok_or_else(|| format!("no model {n}; there are {}", self.models.len()))?,
+            Some(serde_json::Value::String(name)) => self.models.iter().position(|e| e.model.file_name().eq_ignore_ascii_case(name) || e.model.path.to_string_lossy().eq_ignore_ascii_case(name)).ok_or_else(|| format!("no model named {name}"))?,
+            _ if self.models.len() == 1 => 0,
+            _ => return Err("give the model: its index or file name (place_model list shows them)".into()),
+        };
+        let point = |v: Option<&serde_json::Value>| -> Option<DVec3> {
+            let p: Vec<f64> = v?.as_array()?.iter().filter_map(|x| x.as_f64()).collect();
+            (p.len() == 3).then(|| DVec3::new(p[0], p[1], p[2]))
+        };
+        let said = match action {
+            "set" => {
+                let entry = &mut self.models[i];
+                if let Some(moved) = point(a.get("moved")) {
+                    entry.placed.moved = moved;
+                }
+                if let Some(turned) = a.get("turned").and_then(|v| v.as_f64()) {
+                    entry.placed.turned = turned;
+                }
+                if let Some(zero) = point(a.get("zero")) {
+                    entry.placed.zero = zero;
+                }
+                let name = entry.model.file_name();
+                self.replace_models();
+                format!("{name} placed")
+            }
+            "align" => {
+                let pairs = a.get("pairs").and_then(|v| v.as_array()).filter(|p| p.len() == 2).ok_or("give two pairs: [{from: [x,y,z], to: [x,y,z]}, {from, to}]")?;
+                let pair = |p: &serde_json::Value| -> Result<(Vec3, Vec3), String> {
+                    let (from, to) = (point(p.get("from")), point(p.get("to")));
+                    Ok((from.ok_or("a pair needs from: [x, y, z]")?.as_vec3(), to.ok_or("a pair needs to: [x, y, z]")?.as_vec3()))
+                };
+                let (first, second) = (pair(&pairs[0])?, pair(&pairs[1])?);
+                self.align_model(i, first, second)?
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            "replace" => {
+                let path = a.get("path").and_then(|v| v.as_str()).ok_or("give the path of the new revision")?;
+                let model = crate::loaders::load(std::path::Path::new(path))?;
+                self.replace_model(i, Arc::new(model));
+                match &self.status {
+                    super::Status::Loaded(said) => said.clone(),
+                    other => format!("{other:?}"),
+                }
+            }
+            other => return Err(format!("place_model: unknown action {other} (list, set, align, replace)")),
+        };
+        Ok(json!({ "said": said, "models": list(self) }))
+    }
+}
+
 /// A number as typed: a comma counts as a decimal point.
 fn number(typed: &str) -> Option<f64> {
     typed.trim().replace(',', ".").parse::<f64>().ok().filter(|v| v.is_finite() && v.abs() < 1.0e7)

@@ -247,6 +247,16 @@ pub fn tools() -> Vec<Value> {
                 "offset": { "type": "number", "description": "Set the position along the normal" },
                 "remove": { "type": "boolean" }
             }), &[], false),
+        tool("place_model", "Where the open models lie, each moved, turned about Z and with its zero point as the project keeps them (the files are not changed). list gives each model's place; set gives a model (index or file name) a move [x, y, z] (metres), a turn (degrees, anticlockwise from above, about its zero point) or a zero point; align turns and moves it so two of its points land on two others (pairs: [{from: [x,y,z], to: [x,y,z]}, {from, to}], in the coordinates the viewport and measure_distance use); replace puts a new revision of its file (path) in its place, moved and turned as before.",
+            json!({
+                "action": { "type": "string", "enum": ["list", "set", "align", "replace"] },
+                "model": { "type": ["integer", "string"], "description": "Index from list, or file name" },
+                "moved": { "type": "array", "items": { "type": "number" } },
+                "turned": { "type": "number" },
+                "zero": { "type": "array", "items": { "type": "number" } },
+                "pairs": { "type": "array", "items": { "type": "object" } },
+                "path": { "type": "string" }
+            }), &[], false),
         tool("measure_distance", "Measure the distance between two points (also horizontal and vertical parts) and draw it in the viewport.",
             json!({ "a": point_schema("First point"), "b": point_schema("Second point"), "show": { "type": "boolean", "description": "Draw it (default true)" } }), &["a", "b"], false),
         tool("measure_angle", "Measure the angle at a vertex between two points and draw it in the viewport.",
