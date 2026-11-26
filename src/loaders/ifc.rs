@@ -976,5 +976,13 @@ END-ISO-10303-21;"#,
         let model = load_bytes("levels.ifc", bytes);
         assert_levels(&model, &[("Level 0", 0.0), ("Level 1", 3.0), ("Roof", 6.5)]);
     }
+
+    #[test]
+    fn damaged_files_do_not_panic() {
+        crate::loaders::damage::assert_robust("IFC", &exported_box(), |bytes| {
+            let source = Source::Bytes { name: "box.ifc".into(), data: Arc::new(bytes.to_vec()) };
+            let _ = IfcLoader.load_with(&source, &Progress::default());
+        });
+    }
 }
 

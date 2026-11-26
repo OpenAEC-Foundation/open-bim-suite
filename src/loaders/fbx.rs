@@ -941,6 +941,27 @@ Connections:  {
     }
 
     #[test]
+    fn damaged_files_do_not_panic() {
+        let s = |s: &str| Prop::Str(s.into());
+        let binary_seed = binary(&[
+            node("Objects", vec![], vec![
+                node("Geometry", vec![Prop::Int(1), s("Tri\0\x01Geometry"), s("Mesh")], vec![
+                    node("Vertices", vec![Prop::Floats(vec![0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 3.0, 0.0])], vec![]),
+                    node("PolygonVertexIndex", vec![Prop::Ints(vec![0, 1, -3])], vec![]),
+                ]),
+                node("Model", vec![Prop::Int(2), s("Roof\0\x01Model"), s("Mesh")], vec![]),
+            ]),
+            node("Connections", vec![], vec![node("C", vec![s("OO"), Prop::Int(1), Prop::Int(2)], vec![])]),
+        ]);
+        for (label, seed) in [("FBX ascii", ASCII.as_bytes().to_vec()), ("FBX binary", binary_seed)] {
+            crate::loaders::damage::assert_robust(label, &seed, |bytes| {
+                let source = Source::Bytes { name: "x.fbx".into(), data: Arc::new(bytes.to_vec()) };
+                let _ = FbxLoader.load_with(&source, &crate::loaders::Progress::default());
+            });
+        }
+    }
+
+    #[test]
     fn rejects_other_files() {
         let source = Source::Bytes { name: "x.fbx".into(), data: Arc::new(b"hello".to_vec()) };
         assert!(FbxLoader.load(&source).unwrap_err().contains("FBX"));

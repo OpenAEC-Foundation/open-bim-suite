@@ -2369,6 +2369,15 @@ mod tests {
     }
 
     #[test]
+    fn damaged_files_do_not_panic() {
+        let seed = file(3, "Ground floor plan", &sample_stream());
+        crate::loaders::damage::assert_robust("Allplan", &seed, |bytes| {
+            let source = Source::Bytes { name: "tb000151.NDW".into(), data: Arc::new(bytes.to_vec()) };
+            let _ = AllplanLoader.load_with(&source, &Progress::default());
+        });
+    }
+
+    #[test]
     fn reads_the_header_name_and_bodies() {
         let data = file(3, "Ground floor plan", &sample_stream());
         let drawing = parse(&data).unwrap();

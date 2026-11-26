@@ -4450,6 +4450,14 @@ mod tests {
     }
 
     #[test]
+    fn damaged_files_do_not_panic() {
+        crate::loaders::damage::assert_robust("Archicad", &synthetic_file(), |bytes| {
+            let source = Source::Bytes { name: "x.pln".into(), data: Arc::new(bytes.to_vec()) };
+            let _ = ArchicadLoader.load_with(&source, &Progress::default());
+        });
+    }
+
+    #[test]
     fn reads_a_synthetic_project() {
         let records = read_bytes(&synthetic_file()).expect("container");
         assert_eq!(records.stories.get(&STORY_ID), Some(&("Hall".to_string(), 2)));

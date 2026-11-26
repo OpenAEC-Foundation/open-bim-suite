@@ -437,8 +437,27 @@ pub fn composes(source: &Source) -> bool {
 /// [`Loader::load_stack`]); one file loads as [`load_with`]. The model is named after the first.
 pub fn load_stack(sources: &[Source], progress: &Progress) -> Result<Model, String> {
     let mut model = load_first(sources, progress)?;
-    model.complete();
+    let name = model.file_name();
+    guarded(&name, || model.complete())?;
     Ok(model)
+}
+
+/// Runs `work` and turns a panic into an error: a damaged file can make a reader (ours or a
+/// library's) stop on an index, an unwrap or an overflow, and that must cost the file, not the
+/// app. The browser build aborts on a panic and cannot catch it; the readers there stay as they are.
+fn guarded<T>(name: &str, work: impl FnOnce() -> T) -> Result<T, String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).map_err(|payload| {
+            let why = payload.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| payload.downcast_ref::<String>().cloned()).unwrap_or_default();
+            format!("{name}: the file is damaged or not supported (the reader stopped unexpectedly{}{why})", if why.is_empty() { "" } else { ": " })
+        })
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = name;
+        Ok(work())
+    }
 }
 
 /// As [`load_stack`], without what the loader leaves for after the model shows (the drawings of
@@ -447,10 +466,10 @@ pub fn load_first(sources: &[Source], progress: &Progress) -> Result<Model, Stri
     let source = sources.first().ok_or("no file to open")?;
     let loader = loader_for(sources.last().unwrap_or(source))?;
     let start = Instant::now();
-    let loaded = match sources {
-        [one] => loader.load_with(one, progress)?,
-        _ => loader.load_stack(sources, progress)?,
-    };
+    let loaded = guarded(&source.name(), || match sources {
+        [one] => loader.load_with(one, progress),
+        _ => loader.load_stack(sources, progress),
+    })??;
     progress.set(Phase::Scene);
     let mut model = Model::new(source.model_path(), loader.name(), loaded.layers);
     model.file_size = sources.iter().map(Source::len).sum();
@@ -479,6 +498,12 @@ pub fn load_first(sources: &[Source], progress: &Progress) -> Result<Model, Stri
 /// Default grey for meshes without a material.
 pub const DEFAULT_COLOR: [f32; 3] = [0.72, 0.72, 0.74];
 
+/// The damaged files of the robustness tests, shared with `tests/malformed_input.rs`; the reader
+/// modules feed it the files their own tests write.
+#[cfg(test)]
+#[path = "../../tests/common/mod.rs"]
+pub(crate) mod damage;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -505,6 +530,31 @@ mod tests {
         for extension in ["dwg", "dxf", "json", "cityjson", "jsonl", "landxml", "xml"] {
             assert!(supported_extensions().contains(&extension), "{extension}");
         }
+    }
+
+    /// The robustness test must be able to fail: a reader that panics on a damaged file is reported.
+    #[test]
+    #[should_panic(expected = "damaged files made the reader panic")]
+    fn the_damage_check_reports_a_panic() {
+        damage::assert_robust("broken", b"0123456789abcdef", |bytes| {
+            let _ = bytes[15]; // truncated files are shorter than the seed
+        });
+    }
+
+    #[test]
+    fn the_damage_check_passes_a_reader_that_rejects() {
+        damage::assert_robust("careful", b"0123456789abcdef", |bytes| {
+            let _ = bytes.get(15);
+        });
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_panic_in_a_reader_becomes_an_error() {
+        let message = guarded("broken.xyz", || -> u8 { panic!("index out of bounds") }).unwrap_err();
+        assert!(message.starts_with("broken.xyz: the file is damaged"), "{message}");
+        assert!(message.contains("index out of bounds"), "{message}");
+        assert_eq!(guarded("fine.xyz", || 7).unwrap(), 7);
     }
 
     #[test]

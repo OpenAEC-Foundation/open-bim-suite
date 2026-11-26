@@ -323,6 +323,25 @@ mod tests {
         assert!(decode(&bad_index).is_err());
     }
 
+    /// The scene buffer is what the Vertex library hands over; a damaged library or file must not
+    /// take the app with it.
+    #[test]
+    fn damaged_buffers_do_not_panic() {
+        crate::loaders::damage::assert_robust("Vertex scene buffer", &scene(), |bytes| {
+            let _ = decode(bytes);
+        });
+        let header = r#"{"format":"Vertex BD","info":[],"layers":[],"drawings":[{"name":"SECT-A","kind":"View","lines":1,"colors":true,"ids":true,"texts":[[1.5,-0.5,0.072,90.0,1,"6900","Courier New",[0,36,170],0.7,1000007]],"props":[]}]}"#;
+        let mut drawing = b"VXS1".to_vec();
+        drawing.extend((header.len() as u32).to_le_bytes());
+        drawing.extend(header.as_bytes());
+        for v in [0f32, 0., 3., 0., 0.18] { drawing.extend(v.to_le_bytes()); }
+        drawing.extend([182u8, 145, 0]);
+        drawing.extend(1_000_007u32.to_le_bytes());
+        crate::loaders::damage::assert_robust("Vertex drawing buffer", &drawing, |bytes| {
+            let _ = decode(bytes);
+        });
+    }
+
     /// With the library in vendor/vertex (or `O3V_VERTEX_LIB`): a real BTL file end to end.
     #[test]
     fn reads_btl_through_the_library_when_present() {
