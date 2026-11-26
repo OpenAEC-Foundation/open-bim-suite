@@ -65,6 +65,32 @@ pub struct Placed {
     pub map: Map,
 }
 
+/// The move and turn of a model that lay two of its points (`from`, in the scene) on two
+/// others (`to`): turned so the line between its points runs as the line between the others,
+/// and moved so their middles meet. `by` and `turned` are its move and turn now, `pivot` where
+/// its zero point lies in the scene (the turn is about it). None when a pair's points lie on
+/// top of each other in plan.
+pub(crate) fn aligned_by_pairs(by: DVec3, turned: f64, pivot: DVec3, from: [DVec3; 2], to: [DVec3; 2]) -> Option<(DVec3, f64)> {
+    let (along_from, along_to) = (from[1] - from[0], to[1] - to[0]);
+    if along_from.truncate().length() < 1e-3 || along_to.truncate().length() < 1e-3 {
+        return None;
+    }
+    let turn = along_to.y.atan2(along_to.x) - along_from.y.atan2(along_from.x);
+    let (sin, cos) = turn.sin_cos();
+    let rotate = |v: DVec3| DVec3::new(v.x * cos - v.y * sin, v.x * sin + v.y * cos, v.z);
+    let (a, b) = ((from[0] + from[1]) / 2.0, (to[0] + to[1]) / 2.0);
+    // the scene is R(t)(p - c) + c + s + by, with c + s the pivot less the move: turned on, the
+    // middle of the model's points lands on the middle of the others
+    let moved = rotate(pivot - a) + b - pivot + by;
+    let mut degrees = (turned + turn.to_degrees()) % 360.0;
+    if degrees > 180.0 {
+        degrees -= 360.0;
+    } else if degrees <= -180.0 {
+        degrees += 360.0;
+    }
+    Some((moved, degrees))
+}
+
 /// A number as typed: a comma counts as a decimal point.
 fn number(typed: &str) -> Option<f64> {
     typed.trim().replace(',', ".").parse::<f64>().ok().filter(|v| v.is_finite() && v.abs() < 1.0e7)
@@ -217,18 +243,34 @@ impl App {
             text(l.text("X, Y, Z in meters, de draaiing in graden linksom om het nulpunt; Enter past toe.", "X, Y, Z in metres, the turn in degrees anticlockwise about the zero point; Enter applies.").to_string()).size(11).color(p.text_muted),
         ]
         .spacing(4);
-        // moving by two points picked in the view: a point of the model, then where it goes
-        let moving = self.moving_model.is_some();
-        let label = if moving { l.text("Verplaatsen…", "Moving…") } else { l.text("Verplaats met twee punten", "Move by two points") };
+        // moving by two points picked in the view: a point of the model, then where it goes; or
+        // aligning by two pairs of them, which turns it as well
+        let moving = self.moving_model.is_some() && !self.align_pairs;
+        let aligning = self.moving_model.is_some() && self.align_pairs;
+        let button = |label: &str, on: bool, message: AppMessage| iced::widget::button(text(label.to_string()).size(12)).padding([3, 10]).style(move |_, status| p.ribbon_button(on, status)).on_press(message);
         rows = rows.push(
-            iced::widget::button(text(label.to_string()).size(12))
-                .padding([3, 10])
-                .style(move |_, status| p.ribbon_button(moving, status))
-                .on_press(AppMessage::MoveModelByPoints),
+            row![
+                button(if moving { l.text("Verplaatsen…", "Moving…") } else { l.text("Verplaats met twee punten", "Move by two points") }, moving, AppMessage::MoveModelByPoints),
+                button(if aligning { l.text("Uitlijnen…", "Aligning…") } else { l.text("Uitlijnen met twee paren", "Align by two pairs") }, aligning, AppMessage::AlignModelByPairs),
+            ]
+            .spacing(4)
+            .wrap(),
         );
         if moving {
             rows = rows.push(text(l.text("Klik een punt van het model en daarna waar het heen moet (bijv. de kruising van twee stramienen). Esc breekt af.", "Click a point of the model, then where it should go (such as where two grids cross). Esc stops.").to_string()).size(11).color(p.text_muted).wrapping(Wrapping::WordOrGlyph));
         }
+        if aligning {
+            rows = rows.push(text(l.text(
+                "Klik een punt van het model en waar het heen moet, en dan een tweede punt en waar dat heen moet (bijv. twee stramienkruisingen). Het model draait en schuift zo dat beide paren op elkaar vallen. Esc breekt af.",
+                "Click a point of the model and where it should go, then a second point and where that should go (such as two grid crossings). The model turns and moves so both pairs meet. Esc stops.",
+            ).to_string()).size(11).color(p.text_muted).wrapping(Wrapping::WordOrGlyph));
+        }
+        // a new revision of the file in its place, moved and turned as this one
+        rows = rows.push(
+            row![button(l.text("Nieuwe revisie…", "New revision…"), false, AppMessage::ReplaceModelDialog)]
+                .spacing(4),
+        )
+        .push(text(l.text("Vervangt het bestand door een nieuwe versie; plaats en draaiing blijven.", "Replaces the file by a new version; its place and turn stay.").to_string()).size(11).color(p.text_muted).wrapping(Wrapping::WordOrGlyph));
         // the map of where its file says it lies
         let note = |words: String| text(words).size(11).color(p.text_muted).wrapping(Wrapping::WordOrGlyph);
         match &entry.placed.map {
@@ -336,6 +378,33 @@ impl<M> canvas::Program<M> for ZeroPoints {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn two_pairs_of_points_turn_and_move_a_model_onto_them() {
+        // the model's scene: R(t)(p - c) + c + s + by, here with its pivot (c + s + by) given
+        let place = |p: DVec3, by: DVec3, turned: f64, pivot: DVec3| {
+            let (sin, cos) = turned.to_radians().sin_cos();
+            let c = pivot - by; // c + s
+            let q = p - c;
+            DVec3::new(q.x * cos - q.y * sin, q.x * sin + q.y * cos, q.z) + c + by
+        };
+        let (by, turned, c) = (DVec3::new(3.0, -1.0, 0.5), 20.0, DVec3::new(7.0, 2.0, 0.0));
+        let pivot = c + by;
+        // two points of the model, as the scene shows them now
+        let (p0, p1) = (DVec3::new(1.0, 1.0, 0.0), DVec3::new(6.0, 4.0, 1.0));
+        let (a0, a1) = (place(p0, by, turned, pivot), place(p1, by, turned, pivot));
+        // where they should go: turned a further 35 degrees and shifted, a metre up
+        let (sin, cos) = 35f64.to_radians().sin_cos();
+        let go = |a: DVec3| DVec3::new(a.x * cos - a.y * sin + 40.0, a.x * sin + a.y * cos - 12.0, a.z + 1.0);
+        let (b0, b1) = (go(a0), go(a1));
+        let (moved, t) = aligned_by_pairs(by, turned, pivot, [a0, a1], [b0, b1]).unwrap();
+        assert!((t - 55.0).abs() < 1e-9, "{t}");
+        let pivot_after = c + moved;
+        assert!(place(p0, moved, t, pivot_after).distance(b0) < 1e-9);
+        assert!(place(p1, moved, t, pivot_after).distance(b1) < 1e-9);
+        // points on top of each other in plan give no turn
+        assert!(aligned_by_pairs(by, turned, pivot, [a0, a0 + DVec3::Z], [b0, b1]).is_none());
+    }
 
     #[test]
     fn a_typed_number_reads_with_a_comma_or_a_point() {

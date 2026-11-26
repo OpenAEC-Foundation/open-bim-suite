@@ -2107,6 +2107,13 @@
     "no elements on one of the sides": "nessun elemento su uno dei lati",
     "elements in the test": "elementi nel test",
     "Add pair": "Aggiungi coppia",
-    "Test classes against each other, by codes or groups (5* against 2*): per pair a tolerance, how much a clash weighs and whether it is agreed to at once (a socket box in a wall). The pairs run with Find clashes.": "Testare classi l'una contro l'altra, per codici o gruppi (5* contro 2*): per coppia una tolleranza, quanto pesa un'interferenza e se è accettata subito (una scatola per presa in un muro). Le coppie girano con Cerca interferenze."
+    "Test classes against each other, by codes or groups (5* against 2*): per pair a tolerance, how much a clash weighs and whether it is agreed to at once (a socket box in a wall). The pairs run with Find clashes.": "Testare classi l'una contro l'altra, per codici o gruppi (5* contro 2*): per coppia una tolleranza, quanto pesa un'interferenza e se è accettata subito (una scatola per presa in un muro). Le coppie girano con Cerca interferenze.",
+    "moved": "spostato",
+    "turned": "ruotato",
+    "Aligning…": "Allineamento…",
+    "Align by two pairs": "Allinea con due coppie",
+    "New revision…": "Nuova revisione…",
+    "Replaces the file by a new version; its place and turn stay.": "Sostituisce il file con una nuova versione; posizione e rotazione restano.",
+    "Click a point of the model and where it should go, then a second point and where that should go (such as two grid crossings). The model turns and moves so both pairs meet. Esc stops.": "Clicca un punto del modello e dove deve andare, poi un secondo punto e dove deve andare (ad esempio due incroci di griglia). Il modello ruota e si sposta finché le due coppie coincidono. Esc interrompe."
   }
 }

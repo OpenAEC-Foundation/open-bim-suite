@@ -2107,6 +2107,13 @@
     "no elements on one of the sides": "taraflardan birinde eleman yok",
     "elements in the test": "testteki eleman",
     "Add pair": "Çift ekle",
-    "Test classes against each other, by codes or groups (5* against 2*): per pair a tolerance, how much a clash weighs and whether it is agreed to at once (a socket box in a wall). The pairs run with Find clashes.": "Sınıfları birbirine karşı test edin, kod veya gruplara göre (2*'ye karşı 5*): her çift için bir tolerans, bir çakışmanın ağırlığı ve hemen kabul edilip edilmediği (duvardaki bir priz kutusu). Çiftler Çakışmaları bul ile çalışır."
+    "Test classes against each other, by codes or groups (5* against 2*): per pair a tolerance, how much a clash weighs and whether it is agreed to at once (a socket box in a wall). The pairs run with Find clashes.": "Sınıfları birbirine karşı test edin, kod veya gruplara göre (2*'ye karşı 5*): her çift için bir tolerans, bir çakışmanın ağırlığı ve hemen kabul edilip edilmediği (duvardaki bir priz kutusu). Çiftler Çakışmaları bul ile çalışır.",
+    "moved": "taşındı",
+    "turned": "döndürüldü",
+    "Aligning…": "Hizalanıyor…",
+    "Align by two pairs": "İki çiftle hizala",
+    "New revision…": "Yeni revizyon…",
+    "Replaces the file by a new version; its place and turn stay.": "Dosyayı yeni bir sürümle değiştirir; konumu ve dönüşü korunur.",
+    "Click a point of the model and where it should go, then a second point and where that should go (such as two grid crossings). The model turns and moves so both pairs meet. Esc stops.": "Modelin bir noktasına ve gideceği yere, sonra ikinci bir noktaya ve gideceği yere tıklayın (örneğin iki aks kesişimi). Model, iki çift üst üste gelecek şekilde döner ve kayar. Esc durdurur."
   }
 }

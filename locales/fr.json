@@ -2107,6 +2107,13 @@
     "no elements on one of the sides": "aucun élément d'un des côtés",
     "elements in the test": "éléments dans le test",
     "Add pair": "Ajouter une paire",
-    "Test classes against each other, by codes or groups (5* against 2*): per pair a tolerance, how much a clash weighs and whether it is agreed to at once (a socket box in a wall). The pairs run with Find clashes.": "Tester des classes les unes contre les autres, par codes ou groupes (5* contre 2*) : par paire une tolérance, le poids d'un conflit et s'il est accepté d'emblée (un boîtier de prise dans un mur). Les paires s'exécutent avec Rechercher les conflits."
+    "Test classes against each other, by codes or groups (5* against 2*): per pair a tolerance, how much a clash weighs and whether it is agreed to at once (a socket box in a wall). The pairs run with Find clashes.": "Tester des classes les unes contre les autres, par codes ou groupes (5* contre 2*) : par paire une tolérance, le poids d'un conflit et s'il est accepté d'emblée (un boîtier de prise dans un mur). Les paires s'exécutent avec Rechercher les conflits.",
+    "moved": "déplacé",
+    "turned": "tourné",
+    "Aligning…": "Alignement…",
+    "Align by two pairs": "Aligner par deux paires",
+    "New revision…": "Nouvelle révision…",
+    "Replaces the file by a new version; its place and turn stay.": "Remplace le fichier par une nouvelle version ; sa position et sa rotation restent.",
+    "Click a point of the model and where it should go, then a second point and where that should go (such as two grid crossings). The model turns and moves so both pairs meet. Esc stops.": "Cliquez un point du modèle et sa destination, puis un second point et sa destination (par exemple deux croisements de trames). Le modèle tourne et se déplace pour que les deux paires coïncident. Échap arrête."
   }
 }

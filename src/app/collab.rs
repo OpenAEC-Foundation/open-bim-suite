@@ -3617,9 +3617,17 @@ impl App {
                 button(text(name.clone()).size(12)).padding([1, 4]).width(Length::Fill).style(move |_, s| p.ribbon_button(picked, s)).on_press(Message::PickModel(i)),
                 Node::new(Role::Button, format!("{} {name}", l.text("Kies model", "Pick model"))).selected(picked),
             );
+            // a model moved or turned in the project says so (its file is as it came)
+            let placed = match (entry.placed.moved != glam::DVec3::ZERO, entry.placed.turned != 0.0) {
+                (false, false) => String::new(),
+                (true, false) => l.text("verplaatst", "moved").to_string(),
+                (false, true) => format!("{} {:.1}°", l.text("gedraaid", "turned"), entry.placed.turned),
+                (true, true) => format!("{} · {:.1}°", l.text("verplaatst", "moved"), entry.placed.turned),
+            };
             let line = row![
                 named(w::checkbox(look, "", entry.visible, Some(move |on| Message::ModelVisible(i, on))), Node::new(Role::CheckBox, format!("{} {name}", l.text("Toon", "Show"))).selected(entry.visible)),
                 pick,
+                w::secondary(look, placed),
                 w::secondary(look, entry.model.format.clone()),
             ]
             .spacing(6)
