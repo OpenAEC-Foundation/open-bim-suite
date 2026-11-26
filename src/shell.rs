@@ -1711,6 +1711,18 @@ impl Studio {
             let on = app.modeller.tool.is_some_and(|t| t.0 == tool);
             list.push(Command::new(tool.id(), tool.label(l), go(Message::ModelTool(Some((tool, tool.label(l)))))).icon(small(tool.icon()), large(tool.icon())).mode(on).enabled(loaded));
         }
+        // one button for the frame of a door or a window: it starts the one used last, and the
+        // strip of the tool switches between them
+        {
+            let frame = app.modeller.placement.frame;
+            let on = app.modeller.tool.is_some_and(|t| t.0.opens());
+            list.push(
+                Command::new("model.frame", l.text("Kozijn", "Frame"), go(Message::ModelTool(Some((frame, frame.label(l))))))
+                    .icon(small(frame.icon()), large(frame.icon()))
+                    .mode(on)
+                    .enabled(loaded),
+            );
+        }
         for tool in Tool::ALL {
             let (id, icon) = match tool {
                 Tool::Distance => ("measure.distance", "measure.distance"),
@@ -2820,12 +2832,12 @@ impl Studio {
                 (l.text("Selecteren", "Select"), vec![large("model.select")]),
                 // what the building is set out on: its grid lines and its levels
                 (l.text("Referenties", "Datums"), vec![large("project.grid"), large("project.level")]),
-                (l.text("Vlak", "Planar"), vec![large("model.wall"), large("model.slab")]),
+                (l.text("Vlak", "Planar"), vec![large("model.wall"), large("model.slab"), large("model.roof")]),
                 (l.text("Lijnvormig", "Linear"), vec![large("model.column"), large("model.beam")]),
                 (l.text("Systeem", "System"), vec![large("model.system"), smalls(&["model.curtain-line", "model.curtain-panel"])]),
-                (l.text("Trap en dak", "Stair and roof"), vec![large("model.stair"), large("model.roof")]),
                 (l.text("Puntvormig", "Point"), vec![large("model.point")]),
-                (l.text("Openingen", "Openings"), vec![large("model.door"), large("model.window")]),
+                // a door and a window are one button, the Frame; the stair is an object too
+                (l.text("Objecten", "Objects"), vec![large("model.frame"), large("model.stair")]),
                 (l.text("Verbinding", "Connection"), vec![smalls(&["model.butt", "model.mitre", "model.cut"]), smalls(&["model.end-plate", "model.apart"]), smalls(&["model.fin-plate", "model.splice", "model.base-plate"])]),
                 (l.text("Wapening", "Reinforcement"), vec![large("model.rebar"), smalls(&["model.rebar-stirrups", "model.rebar-extra", "model.rebar-hairpins"])]),
                 (l.text("Wijzigen", "Modify"), vec![large("model.edit"), smalls(&["model.move", "model.copy"]), smalls(&["model.rotate", "model.mirror"]), smalls(&["model.align"]), large("model.delete")]),
@@ -4369,6 +4381,46 @@ mod tests {
         assert!(studio.app.dimension_tool && studio.command("annotate.dimension").kind == openaec_ui::design::command::CommandKind::Toggle(true));
         // the door and window tools are on the Model tab
         assert!(studio.command("model.door").enabled && studio.command("model.window").enabled);
+    }
+
+    /// The command ids of the ribbon group of the Model tab that holds `id`.
+    fn model_group_with(studio: &Studio, id: &str) -> Vec<&'static str> {
+        let part_ids = |part: &RibbonPart| match part {
+            RibbonPart::Large(id) => vec![*id],
+            RibbonPart::Smalls(ids) => ids.clone(),
+        };
+        let groups = studio.ribbon_groups_of(RibbonPage::Model);
+        let group = groups.iter().find(|(_, parts)| parts.iter().flat_map(part_ids).any(|c| c == id)).unwrap_or_else(|| panic!("{id} is on no group of the Model tab"));
+        group.1.iter().flat_map(part_ids).collect()
+    }
+
+    #[test]
+    fn a_door_and_a_window_are_one_frame_button_beside_the_stair_and_the_roof_is_planar() {
+        // a model is open: the buttons of the Model tab need one
+        let mut app = App::default();
+        app.add_demo_building();
+        let mut studio = Studio::new(app);
+        studio.set_product(Product::Modeller);
+        assert!(studio.command("model.frame").enabled);
+        assert_eq!(model_group_with(&studio, "model.wall"), ["model.wall", "model.slab", "model.roof"]);
+        assert_eq!(model_group_with(&studio, "model.frame"), ["model.frame", "model.stair"]);
+        // the door and window have no buttons of their own; their tools stay for the keys
+        let on_ribbon: Vec<&str> = studio.ribbon_groups_of(RibbonPage::Model).iter().flat_map(|g| g.1.iter()).flat_map(|p| match p { RibbonPart::Large(id) => vec![*id], RibbonPart::Smalls(ids) => ids.clone() }).collect();
+        assert!(!on_ribbon.contains(&"model.door") && !on_ribbon.contains(&"model.window"));
+        assert!(on_ribbon.iter().all(|id| studio.commands().iter().any(|c| c.id == *id)), "every button is a command");
+        // the button starts the tool used last, a window at first, and a second press stops it
+        let tool = |studio: &Studio| studio.app.modeller.tool.map(|t| t.0);
+        let press = |studio: &mut Studio| {
+            let _ = studio.update(studio.command("model.frame").message);
+        };
+        press(&mut studio);
+        assert_eq!(tool(&studio), Some(crate::app::modeller::ModelTool::Window));
+        press(&mut studio);
+        assert_eq!(tool(&studio), None);
+        let _ = studio.update(Msg::App(Message::ModelTool(Some((crate::app::modeller::ModelTool::Door, "Deur")))));
+        let _ = studio.update(Msg::App(Message::ModelTool(None)));
+        press(&mut studio);
+        assert_eq!(tool(&studio), Some(crate::app::modeller::ModelTool::Door));
     }
 
     /// A project folder for a test: `drawings/A-101.pdf` and `notes.docx`.

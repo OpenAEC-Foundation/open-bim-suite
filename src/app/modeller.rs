@@ -457,6 +457,10 @@ impl App {
         let same = tool.map(|t| t.0) == self.modeller.tool.map(|t| t.0);
         self.modeller.rebar_edit = None;
         self.modeller.tool = if same { None } else { tool };
+        // the Frame button starts the opening tool used last
+        if let Some((t, _)) = tool.filter(|t| t.0.opens()) {
+            self.modeller.placement.frame = t;
+        }
         self.modeller.length_typed.clear();
         self.modeller.grid_tool = false;
         self.modeller.rebar_tool = None;

@@ -188,11 +188,13 @@ pub struct Placement {
     pub(super) typing: Option<(PlaceField, String)>,
     /// The wall placed last while chaining: the next one on a face meets it where their axes cross.
     pub last_wall: Option<ElementId>,
+    /// What the Frame button starts: the Door or the Window tool, whichever was used last.
+    pub frame: ModelTool,
 }
 
 impl Default for Placement {
     fn default() -> Self {
-        Self { settings: HashMap::new(), chain: true, rectangle: false, typing: None, last_wall: None }
+        Self { settings: HashMap::new(), chain: true, rectangle: false, typing: None, last_wall: None, frame: ModelTool::Window }
     }
 }
 
@@ -786,6 +788,15 @@ impl App {
             let railed = s.railing;
             let railing = button(text(l.text("Leuning", "Railing")).size(12)).padding([3, 10]).style(move |_, st| p.ribbon_button(railed, st)).on_press(Message::Place(PlaceMessage::Railing(!railed)));
             bar = bar.push(sketch).push(railing);
+        }
+        if tool.opens() {
+            // one Frame button on the ribbon: a door or a window is chosen here
+            for kind in ModelTool::OPENINGS {
+                let on = kind == tool;
+                let name = kind.label(l);
+                let pick = button(text(name).size(12)).padding([3, 10]).style(move |_, st| p.ribbon_button(on, st)).on_press_maybe((!on).then_some(Message::ModelTool(Some((kind, name)))));
+                bar = bar.push(pick);
+            }
         }
         if tool == ModelTool::Door {
             // which jamb it hangs on: the plan draws its leaf and swing from there
