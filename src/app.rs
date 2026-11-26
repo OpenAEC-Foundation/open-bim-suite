@@ -19,6 +19,8 @@ mod ifc_graph;
 #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
 mod inform;
 #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
+mod rule_views;
+#[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
 mod clash_words;
 #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
 mod room_checks;
@@ -3818,6 +3820,13 @@ impl App {
         // the Validator's colours (the web build leaves them out)
         #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
         {
+            // a view by rules: what it hides, and how it draws the rest
+            if let Some((shown, hidden)) = self.rule_view_looks(index.len(), |u| index.owner(u)) {
+                for (f, _) in flags.iter_mut().zip(&hidden).filter(|(_, h)| **h) {
+                    *f |= UNIT_HIDDEN;
+                }
+                looks = shown;
+            }
             // coloured by a property: each element in the colour of its value
             if let Some(painted) = self.painted_looks(index.len(), |u| index.owner(u)) {
                 looks = painted;

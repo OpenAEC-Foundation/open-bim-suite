@@ -2070,6 +2070,16 @@
     "Moving with keys": "Moverse con teclas",
     "W A S D": "W A S D",
     "W, A, S and D move as long as you hold them, Q and E go straight down and up, Shift goes faster. Flying goes where you look, also up and down; walking stays level. In the Modeller, whose letters are its tools, they work while you look around with the right mouse button.": "W, A, S y D mueven mientras las mantienes pulsadas, Q y E bajan y suben en vertical, con Mayús vas más rápido. Volar va hacia donde miras, también arriba y abajo; caminar se queda en horizontal. En el Modeller, donde las letras son herramientas, funcionan mientras miras alrededor con el botón derecho del ratón.",
-    "Clear markups": "Borrar marcas"
+    "Clear markups": "Borrar marcas",
+    "A view hides, colours and makes see-through by rules, the structure in colour and the rest see-through for one. They go with the rule set.": "Una vista oculta, colorea y hace transparente según reglas, por ejemplo la estructura en color y el resto transparente. Las vistas van con el conjunto de reglas.",
+    "As they are": "Tal como están",
+    "Choose a rule set first.": "Elige primero un conjunto de reglas.",
+    "Name of the view": "Nombre de la vista",
+    "New view": "Nueva vista",
+    "Other elements": "Otros elementos",
+    "See-through": "Transparente",
+    "Show view": "Mostrar vista",
+    "The first rule that takes an element says how it shows.": "La primera regla que toma un elemento decide cómo se muestra.",
+    "Views by rules": "Vistas por reglas"
   }
 }

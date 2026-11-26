@@ -239,6 +239,43 @@ pub struct SelectionSet {
     pub value: String,
 }
 
+/// What a view does with the elements none of its rules takes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Others {
+    /// Shown as they are.
+    #[default]
+    AsTheyAre,
+    /// Grey and see-through, for the context.
+    SeeThrough,
+    Hidden,
+}
+
+/// A rule of a view: the elements it takes (what they are, and a property with a value when
+/// `property` is set, `*` at an end for anything), hidden or shown in a colour (none: their own)
+/// and as see-through as `transparency` says (per cent).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ViewRule {
+    pub take: Selector,
+    pub property: String,
+    pub value: String,
+    pub hide: bool,
+    pub colour: Option<[u8; 3]>,
+    pub transparency: u8,
+}
+
+/// A view made of rules, kept to look at the models for one purpose (the structure in colours,
+/// what has no fire rating, the services alone): every element as the first of its rules that
+/// takes it says, the others as `others` says.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RuleView {
+    pub name: String,
+    pub rules: Vec<ViewRule>,
+    pub others: Others,
+}
+
 /// An information takeoff: which elements (what they are, and a property with a value when
 /// `property` is set), grouped by up to two properties, with how many there are and their
 /// length, area and volume.
@@ -340,6 +377,8 @@ pub struct RuleSet {
     pub matrix_between_models: bool,
     pub selection_sets: Vec<SelectionSet>,
     pub takeoffs: Vec<Takeoff>,
+    /// Views made of rules: what to hide, colour and make see-through.
+    pub views: Vec<RuleView>,
     /// The clashes of the last run, with what was decided on them: the next run takes the
     /// decisions over and tells what is new and what is solved. And the runs so far.
     pub clash_memory: Vec<ClashMemo>,
@@ -402,6 +441,7 @@ impl Default for RuleSet {
             matrix_between_models: true,
             selection_sets: Vec::new(),
             takeoffs: Vec::new(),
+            views: Vec::new(),
             clash_memory: Vec::new(),
             clash_runs: Vec::new(),
             info_rules: Vec::new(),

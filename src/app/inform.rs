@@ -163,7 +163,7 @@ pub fn quantities(triangles: &[[Vec3; 3]], closed: bool) -> (f32, f32, Option<f3
 
 impl App {
     /// The drawn elements of the model, each once, with the layer it is first drawn in.
-    fn inform_elements(model: &Model) -> Vec<(u64, usize)> {
+    pub(super) fn inform_elements(model: &Model) -> Vec<(u64, usize)> {
         let mut seen = HashSet::new();
         let mut out = Vec::new();
         for (l, layer) in model.layers.iter().enumerate().filter(|(_, layer)| !layer.points) {
@@ -397,7 +397,14 @@ impl App {
     pub(super) fn inform_handle(&mut self, event: Event) -> Task<Message> {
         let l = self.collab.language;
         match event {
-            Event::ColourBy(key) => self.colour_by(&key.key),
+            Event::ColourBy(key) => {
+                // colouring by a property takes the place of a view by rules
+                if !key.key.is_empty() && self.collab.views.view.is_some() {
+                    self.collab.views.shown = None;
+                    self.collab.views.view = None;
+                }
+                self.colour_by(&key.key);
+            }
             Event::LegendPick(k) => {
                 if let Some(row) = self.collab.inform.legend.get(k) {
                     let ids = row.ids.clone();
@@ -595,12 +602,13 @@ impl App {
 
     /// The tab of colours and sets: what the model is coloured by and its legend; the sets of the
     /// rule set, each to select, show alone or hide.
-    pub(super) fn inform_colours<'a>(&'a self, look: Look, l: Language) -> Element<'a, Message> {
+    pub(super) fn inform_colours<'a>(&'a self, look: Look, l: Language, sides: &'a [Side]) -> Element<'a, Message> {
         let state = &self.collab.inform;
         let p = self.theme.palette();
         let go = |e: Event| Message::Collab(super::collab::Event::Inform(e));
         let picked = state.keys.iter().find(|k| k.key == state.colour_by).cloned();
         let mut out = column![
+            self.rule_views_panel(look, l, sides),
             w::heading(look, l.text("Inkleuren op eigenschap", "Colour by property"), 13.0),
             row![
                 container(w::select(look, &state.keys, picked, move |k: Key| go(Event::ColourBy(k)), D::Compact)).width(Length::Fill),
