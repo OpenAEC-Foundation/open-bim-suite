@@ -139,8 +139,7 @@ impl MeasureOverlay<'_> {
 
     /// Text of `size` on a rounded label centred on `c` (screen).
     fn tag(&self, frame: &mut Frame, c: Point, content: String, size: f32) {
-        let width = content.chars().count() as f32 * size * 0.58 + 12.0;
-        let height = size + 8.0;
+        let Size { width, height } = tag_size(&content, size);
         let rect = Path::rounded_rectangle(
             Point::new(c.x - width / 2.0, c.y - height / 2.0),
             Size::new(width, height),
@@ -164,7 +163,8 @@ impl MeasureOverlay<'_> {
         Color { a: 0.18, ..self.ink }
     }
 
-    fn measurement(&self, frame: &mut Frame, pr: &Projector, m: &Measurement) {
+    /// Draws `m` without its label, and gives where its label belongs and what it says.
+    fn measurement(&self, frame: &mut Frame, pr: &Projector, m: &Measurement) -> Option<(Point, String)> {
         match m {
             Measurement::Distance(d) => {
                 for &(a, b) in &d.extensions {
@@ -198,7 +198,7 @@ impl MeasureOverlay<'_> {
             Measurement::Note { at, .. } => self.dot(frame, pr, *at),
             Measurement::Mark { kind, points } => {
                 self.mark(frame, pr, *kind, points);
-                return;
+                return None;
             }
             Measurement::Polygon { points, .. } => {
                 if let Some(path) = pr.path(points, true) {
@@ -210,7 +210,7 @@ impl MeasureOverlay<'_> {
                 }
             }
         }
-        self.label(frame, pr, m.anchor(), m.label(&self.units, self.language));
+        Some((pr.point(m.anchor())?, m.label(&self.units, self.language)))
     }
 
     /// A mark as it is drawn: a line, a line with a head at its end, or a cloud (arcs bulging
@@ -275,6 +275,38 @@ impl MeasureOverlay<'_> {
             }
         }
     }
+}
+
+/// The size on the screen of a label saying `content` in text of `size`.
+fn tag_size(content: &str, size: f32) -> Size {
+    Size::new(content.chars().count() as f32 * size * 0.58 + 12.0, size + 8.0)
+}
+
+/// How many steps up and down a label looks for room before it is left out.
+const LABEL_STEPS: usize = 6;
+
+/// Where each label (its place on the screen and its size) is drawn so none covers another:
+/// in its place when there is room, else the nearest free step above or below it, else not at
+/// all (`None`; it comes back when zooming in gives it room). In order: the first keeps its place.
+fn spread_labels(labels: &[(Point, Size)]) -> Vec<Option<Point>> {
+    const GAP: f32 = 2.0;
+    let mut taken: Vec<Rectangle> = Vec::new();
+    labels
+        .iter()
+        .map(|&(at, size)| {
+            let step = size.height + GAP * 2.0;
+            let tries = std::iter::once(0.0).chain((1..=LABEL_STEPS).flat_map(|k| [-(k as f32) * step, k as f32 * step]));
+            for dy in tries {
+                let c = Point::new(at.x, at.y + dy);
+                let rect = Rectangle::new(Point::new(c.x - size.width / 2.0 - GAP, c.y - size.height / 2.0 - GAP), Size::new(size.width + GAP * 2.0, size.height + GAP * 2.0));
+                if !taken.iter().any(|t| t.intersects(&rect)) {
+                    taken.push(rect);
+                    return Some(c);
+                }
+            }
+            None
+        })
+        .collect()
 }
 
 /// The tool's next result with `hover` as its last pick, drawn as a preview.
@@ -394,8 +426,17 @@ impl<Message> canvas::Program<Message> for MeasureOverlay<'_> {
         for (at, text, color) in &self.dots {
             self.model_dot(&mut frame, &pr, *at, text, *color);
         }
-        for m in self.results {
-            self.measurement(&mut frame, &pr, m);
+        // the lines first, then the labels over them, each where it stands clear of the others
+        let labels: Vec<(Point, String)> = self.results.iter().filter_map(|m| self.measurement(&mut frame, &pr, m)).collect();
+        let size = 12.0;
+        let placed = spread_labels(&labels.iter().map(|(at, text)| (*at, tag_size(text, size))).collect::<Vec<_>>());
+        for ((anchor, text), at) in labels.into_iter().zip(placed) {
+            let Some(at) = at else { continue };
+            if at != anchor {
+                // moved off its place: a thin line leads back to it
+                frame.stroke(&Path::line(anchor, at), self.stroke(1.0));
+            }
+            self.tag(&mut frame, at, text, size);
         }
         // the polygon in progress
         let points: Vec<Vec3> = self.picks.iter().map(|s| s.entity.pick()).collect();
@@ -419,5 +460,31 @@ impl<Message> canvas::Program<Message> for MeasureOverlay<'_> {
 
     fn mouse_interaction(&self, _state: &(), _bounds: Rectangle, _cursor: mouse::Cursor) -> mouse::Interaction {
         mouse::Interaction::None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn labels_on_one_spot_are_spread_and_none_covers_another() {
+        let size = tag_size("1200 mm", 12.0);
+        // five dimensions whose middles fall almost on one point
+        let labels: Vec<(Point, Size)> = (0..5).map(|k| (Point::new(200.0 + k as f32, 100.0 + k as f32), size)).collect();
+        let placed: Vec<Point> = spread_labels(&labels).into_iter().map(|p| p.expect("room above and below")).collect();
+        assert_eq!(placed[0], labels[0].0, "the first keeps its place");
+        for (i, a) in placed.iter().enumerate() {
+            for b in &placed[i + 1..] {
+                assert!((a.y - b.y).abs() >= size.height || (a.x - b.x).abs() >= size.width, "{a:?} {b:?}");
+            }
+        }
+        // labels apart stay where they are
+        let apart = spread_labels(&[(Point::new(0.0, 0.0), size), (Point::new(300.0, 0.0), size)]);
+        assert_eq!(apart, [Some(Point::new(0.0, 0.0)), Some(Point::new(300.0, 0.0))]);
+        // more than fit: the rest wait for room
+        let crowd: Vec<(Point, Size)> = (0..40).map(|_| (Point::new(50.0, 50.0), size)).collect();
+        let shown = spread_labels(&crowd).iter().flatten().count();
+        assert_eq!(shown, 1 + 2 * LABEL_STEPS);
     }
 }

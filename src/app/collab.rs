@@ -1533,7 +1533,7 @@ impl App {
 
     /// Goes to elements a list names: selects them, alone when the panel isolates, and frames
     /// them.
-    fn collab_go_to(&mut self, ids: impl IntoIterator<Item = u64>) {
+    pub(super) fn collab_go_to(&mut self, ids: impl IntoIterator<Item = u64>) {
         if self.collab.isolate {
             self.show_all_elements();
         }
@@ -1603,6 +1603,10 @@ impl App {
             }
         }
         self.collab_select(ids(&view.selection));
+        // the panel isolates what is clicked: the issue's own elements alone
+        if self.collab.isolate && view.exceptions.is_empty() && !view.selection.is_empty() && !self.sel.is_empty() {
+            self.isolate_selection();
+        }
         // its dimensions and remarks come back in place of what was measured; those of the issue
         // shown before go, also when this one has none
         self.collab_clear_markup();
@@ -5603,6 +5607,41 @@ mod tests {
         let _ = app.collab_update(Event::ClearMarkup);
         assert!(app.measure.results.is_empty() && !app.collab.markup);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_takeoff_row_clicked_while_isolating_shows_its_elements_alone() {
+        let mut app = App::default();
+        app.set_model(Arc::new(two_blocks()));
+        app.schedules = vec![crate::model::Schedule {
+            name: "Takeoff".into(),
+            rows: vec![
+                crate::model::ScheduleRow { elements: vec![1], ..Default::default() },
+                crate::model::ScheduleRow { elements: vec![2], ..Default::default() },
+                crate::model::ScheduleRow { elements: vec![1, 2], total: true, ..Default::default() },
+            ],
+            computed: true,
+            ..Default::default()
+        }];
+        // not isolating: the row only selects
+        let _ = app.update(Message::ScheduleRow(0, 0));
+        assert_eq!(app.sel.items(), [Pickable::Element(1)]);
+        assert!(app.hidden.is_empty());
+        // isolating: the row alone, another row in its place
+        let _ = app.collab_update(Event::Isolate(true));
+        let _ = app.update(Message::ScheduleRow(0, 1));
+        assert_eq!(app.sel.items(), [Pickable::Element(2)]);
+        let alone = app.hidden.len();
+        assert!(alone > 0);
+        // with Ctrl the rows are taken together
+        app.modifiers = iced::keyboard::Modifiers::CTRL;
+        let _ = app.update(Message::ScheduleRow(0, 0));
+        assert_eq!(app.sel.len(), 2);
+        app.modifiers = iced::keyboard::Modifiers::default();
+        // the same row again shows everything
+        let _ = app.update(Message::ScheduleRow(0, 2));
+        let _ = app.update(Message::ScheduleRow(0, 2));
+        assert!(app.hidden.is_empty() && app.sel.is_empty());
     }
 
     #[test]

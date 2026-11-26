@@ -401,9 +401,13 @@ impl App {
             Event::LegendPick(k) => {
                 if let Some(row) = self.collab.inform.legend.get(k) {
                     let ids = row.ids.clone();
-                    self.sel.clear();
-                    self.sel.extend(ids.into_iter().map(Pickable::Element));
-                    self.selection_changed();
+                    if self.collab.isolate {
+                        self.collab_go_to(ids);
+                    } else {
+                        self.sel.clear();
+                        self.sel.extend(ids.into_iter().map(Pickable::Element));
+                        self.selection_changed();
+                    }
                 }
             }
             Event::LegendSet(k) => {
@@ -449,6 +453,8 @@ impl App {
                 self.sel.extend(ids.into_iter().map(Pickable::Element));
                 self.selection_changed();
                 match how {
+                    // selecting a set isolates it too while the panel isolates what is clicked
+                    0 if self.collab.isolate => self.isolate_selection(),
                     1 => self.isolate_selection(),
                     2 => self.hide_selection(),
                     _ => {}
