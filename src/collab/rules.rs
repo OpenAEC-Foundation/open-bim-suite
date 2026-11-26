@@ -50,7 +50,8 @@ pub struct Selector {
     pub classes: Vec<String>,
     /// Elements whose name fits one of these (`*exit*`): a sign has no class of its own.
     pub names: Vec<String>,
-    /// For a test of the moment, not kept in a file: only these elements, and all but these.
+    /// For a test of the moment, not kept in a file: only these elements, and all but these
+    /// (both sorted, so a large class is looked through fast).
     #[serde(skip)]
     pub only: Vec<u64>,
     #[serde(skip)]
@@ -70,7 +71,7 @@ impl Selector {
 
     /// Whether it takes element `id` of this model, layer and class.
     pub fn takes_element(&self, id: u64, model: &str, layer: &str, class: &str) -> bool {
-        (self.only.is_empty() || self.only.contains(&id)) && !self.except.contains(&id) && self.takes(model, layer, class)
+        (self.only.is_empty() || self.only.binary_search(&id).is_ok()) && self.except.binary_search(&id).is_err() && self.takes(model, layer, class)
     }
 
     /// Whether it takes an element of this model, layer and class.
@@ -124,6 +125,45 @@ pub enum ClashKind {
     Frame,
 }
 
+/// How much a clash of a test weighs, to sort out what comes first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Severity {
+    Critical,
+    #[default]
+    Moderate,
+    Low,
+}
+
+/// A pair of the matrix of classes: the elements of the classes whose code fits `a` (`5*`, a
+/// group of classes) against those that fit `b`, in classification `classification`, how far
+/// they may cross, how much a clash weighs, and whether its clashes are agreed to at once (an
+/// electrical box in a wall).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ClassPair {
+    pub classification: String,
+    pub a: String,
+    pub b: String,
+    pub tolerance_mm: f32,
+    pub severity: Severity,
+    pub accept: bool,
+    pub on: bool,
+}
+
+impl Default for ClassPair {
+    fn default() -> Self {
+        ClassPair { classification: String::new(), a: String::new(), b: String::new(), tolerance_mm: 2.0, severity: Severity::Moderate, accept: false, on: true }
+    }
+}
+
+impl ClassPair {
+    /// What its test is called: `NL-SfB: 5* × 2*`.
+    pub fn name(&self) -> String {
+        format!("{}: {} × {}", self.classification, self.a.trim(), self.b.trim())
+    }
+}
+
 /// A clash test: the elements of `a` against those of `b`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -162,11 +202,14 @@ pub struct ClashRule {
     /// the walls whose openings are tested, by their type or name (`*sandwich*`; empty: all).
     pub frame_reach_mm: f32,
     pub frame_walls: String,
+    /// How much its clashes weigh, and whether they are agreed to as they are found.
+    pub severity: Severity,
+    pub accept: bool,
 }
 
 impl Default for ClashRule {
     fn default() -> Self {
-        ClashRule { name: String::new(), a: Selector::default(), b: Selector::default(), kind: ClashKind::Hard, tolerance_mm: 2.0, clearance_mm: 50.0, on: true, between_models: false, storeys: String::new(), property: String::new(), value: String::new(), pair_tolerances: String::new(), sight_m: 20.0, sight_blocked_pct: 50.0, sight_names: String::new(), frame_reach_mm: 250.0, frame_walls: String::new() }
+        ClashRule { name: String::new(), a: Selector::default(), b: Selector::default(), kind: ClashKind::Hard, tolerance_mm: 2.0, clearance_mm: 50.0, on: true, between_models: false, storeys: String::new(), property: String::new(), value: String::new(), pair_tolerances: String::new(), sight_m: 20.0, sight_blocked_pct: 50.0, sight_names: String::new(), frame_reach_mm: 250.0, frame_walls: String::new(), severity: Severity::Moderate, accept: false }
     }
 }
 
@@ -506,6 +549,8 @@ pub struct RuleSet {
     pub views: Vec<RuleView>,
     /// The project's own classifications of its elements, by rules.
     pub classifications: Vec<Classification>,
+    /// The matrix of classes: pairs of classes tested against each other.
+    pub class_matrix: Vec<ClassPair>,
     /// The clashes of the last run, with what was decided on them: the next run takes the
     /// decisions over and tells what is new and what is solved. And the runs so far.
     pub clash_memory: Vec<ClashMemo>,
@@ -570,6 +615,7 @@ impl Default for RuleSet {
             takeoffs: Vec::new(),
             views: Vec::new(),
             classifications: Vec::new(),
+            class_matrix: Vec::new(),
             clash_memory: Vec::new(),
             clash_runs: Vec::new(),
             info_rules: Vec::new(),

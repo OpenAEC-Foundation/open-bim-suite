@@ -2097,6 +2097,16 @@
     "Add class": "Ajouter une classe",
     "(not classified)": "(non classé)",
     "A classification puts every element of every model in a class by rules (class, type, layer, properties), without changing the files. The class becomes a property to colour, count and select by. It goes with the rule set.": "Une classification range chaque élément de chaque modèle dans une classe selon des règles (classe, type, calque, propriétés), sans modifier les fichiers. La classe devient une propriété pour colorer, compter et sélectionner. Elle accompagne le jeu de règles.",
-    "The first class that takes an element wins: put the narrowest on top. Values: * for anything, ? for one character, | between choices, any case.": "La première classe qui prend un élément l'emporte : mettez la plus étroite en haut. Valeurs : * pour tout, ? pour un caractère, | entre les choix, sans casse."
+    "The first class that takes an element wins: put the narrowest on top. Values: * for anything, ? for one character, | between choices, any case.": "La première classe qui prend un élément l'emporte : mettez la plus étroite en haut. Valeurs : * pour tout, ? pour un caractère, | entre les choix, sans casse.",
+    "Moderate": "Modéré",
+    "critical": "critique",
+    "moderate": "modéré",
+    "low": "faible",
+    "Clash matrix by class": "Matrice de conflits par classe",
+    "Agreed at once": "Accepté d'emblée",
+    "no elements on one of the sides": "aucun élément d'un des côtés",
+    "elements in the test": "éléments dans le test",
+    "Add pair": "Ajouter une paire",
+    "Test classes against each other, by codes or groups (5* against 2*): per pair a tolerance, how much a clash weighs and whether it is agreed to at once (a socket box in a wall). The pairs run with Find clashes.": "Tester des classes les unes contre les autres, par codes ou groupes (5* contre 2*) : par paire une tolérance, le poids d'un conflit et s'il est accepté d'emblée (un boîtier de prise dans un mur). Les paires s'exécutent avec Rechercher les conflits."
   }
 }

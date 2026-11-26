@@ -2097,6 +2097,16 @@
     "Add class": "Adicionar classe",
     "(not classified)": "(não classificado)",
     "A classification puts every element of every model in a class by rules (class, type, layer, properties), without changing the files. The class becomes a property to colour, count and select by. It goes with the rule set.": "Uma classificação coloca cada elemento de cada modelo numa classe segundo regras (classe, tipo, camada, propriedades), sem alterar os ficheiros. A classe torna-se uma propriedade para colorir, contar e selecionar. Acompanha o conjunto de regras.",
-    "The first class that takes an element wins: put the narrowest on top. Values: * for anything, ? for one character, | between choices, any case.": "Ganha a primeira classe que apanha um elemento: ponha a mais estreita no topo. Valores: * para tudo, ? para um carácter, | entre opções, sem distinguir maiúsculas."
+    "The first class that takes an element wins: put the narrowest on top. Values: * for anything, ? for one character, | between choices, any case.": "Ganha a primeira classe que apanha um elemento: ponha a mais estreita no topo. Valores: * para tudo, ? para um carácter, | entre opções, sem distinguir maiúsculas.",
+    "Moderate": "Moderado",
+    "critical": "crítico",
+    "moderate": "moderado",
+    "low": "baixo",
+    "Clash matrix by class": "Matriz de conflitos por classe",
+    "Agreed at once": "Aceite de imediato",
+    "no elements on one of the sides": "sem elementos num dos lados",
+    "elements in the test": "elementos no teste",
+    "Add pair": "Adicionar par",
+    "Test classes against each other, by codes or groups (5* against 2*): per pair a tolerance, how much a clash weighs and whether it is agreed to at once (a socket box in a wall). The pairs run with Find clashes.": "Testar classes umas contra as outras, por códigos ou grupos (5* contra 2*): por par uma tolerância, quanto pesa um conflito e se é aceite de imediato (uma caixa de tomada numa parede). Os pares correm com Procurar conflitos."
   }
 }

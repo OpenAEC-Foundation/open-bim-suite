@@ -8,7 +8,7 @@ use super::collab::{ask_file, Side};
 use super::inform::Key;
 use super::rule_views::Pick;
 use super::{App, Message};
-use crate::collab::rules::{fits, ClassDef, ClassRule, Classification, Condition};
+use crate::collab::rules::{fits, ClashRule, ClassDef, ClassPair, ClassRule, Classification, Condition, RuleSet, Selector, Severity};
 use crate::selection::Pickable;
 use iced::widget::{button, column, container, row, Space};
 use iced::{Alignment, Element, Length, Task};
@@ -30,6 +30,42 @@ pub fn key_of(name: &str) -> String {
 
 /// Per element, the class and the rule of it that took it.
 pub type Sorted = Arc<HashMap<u64, (usize, usize)>>;
+
+/// How far the elements of a pair of classes may cross, to choose from (millimetres).
+const TOLERANCES: [u32; 7] = [0, 2, 10, 25, 50, 100, 200];
+
+/// The lists a pair's choices are made from, per language, made once.
+struct PairLists {
+    severities: Vec<Pick<Severity>>,
+    tolerances: Vec<Pick<u32>>,
+}
+
+fn pair_lists(l: Language) -> &'static PairLists {
+    static MADE: std::sync::OnceLock<Vec<PairLists>> = std::sync::OnceLock::new();
+    let made = MADE.get_or_init(|| {
+        Language::ALL
+            .iter()
+            .map(|&l| PairLists {
+                severities: vec![
+                    Pick::new(Severity::Critical, l.text("Kritiek", "Critical").to_string()),
+                    Pick::new(Severity::Moderate, l.text("Matig", "Moderate").to_string()),
+                    Pick::new(Severity::Low, l.text("Laag", "Low").to_string()),
+                ],
+                tolerances: TOLERANCES.iter().map(|&t| Pick::new(t, format!("{t} mm"))).collect(),
+            })
+            .collect()
+    });
+    &made[Language::ALL.iter().position(|&x| x == l).unwrap_or(0)]
+}
+
+/// How a severity reads beside a clash.
+pub fn severity_word(severity: Severity, l: Language) -> &'static str {
+    match severity {
+        Severity::Critical => l.text("kritiek", "critical"),
+        Severity::Moderate => l.text("matig", "moderate"),
+        Severity::Low => l.text("laag", "low"),
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum Event {
@@ -64,6 +100,16 @@ pub enum Event {
     Imported(Option<PathBuf>),
     Export,
     Exported(Option<PathBuf>),
+    /// A pair of the matrix of classes added for the classification shown, or one of the
+    /// rule set's pairs changed.
+    AddPair,
+    RemovePair(usize),
+    PairA(usize, String),
+    PairB(usize, String),
+    PairTolerance(usize, Pick<u32>),
+    PairSeverity(usize, Pick<Severity>),
+    PairAccept(usize, bool),
+    PairOn(usize, bool),
 }
 
 /// What the tab keeps.
@@ -121,6 +167,59 @@ impl App {
         Some(sorted)
     }
 
+    /// The clash tests of the matrix of classes, for the models open: each pair on whose two
+    /// sides take elements, as a test of those elements against each other.
+    pub(crate) fn class_clash_tests(&self, rules: &RuleSet) -> Vec<ClashRule> {
+        let Some(model) = self.model.clone() else { return Vec::new() };
+        let elements = App::inform_elements(&model);
+        let mut tests = Vec::new();
+        for pair in rules.class_matrix.iter().filter(|p| p.on && !p.a.trim().is_empty() && !p.b.trim().is_empty()) {
+            let Some(classification) = rules.classifications.iter().find(|c| c.name == pair.classification) else { continue };
+            let Some(sorted) = self.sorted_by(&pair.classification) else { continue };
+            let side = |pattern: &str| -> Vec<u64> {
+                let wanted: Vec<bool> = classification.classes.iter().map(|c| fits(pattern, &c.code)).collect();
+                let mut ids: Vec<u64> = elements.iter().filter(|(id, _)| sorted.get(id).is_some_and(|&(c, _)| wanted[c])).map(|&(id, _)| id).collect();
+                ids.sort_unstable();
+                ids
+            };
+            let (a, b) = (side(&pair.a), side(&pair.b));
+            if a.is_empty() || b.is_empty() {
+                continue;
+            }
+            tests.push(ClashRule {
+                name: pair.name(),
+                a: Selector { only: a, ..Selector::default() },
+                b: Selector { only: b, ..Selector::default() },
+                tolerance_mm: pair.tolerance_mm,
+                between_models: rules.matrix_between_models,
+                severity: pair.severity,
+                accept: pair.accept,
+                ..ClashRule::default()
+            });
+        }
+        tests
+    }
+
+    /// The labels a clash's issue carries: the class of each of its elements, in every
+    /// classification of the rule set.
+    pub(crate) fn class_labels(&self, ids: &[u64]) -> Vec<String> {
+        let mut labels: Vec<String> = Vec::new();
+        for c in self.collab.rules().map(|r| r.classifications.clone()).unwrap_or_default() {
+            for &id in ids {
+                if let Some(class) = self.class_value(id, &key_of(&c.name)) {
+                    if !labels.contains(&class) {
+                        labels.push(class);
+                    }
+                }
+            }
+        }
+        labels
+    }
+
+    fn pair_mut(&mut self, k: usize) -> Option<&mut ClassPair> {
+        self.collab.rules_mut()?.class_matrix.get_mut(k)
+    }
+
     /// Element `id`'s class in the classification of property `key` (`@classification:<name>`).
     pub(crate) fn class_value(&self, id: u64, key: &str) -> Option<String> {
         let name = key.strip_prefix(CLASSIFICATION)?;
@@ -174,7 +273,11 @@ impl App {
 
     pub(super) fn classify_handle(&mut self, event: Event) -> Task<Message> {
         let l = self.collab.language;
-        let changes = !matches!(event, Event::Pick(_) | Event::Open(_) | Event::Select(_) | Event::ColourBy | Event::Import | Event::Export | Event::Exported(_));
+        let changes = !matches!(
+            event,
+            Event::Pick(_) | Event::Open(_) | Event::Select(_) | Event::ColourBy | Event::Import | Event::Export | Event::Exported(_)
+                | Event::AddPair | Event::RemovePair(_) | Event::PairA(..) | Event::PairB(..) | Event::PairTolerance(..) | Event::PairSeverity(..) | Event::PairAccept(..) | Event::PairOn(..)
+        );
         match event {
             Event::Pick(k) => {
                 self.collab.classify.picked = k;
@@ -322,6 +425,47 @@ impl App {
                 let name = self.collab.rules().and_then(|r| r.classifications.get(self.collab.classify.picked)).map(|c| format!("{}.json", c.name)).unwrap_or_else(|| "classification.json".into());
                 return ask_file(move || rfd::AsyncFileDialog::new().add_filter("JSON", &["json"]).set_file_name(name.clone()), true, |path| Message::Collab(super::collab::Event::Classes(Event::Exported(path))));
             }
+            Event::AddPair => {
+                let Some(name) = self.collab.rules().and_then(|r| r.classifications.get(self.collab.classify.picked)).map(|c| c.name.clone()) else { return Task::none() };
+                if let Some(rules) = self.collab.rules_mut() {
+                    rules.class_matrix.push(ClassPair { classification: name, a: "5*".into(), b: "2*".into(), ..ClassPair::default() });
+                }
+            }
+            Event::RemovePair(k) => {
+                if let Some(rules) = self.collab.rules_mut().filter(|r| k < r.class_matrix.len()) {
+                    rules.class_matrix.remove(k);
+                }
+            }
+            Event::PairA(k, text) => {
+                if let Some(pair) = self.pair_mut(k) {
+                    pair.a = text;
+                }
+            }
+            Event::PairB(k, text) => {
+                if let Some(pair) = self.pair_mut(k) {
+                    pair.b = text;
+                }
+            }
+            Event::PairTolerance(k, pick) => {
+                if let Some(pair) = self.pair_mut(k) {
+                    pair.tolerance_mm = pick.value as f32;
+                }
+            }
+            Event::PairSeverity(k, pick) => {
+                if let Some(pair) = self.pair_mut(k) {
+                    pair.severity = pick.value;
+                }
+            }
+            Event::PairAccept(k, on) => {
+                if let Some(pair) = self.pair_mut(k) {
+                    pair.accept = on;
+                }
+            }
+            Event::PairOn(k, on) => {
+                if let Some(pair) = self.pair_mut(k) {
+                    pair.on = on;
+                }
+            }
             Event::Exported(Some(path)) => {
                 let Some(classification) = self.collab.rules().and_then(|r| r.classifications.get(self.collab.classify.picked)).cloned() else { return Task::none() };
                 match std::fs::write(&path, classification.write()) {
@@ -401,7 +545,27 @@ impl App {
                     "unclassified_first": unclassified.iter().take(100).map(|&(id, layer)| json!({ "id": id, "class": self.inform_value(&model, id, layer, super::inform::CLASS), "name": field(id, "Name"), "global_id": field(id, "GlobalId"), "model": file(id, layer) })).collect::<Vec<_>>(),
                 }))
             }
-            other => Err(format!("collab_classification: unknown action {other} (list, example, save, remove, colour, report)")),
+            "matrix" => Ok(json!({ "pairs": self.collab.rules().map(|r| r.class_matrix.iter().enumerate().map(|(k, p)| json!({ "index": k, "pair": p })).collect::<Vec<_>>()) })),
+            "pair" => {
+                let pair: ClassPair = serde_json::from_value(a.get("pair").cloned().ok_or("give the pair: {classification, a: \"5*\", b: \"2*\", tolerance_mm, severity: critical|moderate|low, accept, on}")?).map_err(|e| format!("pair: {e}"))?;
+                let rules = self.collab.rules_mut().ok_or("no rule set")?;
+                let k = match index.filter(|&k| k < rules.class_matrix.len()) {
+                    Some(k) => {
+                        rules.class_matrix[k] = pair;
+                        k
+                    }
+                    None => {
+                        rules.class_matrix.push(pair);
+                        rules.class_matrix.len() - 1
+                    }
+                };
+                Ok(json!({ "index": k }))
+            }
+            "pair_remove" => {
+                let _ = self.classify_handle(Event::RemovePair(index.ok_or("give the pair's index")?));
+                Ok(json!({ "pairs": self.collab.rules().map(|r| r.class_matrix.len()) }))
+            }
+            other => Err(format!("collab_classification: unknown action {other} (list, example, save, remove, colour, report, matrix, pair, pair_remove)")),
         }
     }
 
@@ -560,7 +724,54 @@ impl App {
             "De eerste klasse die een element neemt, wint: zet de nauwste bovenaan. Waarden: * voor alles, ? voor één teken, | tussen keuzes, hoofdletters maken niet uit.",
             "The first class that takes an element wins: put the narrowest on top. Values: * for anything, ? for one character, | between choices, any case.",
         )))
+        .push(self.class_matrix_panel(look, l, &classification.name))
         .into()
+    }
+
+    /// The matrix of classes of the classification shown: its pairs, each two codes (`5*`),
+    /// how far they may cross, how much a clash weighs, whether it is agreed to at once.
+    fn class_matrix_panel<'a>(&'a self, look: Look, l: Language, name: &str) -> Element<'a, Message> {
+        let go = |e: Event| Message::Collab(super::collab::Event::Classes(e));
+        let lists = pair_lists(l);
+        let mut out = column![w::divider(look), w::heading(look, l.text("Clashmatrix per klasse", "Clash matrix by class"), 13.0)].spacing(4);
+        let pairs = self.collab.rules().map(|r| r.class_matrix.as_slice()).unwrap_or(&[]);
+        let tests = self.collab.rules().map(|r| self.class_clash_tests(r)).unwrap_or_default();
+        let ours: Vec<(usize, &ClassPair)> = pairs.iter().enumerate().filter(|(_, p)| p.classification == name).collect();
+        if ours.is_empty() {
+            out = out.push(w::secondary(look, l.text(
+                "Test klassen tegen elkaar, met codes of groepen (5* tegen 2*): per paar een tolerantie, hoe zwaar een clash weegt en of hij meteen akkoord is (een wandcontactdoos in een wand). De paren lopen mee met Clashes zoeken.",
+                "Test classes against each other, by codes or groups (5* against 2*): per pair a tolerance, how much a clash weighs and whether it is agreed to at once (a socket box in a wall). The pairs run with Find clashes.",
+            )));
+        }
+        for (k, pair) in ours {
+            let runs = tests.iter().find(|t| t.name == pair.name()).map_or(0, |t| t.a.only.len() + t.b.only.len());
+            let tolerance = lists.tolerances.iter().find(|p| p.value as f32 == pair.tolerance_mm).cloned();
+            let severity = lists.severities.iter().find(|p| p.value == pair.severity).cloned();
+            out = out.push(
+                column![
+                    row![
+                        container(w::text_field(look, "5*", &pair.a, Some(move |t: String| go(Event::PairA(k, t))), D::Compact, None)).width(Length::FillPortion(2)),
+                        w::secondary(look, "×"),
+                        container(w::text_field(look, "2*", &pair.b, Some(move |t: String| go(Event::PairB(k, t))), D::Compact, None)).width(Length::FillPortion(2)),
+                        container(w::select(look, lists.tolerances.as_slice(), tolerance, move |p: Pick<u32>| go(Event::PairTolerance(k, p)), D::Compact)).width(Length::FillPortion(2)),
+                    ]
+                    .spacing(4)
+                    .align_y(Alignment::Center),
+                    row![
+                        container(w::select(look, lists.severities.as_slice(), severity, move |p: Pick<Severity>| go(Event::PairSeverity(k, p)), D::Compact)).width(Length::FillPortion(2)),
+                        named(w::checkbox(look, l.text("Meteen akkoord", "Agreed at once"), pair.accept, Some(move |on| go(Event::PairAccept(k, on)))), Node::new(Role::CheckBox, l.text("Meteen akkoord", "Agreed at once")).checked(pair.accept)),
+                        named(w::checkbox(look, l.text("Aan", "On"), pair.on, Some(move |on| go(Event::PairOn(k, on)))), Node::new(Role::CheckBox, l.text("Aan", "On")).checked(pair.on)),
+                        Space::new().width(Length::Fill),
+                        w::button(look, l.text("Weg", "Remove"), K::Quiet, D::Compact, None, Some(go(Event::RemovePair(k)))),
+                    ]
+                    .spacing(6)
+                    .align_y(Alignment::Center),
+                    w::secondary(look, if runs == 0 { l.text("geen elementen aan een van beide kanten", "no elements on one of the sides").to_string() } else { format!("{runs} {}", l.text("elementen in de test", "elements in the test")) }),
+                ]
+                .spacing(3),
+            );
+        }
+        out.push(w::button(look, l.text("Paar toevoegen", "Add pair"), K::Quiet, D::Compact, None, Some(go(Event::AddPair)))).into()
     }
 }
 
@@ -617,6 +828,38 @@ mod tests {
         assert_eq!(legend[0].value, "21 Walls");
         assert_eq!(legend[0].color, [200, 80, 60]);
         assert_eq!(legend.last().unwrap().ids, vec![2], "the pipe, in no class");
+    }
+
+    #[test]
+    fn a_pair_of_classes_is_a_clash_test_with_its_weight_and_agreement_and_its_issue_carries_the_classes() {
+        let mut app = app();
+        {
+            let rules = app.collab.rules_mut().unwrap();
+            rules.classifications.push(ours());
+            rules.class_matrix.push(ClassPair { classification: "Ours".into(), a: "5*".into(), b: "2*".into(), severity: Severity::Critical, ..ClassPair::default() });
+            // a pair one of whose sides takes nothing makes no test
+            rules.class_matrix.push(ClassPair { classification: "Ours".into(), a: "99".into(), b: "2*".into(), ..ClassPair::default() });
+        }
+        let tests = app.class_clash_tests(&app.collab.rules().unwrap().clone());
+        assert_eq!(tests.len(), 1);
+        assert_eq!((tests[0].a.only.as_slice(), tests[0].b.only.as_slice()), (&[2u64][..], &[1u64][..]));
+        // run with the rule set: the pipe sunk into the wall is a critical clash of the pair
+        app.collab_now(None, None, Some("clash")).unwrap();
+        let row = app.collab.clashes.iter().find(|c| c.rule == "Ours: 5* × 2*").expect("the pair's clash").clone();
+        assert_eq!((row.severity, row.decision), (Severity::Critical, crate::app::collab::Decision::Open));
+        // its issue: critical, with the classes of both as labels
+        let k = app.collab.clashes.iter().position(|c| c.rule == row.rule).unwrap();
+        let _ = app.collab_update(crate::app::collab::Event::IssueFromClash(k));
+        let topic = app.collab.issues.topics.last().unwrap();
+        assert_eq!(topic.priority, "Critical");
+        assert!(topic.labels.contains(&"5- Services".to_string()) && topic.labels.contains(&"21 Walls".to_string()), "{:?}", topic.labels);
+        // agreed at once: the next run finds it agreed to
+        app.collab.rules_mut().unwrap().class_matrix[0].accept = true;
+        app.collab.rules_mut().unwrap().clash_memory.clear();
+        app.collab.clashes.clear();
+        app.collab_now(None, None, Some("clash")).unwrap();
+        let row = app.collab.clashes.iter().find(|c| c.rule == "Ours: 5* × 2*").unwrap();
+        assert_eq!(row.decision, crate::app::collab::Decision::Accepted);
     }
 
     #[test]
