@@ -2895,7 +2895,7 @@ impl Studio {
             RibbonPage::Model => vec![
                 (l.text("Selecteren", "Select"), vec![large("model.select")]),
                 // what the building is set out on: its grid lines and its levels
-                (l.text("Referenties", "Datums"), vec![large("project.grid"), large("project.level")]),
+                (l.text("Referenties", "Datums"), vec![large("project.grid"), smalls(&["grid.select-all", "grid.lock"]), large("project.level")]),
                 (l.text("Vlak", "Planar"), vec![large("model.wall"), large("model.slab"), large("model.roof")]),
                 (l.text("Lijnvormig", "Linear"), vec![large("model.column"), large("model.beam")]),
                 (l.text("Systeem", "System"), vec![large("model.system"), smalls(&["model.curtain-line", "model.curtain-panel"])]),
@@ -4481,9 +4481,8 @@ mod tests {
         app.add_demo_building();
         let mut studio = Studio::new(app);
         studio.set_product(Product::Modeller);
-        // the Grid tool is with the datums on the Model tab; picking all and locking are in the Grid group of the Project tab
-        // (on the Model tab two more small buttons would make it too wide for the labels of the others)
-        assert_eq!(model_group_with(&studio, "project.grid"), ["project.grid", "project.level"]);
+        // the Grid tool, picking all and locking, and the Level tool are together on the Model tab; the Project tab has them too
+        assert_eq!(model_group_with(&studio, "project.grid"), ["project.grid", "grid.select-all", "grid.lock", "project.level"]);
         let project = studio.ribbon_groups_of(RibbonPage::Project);
         let group = project.iter().find(|g| g.1.iter().any(|p| matches!(p, RibbonPart::Large("project.grid")))).expect("a Grid group on the Project tab");
         let ids: Vec<&str> = group.1.iter().flat_map(|p| match p { RibbonPart::Large(id) => vec![*id], RibbonPart::Smalls(ids) => ids.clone() }).collect();
