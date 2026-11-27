@@ -71,6 +71,9 @@ impl RenderMode {
 /// Colours and switches that come from the UI.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RenderSettings {
+    /// The whole scene lies under something that lets nothing through (a view shown on paper):
+    /// none of it is drawn.
+    pub covered: bool,
     pub mode: RenderMode,
     pub grid: bool,
     /// sRGB 0..1
@@ -1235,6 +1238,9 @@ impl ScenePipeline {
         target: &wgpu::TextureView,
         clip_bounds: &Rectangle<u32>,
     ) {
+        if primitive.settings.covered {
+            return;
+        }
         let Some(targets) = &self.targets else { return };
         let bg = primitive.settings.background;
         let clear = if self.srgb {

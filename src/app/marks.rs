@@ -843,22 +843,119 @@ pub(super) struct MarksState {
     drawing: Option<DrawKind>,
     /// The object snap the aim of a drawing tool is on.
     osnap: Option<Osnap>,
-    /// The paper and the hatched cut as drawn (see [`crate::kept_canvas`]).
-    kept: crate::kept_canvas::Kept,
+}
+
+/// The cut of a view as its tab shows it under its marks: the cut faces in their hatch and, on
+/// paper, the lines of the cut and of what is seen beyond it.
+struct CutUnder {
+    frame: DrawingFrame,
+    camera: crate::viewport::camera::Camera,
+    scale: f64,
+    crop: Option<([f64; 2], [f64; 2])>,
+    cut: Option<Arc<Cut>>,
+    on_paper: bool,
+    ink: Color,
+}
+
+impl CutUnder {
+    fn screen(&self, size: iced::Size) -> Screen {
+        Screen { view_proj: self.camera.view_proj(size.width / size.height.max(1.0)), size: (size.width, size.height) }
+    }
+
+    fn px(&self, screen: &Screen, q: [f64; 2]) -> Option<Point> {
+        screen.project(self.frame.world(q)).map(|p| Point::new(p.x, p.y))
+    }
+
+    /// The pixels of the drawing's origin and of one metre along each of its axes from there.
+    fn axes(&self, size: iced::Size) -> Option<[Point; 3]> {
+        let screen = self.screen(size);
+        Some([self.px(&screen, [0.0, 0.0])?, self.px(&screen, [1.0, 0.0])?, self.px(&screen, [0.0, 1.0])?])
+    }
+}
+
+impl crate::kept_canvas::Drawing for CutUnder {
+    fn name(&self) -> &'static str {
+        "ViewCut"
+    }
+
+    fn key(&self, size: iced::Size) -> u64 {
+        // how its axes lie on the screen belongs to it: turned, it is another drawing
+        let turn = self.axes(size).filter(|_| self.camera.ortho).map(|[o, x, y]| {
+            let per_metre = o.distance(x).max(1e-9);
+            [(x.x - o.x) / per_metre, (x.y - o.y) / per_metre, (y.x - o.x) / per_metre, (y.y - o.y) / per_metre].map(|v| (v * 1e4).round())
+        });
+        crate::kept_canvas::key(
+            &[self.scale as f32, self.ink.r, self.ink.g, self.ink.b],
+            &format!("{:?}{:?}{:?}{:?}{}{:?}", turn, self.frame, self.crop, self.cut.as_ref().map(Arc::as_ptr), self.on_paper, (!self.camera.ortho).then_some(self.camera)),
+        )
+    }
+
+    fn lie(&self, size: iced::Size) -> Option<[f32; 3]> {
+        let [o, x, _] = self.axes(size).filter(|_| self.camera.ortho)?;
+        Some([o.distance(x), o.x, o.y])
+    }
+
+    fn draw(&self, frame: &mut Frame, size: iced::Size) {
+        let Some(cut) = &self.cut else { return };
+        let (screen, ink) = (self.screen(size), self.ink);
+        // the cut faces in their hatch, over the model's own cut fill
+        let per_metre = cut.extent.map_or(0.0, |(lo, _)| match (self.px(&screen, lo.map(f64::from)), self.px(&screen, [f64::from(lo[0]) + 1.0, f64::from(lo[1])])) {
+            (Some(a), Some(b)) => a.distance(b),
+            _ => 0.0,
+        });
+        super::hatch::draw_fills(frame, cut, self.crop, &|q| self.px(&screen, q), per_metre, if self.on_paper { None } else { Some(ink) });
+        if !self.on_paper {
+            return;
+        }
+        // its lines within its crop: what is seen beyond the cut thin and grey, the cut itself in
+        // ink, then those the view's filters give a pen of their own
+        let mut stroke = |segments: &[[[f32; 2]; 2]], color: Color, width: f32| {
+            let path = Path::new(|path| {
+                for s in segments {
+                    let (a, b) = (s[0].map(f64::from), s[1].map(f64::from));
+                    let Some((a, b)) = (match self.crop {
+                        Some((lo, hi)) => crate::drawing2d::clip(a, b, lo, hi),
+                        None => Some((a, b)),
+                    }) else { continue };
+                    if let (Some(a), Some(b)) = (self.px(&screen, a), self.px(&screen, b)) {
+                        path.move_to(a);
+                        path.line_to(b);
+                    }
+                }
+            });
+            frame.stroke(&path, Stroke::default().with_color(color).with_width(width));
+        };
+        let beyond = Color { a: 0.55, ..ink };
+        stroke(&cut.below, beyond, 0.5);
+        stroke(&cut.segments, ink, 1.1);
+        for inked in &cut.inked {
+            let (plain, width) = if inked.cut { (ink, 1.1) } else { (beyond, 0.5) };
+            let color = inked.ink.color.map_or(plain, |c| Color::from_rgb8(c[0], c[1], c[2]));
+            stroke(&inked.lines, color, inked.ink.wide(width, inked.cut));
+        }
+    }
 }
 
 impl ViewMarks {
     pub(super) fn widget(self) -> iced::Element<'static, Message> {
         use iced::widget::canvas;
         use iced::Length::Fill;
-        let Some(image) = self.image.clone() else { return crate::clip::clip(canvas(self).width(Fill).height(Fill)) };
-        let (camera, plane, paper, dark) = (self.camera.clone(), self.frame, self.on_paper, self.palette.dark);
+        let dark = self.palette.dark;
+        let paper_color = if dark { Color::from_rgb(0.16, 0.16, 0.18) } else { Color::WHITE };
+        // the cut in its hatch and its lines: a layer of its own under the marks, kept while the
+        // view only moves or zooms
+        let under = CutUnder { frame: self.frame, camera: self.camera, scale: self.scale, crop: self.crop, cut: self.cut.clone(), on_paper: self.on_paper, ink: self.palette.text };
+        let Some(image) = self.image.clone() else {
+            let paper = self.on_paper.then_some(paper_color);
+            return crate::clip::clip(iced::widget::stack![crate::kept_canvas::moved(under, paper), canvas(self).width(Fill).height(Fill)]);
+        };
+        let (camera, plane, paper) = (self.camera, self.frame, self.on_paper);
         let background = crate::raster::Backdrop(move |frame: &mut Frame, bounds: Rectangle| {
-            if paper { frame.fill_rectangle(Point::ORIGIN, bounds.size(), if dark { Color::from_rgb(0.16, 0.16, 0.18) } else { Color::WHITE }); }
+            if paper { frame.fill_rectangle(Point::ORIGIN, bounds.size(), paper_color); }
             let screen = Screen { view_proj: camera.view_proj(bounds.width / bounds.height.max(1.0)), size: (bounds.width, bounds.height) };
             image.draw(frame, |q| screen.project(plane.world(q)).map(|p| Point::new(p.x, p.y)));
         });
-        crate::clip::clip(iced::widget::stack![canvas(background).width(Fill).height(Fill), canvas(self).width(Fill).height(Fill)])
+        crate::clip::clip(iced::widget::stack![canvas(background).width(Fill).height(Fill), crate::kept_canvas::moved(under, None), canvas(self).width(Fill).height(Fill)])
     }
 
     fn screen(&self, bounds: Rectangle) -> Screen {
@@ -1375,52 +1472,6 @@ impl canvas::Program<Message> for ViewMarks {
         let p = self.palette;
         let screen = self.screen(bounds);
         let ink = p.text;
-        // the paper and the cut in its hatch take the time of this canvas: kept while the view,
-        // its camera and its cut stay as they are (the pointer moving over it changes none)
-        let key = crate::kept_canvas::key(
-            &[bounds.width, bounds.height, self.scale as f32, ink.r, ink.g, ink.b],
-            &format!("{:?}{:?}{:?}{:?}{}{}{}", self.camera, self.frame, self.crop, self.cut.as_ref().map(Arc::as_ptr), self.on_paper, self.image.is_none(), p.dark),
-        );
-        let under = state.kept.draw(renderer, bounds.size(), key, |frame| {
-            // as a sheet draws it: on paper, over the model as the 3D view shows it
-            if self.on_paper && self.image.is_none() {
-                let paper = if p.dark { Color::from_rgb(0.16, 0.16, 0.18) } else { Color::WHITE };
-                frame.fill_rectangle(Point::ORIGIN, bounds.size(), paper);
-            }
-            // the cut faces in their hatch, over the model's own cut fill
-            if let Some(cut) = &self.cut {
-                let per_metre = cut.extent.map_or(0.0, |(lo, _)| self.paper(&screen, lo.map(f64::from)) / self.scale as f32);
-                super::hatch::draw_fills(frame, cut, self.crop, &|q| self.px(&screen, q), per_metre, if self.on_paper { None } else { Some(ink) });
-                if self.on_paper {
-                    // its lines within its crop: what is seen beyond the cut thin and grey, the cut
-                    // itself in ink, then those the view's filters give a pen of their own
-                    let mut stroke = |segments: &[[[f32; 2]; 2]], color: Color, width: f32| {
-                        let path = Path::new(|path| {
-                            for s in segments {
-                                let (a, b) = (s[0].map(f64::from), s[1].map(f64::from));
-                                let Some((a, b)) = (match self.crop {
-                                    Some((lo, hi)) => crate::drawing2d::clip(a, b, lo, hi),
-                                    None => Some((a, b)),
-                                }) else { continue };
-                                if let (Some(a), Some(b)) = (self.px(&screen, a), self.px(&screen, b)) {
-                                    path.move_to(a);
-                                    path.line_to(b);
-                                }
-                            }
-                        });
-                        frame.stroke(&path, Stroke::default().with_color(color).with_width(width));
-                    };
-                    let beyond = Color { a: 0.55, ..ink };
-                    stroke(&cut.below, beyond, 0.5);
-                    stroke(&cut.segments, ink, 1.1);
-                    for inked in &cut.inked {
-                        let (plain, width) = if inked.cut { (ink, 1.1) } else { (beyond, 0.5) };
-                        let color = inked.ink.color.map_or(plain, |c| Color::from_rgb8(c[0], c[1], c[2]));
-                        stroke(&inked.lines, color, inked.ink.wide(width, inked.cut));
-                    }
-                }
-            }
-        });
         let mut frame = Frame::new(renderer, bounds.size());
         // the sections drawn on the plan: with the section tool, or over the model (as on a sheet
         // the view shows the marks it has itself)
@@ -1561,7 +1612,7 @@ impl canvas::Program<Message> for ViewMarks {
         if let Some(a) = state.first.and_then(|q| self.px(&screen, q)) {
             frame.fill(&Path::circle(a, 3.0), p.accent);
         }
-        vec![under, frame.into_geometry()]
+        vec![frame.into_geometry()]
     }
 
     fn mouse_interaction(&self, state: &MarksState, bounds: Rectangle, cursor: mouse::Cursor) -> mouse::Interaction {
@@ -1661,7 +1712,7 @@ pub(super) fn draw_interval_px(frame: &mut Frame, a: Point, b: Point, witnesses:
         position: off(Point::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0), look.offset + clear),
         align_x: alignment::Horizontal::Center.into(),
         align_y: alignment::Vertical::Center,
-        size: iced::Pixels(look.size),
+        size: crate::kept_canvas::text_size(look.size),
         color,
         font: style.label_family().as_deref().map_or(openaec_ui::fonts::MEDIUM, |name| crate::typeface::Face::of(name).font()),
         ..canvas::Text::default()
@@ -1723,7 +1774,7 @@ pub(super) fn draw_datum(frame: &mut Frame, a: Point, b: Point, name: &str, leve
             position,
             align_x: align.into(),
             align_y: alignment::Vertical::Center,
-            size: iced::Pixels(2.5 * px_per_mm / 0.72),
+            size: crate::kept_canvas::text_size(2.5 * px_per_mm / 0.72),
             color: ink,
             font: openaec_ui::fonts::MEDIUM,
             ..canvas::Text::default()
@@ -1799,7 +1850,7 @@ pub(super) fn draw_note_in(frame: &mut Frame, at: Point, wording: &str, size: f3
         position,
         align_x: align_x.into(),
         align_y: alignment::Vertical::Bottom,
-        size: iced::Pixels(size),
+        size: crate::kept_canvas::text_size(size),
         color,
         ..canvas::Text::default()
     };
