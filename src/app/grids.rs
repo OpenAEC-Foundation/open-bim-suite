@@ -72,13 +72,26 @@ impl App {
         self.show_grids && !self.flip_up
     }
 
+    /// Which grid lines are off because their model is: the grids of several models stand in
+    /// the order of the models, each model's together. Empty when none is off.
+    pub(super) fn grids_off(&self) -> Vec<bool> {
+        let Some(model) = self.model.as_ref() else { return Vec::new() };
+        if self.models.len() < 2 || self.models.iter().all(|e| e.visible) {
+            return Vec::new();
+        }
+        let off: Vec<bool> = self.models.iter().flat_map(|e| std::iter::repeat(!e.visible).take(e.model.project.grids.len())).collect();
+        // grids added or taken away since the models were put together: whose they are is unknown
+        if off.len() == model.project.grids.len() { off } else { Vec::new() }
+    }
+
     /// The grid lines and levels the viewport draws, where the view shown draws them (nothing
     /// while the grid lines are off).
     pub(super) fn datums(&self) -> Vec<Datum> {
         let Some(model) = self.model.as_ref().filter(|_| self.grids_shown() || self.levels_3d) else { return Vec::new() };
         // the 3D view can draw the levels without the grids
         let none: &[GridLine] = &[];
-        let grids = if self.grids_shown() { model.project.grids.as_slice() } else { none }.iter().enumerate();
+        let off = self.grids_off();
+        let grids = if self.grids_shown() { model.project.grids.as_slice() } else { none }.iter().enumerate().filter(|(i, _)| !off.get(*i).copied().unwrap_or(false));
         // a 3D view of the file draws no grids
         if self.active_plan.is_none() && self.active_view.is_some_and(|i| model.views.get(i).is_some_and(|v| v.kind == crate::model::ViewKind::ThreeD)) {
             return Vec::new();
@@ -140,7 +153,15 @@ impl App {
     /// The distances between the grid lines, for the 3D view, when they are asked for.
     pub(super) fn grid_dimensions(&self) -> Vec<crate::annotations::Measurement> {
         match self.model.as_ref().filter(|_| self.grid_dims && self.grids_shown() && self.shown_view().is_none()) {
-            Some(model) => grid_dimensions(&model.project.grids),
+            Some(model) => {
+                let off = self.grids_off();
+                if off.is_empty() {
+                    grid_dimensions(&model.project.grids)
+                } else {
+                    let shown: Vec<GridLine> = model.project.grids.iter().zip(&off).filter(|(_, off)| !**off).map(|(g, _)| g.clone()).collect();
+                    grid_dimensions(&shown)
+                }
+            }
             None => Vec::new(),
         }
     }
@@ -345,6 +366,29 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_grids_of_a_model_switched_off_go_with_it() {
+        use crate::app::Message;
+        use crate::model::{Layer, Model};
+        let source = |name: &str, x: f32, grid: &str| {
+            let layer = Layer { name: name.into(), positions: vec![x, 0.0, 0.0, x + 1.0, 0.0, 0.0, x, 1.0, 0.0], indices: vec![0, 1, 2], elements: vec![(1, 0, 3)], ..Layer::default() };
+            let mut model = Model::new(name.into(), "OBJ", vec![layer]);
+            model.project.grids = vec![GridLine { name: grid.into(), a: [x, -5.0, 0.0], b: [x, 5.0, 0.0] }];
+            std::sync::Arc::new(model)
+        };
+        let mut app = App::default();
+        app.set_model(source("first.obj", 0.0, "A"));
+        app.add_model(source("second.obj", 6.0, "B"));
+        app.show_grids = true;
+        let names = |app: &App| app.datums().iter().filter(|d| matches!(d.kind, DatumKind::Grid(_))).map(|d| d.line.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&app), ["A", "B"]);
+        let _ = app.update(Message::ModelVisible(1, false));
+        assert_eq!(names(&app), ["A"]);
+        let _ = app.update(Message::ModelVisible(1, true));
+        let _ = app.update(Message::ModelVisible(0, false));
+        assert_eq!(names(&app), ["B"]);
+    }
 
     #[test]
     fn grids_that_run_the_same_way_are_dimensioned_in_a_chain_and_over_all() {

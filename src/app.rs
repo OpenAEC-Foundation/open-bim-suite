@@ -5153,8 +5153,13 @@ impl App {
                 .align_right(Fill)
                 .align_top(Fill)
         });
-        // a view's tab keeps its box without the handles: its crop is set on the sheet
-        let section = self.active_section().filter(|_| overlay.is_none() && self.shown_view().is_none() && !clean).map(|section| {
+        // a view's tab keeps its box without the handles: its crop is set on the sheet; so does
+        // the box that shows a clash, where they stand in front of what is looked at
+        #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
+        let clash_box = self.collab.clash.is_some() || self.collab.open_group.is_some();
+        #[cfg(not(all(feature = "validator", not(target_arch = "wasm32"))))]
+        let clash_box = false;
+        let section = self.active_section().filter(|_| overlay.is_none() && self.shown_view().is_none() && !clean && !clash_box).map(|section| {
             canvas(SectionOverlay { section, view_proj: self.camera.view_proj(self.aspect()) }).width(Fill).height(Fill)
         });
         let plane = self.plane.zip(self.world_bounds()).filter(|_| overlay.is_none() && !self.plane_picking).map(|(plane, world)| {

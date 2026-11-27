@@ -472,6 +472,9 @@ pub struct ClashMemo {
     /// Where it is (metres): an element modelled anew has another key, but its clash is still
     /// between elements of the same names in the same place.
     pub at: [f32; 3],
+    /// Who it is for, and what was said of it.
+    pub assigned: String,
+    pub note: String,
 }
 
 /// A run of the clash tests: when, how many clashes it found, how many of them the run before
@@ -486,6 +489,8 @@ pub struct ClashRun {
     pub open: usize,
     /// How many are open per test (a pair of disciplines of the matrix is a test).
     pub per_test: Vec<(String, usize)>,
+    /// The models it was run on: the name of each file and when it was last written.
+    pub models: Vec<(String, String)>,
 }
 
 /// A rule of the project's own on what its elements say: the elements of a class have a

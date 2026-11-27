@@ -940,6 +940,8 @@
     "properties added as rules (off); tick the ones you ask.": "propriétés ajoutées comme règles (désactivées) ; cochez celles que vous demandez.",
     "Show ambient shadows": "Afficher les ombres ambiantes",
     "Cut the model when zooming in (parallel view)": "Couper le modèle en zoomant (vue parallèle)",
+    "For": "Pour",
+    "Run of": "Exécution du",
     "By kind": "Par type",
     "Order": "Trier",
     "Room": "Pièce",
