@@ -3739,7 +3739,7 @@ impl App {
         }
         let content: Element<'_, Message> = match state.tab {
             Tab::Issues => self.collab_issues(look, l),
-            Tab::Packages => self.package_panel(look, l),
+            Tab::Packages => self.package_panel(look, l, &state.sides),
             Tab::Checks => self.collab_checks(look, l),
             Tab::Clashes => self.collab_clashes(look, l),
             Tab::Compare => column![self.collab_compare(look, l), w::divider(look), self.cloud_view(look, l)].spacing(8).into(),

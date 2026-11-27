@@ -2148,6 +2148,19 @@
     "Export sheets": "Blätter exportieren",
     "Several sheets at once: as one PDF to print, or a PDF, DWG, DXF or SVG per sheet.": "Mehrere Blätter auf einmal: als ein PDF zum Drucken oder ein PDF, DWG, DXF oder SVG je Blatt.",
     "One PDF is to print the series; per sheet asks for the folder and names each file after its sheet.": "Ein PDF dient zum Drucken der Serie; je Blatt fragt nach dem Ordner und benennt jede Datei nach ihrem Blatt.",
-    "The model's drawings are still being read; in a moment you can.": "Die Zeichnungen des Modells werden noch gelesen; gleich geht es."
+    "The model's drawings are still being read; in a moment you can.": "Die Zeichnungen des Modells werden noch gelesen; gleich geht es.",
+    "Which elements belong to the package, by a filter: all the steel, say, or the hollow-core slabs of one model.": "Welche Elemente zum Paket gehören, per Filter: zum Beispiel der gesamte Stahl oder die Hohldielen eines Modells.",
+    "All the steel": "Gesamter Stahl",
+    "Choose what the group takes.": "Wählen Sie, was die Gruppe umfasst.",
+    "not in the package yet": "noch nicht im Paket",
+    "Filter off": "Filter aus",
+    "Show filter": "Filter anzeigen",
+    "Add to package": "Zum Paket hinzufügen",
+    "Keep as view": "Als Ansicht speichern",
+    "Quantities of the package": "Mengen des Pakets",
+    "elements added to the package": "Elemente zum Paket hinzugefügt",
+    "Kept as a view of the rule set (Colours tab).": "Als Ansicht des Regelsatzes gespeichert (Reiter Farben).",
+    "The package has no elements in the loaded models yet.": "Das Paket hat noch keine Elemente in den geladenen Modellen.",
+    "quantities": "Mengen"
   }
 }

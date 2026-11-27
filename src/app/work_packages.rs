@@ -20,6 +20,30 @@ pub struct Package {
     #[serde(default)]
     pub replacements: BTreeSet<Member>,
     pub inputs: Vec<Input>,
+    /// The elements it is made of by a filter: what they are, and a property with a value.
+    #[serde(default)]
+    pub group: Group,
+}
+
+/// A filter of elements: what they are (their models, layers, classes and names, as a selector
+/// of the Validator takes them), and a property with a value when `property` is set (`*` at an
+/// end for anything, `|` between choices).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Group {
+    pub models: Vec<String>,
+    pub layers: Vec<String>,
+    pub classes: Vec<String>,
+    pub names: Vec<String>,
+    pub property: String,
+    pub value: String,
+}
+
+impl Group {
+    /// Whether it takes every element: nothing set.
+    pub fn is_all(&self) -> bool {
+        self.models.is_empty() && self.layers.is_empty() && self.classes.is_empty() && self.names.is_empty() && self.property.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

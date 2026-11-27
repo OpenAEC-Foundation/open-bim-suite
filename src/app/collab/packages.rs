@@ -1,5 +1,7 @@
 use super::*;
-use crate::app::work_packages::{Input, InputStatus, Interface, Member, Package, Stage};
+use crate::app::inform::{Key, MATERIAL, TYPE};
+use crate::app::work_packages::{Group, Input, InputStatus, Interface, Member, Package, Stage};
+use crate::collab::rules::{matches, Others, RuleView, Takeoff, ViewRule};
 use iced::widget::column;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
@@ -18,6 +20,8 @@ pub struct Panel {
     candidates: Vec<u64>,
     page: usize,
     pub(crate) hidden: HashSet<u64>,
+    /// The group of the package open lies over the 3D view.
+    group_shown: bool,
 }
 
 struct Item {
@@ -49,7 +53,31 @@ pub enum Action {
     Supersede,
     Replace,
     ClearSwap,
+    /// The group: what it takes, by which property and value; the steel of the models.
+    GroupSide(Side),
+    GroupKey(Key),
+    GroupValue(String),
+    GroupSteel,
+    /// Over the view, or off again.
+    GroupShow,
+    /// Its elements into the package.
+    GroupAdd,
+    /// Kept as a view of the rule set.
+    GroupKeep,
+    /// The package's elements by type, with how many and their quantities, for buying them.
+    Quantities,
 }
+
+/// The materials of steel, as a value of a property: grades and the word in a few languages.
+pub const STEEL_PATTERN: &str = "*staal*|*steel*|*stahl*|*rvs*|s235*|s275*|s355*|s420*|s460*|b500*";
+
+/// What a group takes, as a selector.
+fn selector(group: &Group) -> crate::collab::rules::Selector {
+    crate::collab::rules::Selector { models: group.models.clone(), layers: group.layers.clone(), classes: group.classes.clone(), names: group.names.clone(), ..Default::default() }
+}
+
+/// The colour the group and the package show in over the view: amber.
+const SHOWN: [u8; 3] = [217, 119, 6];
 
 fn msg(action: Action) -> Message {
     go(Event::Package(action))
@@ -80,6 +108,56 @@ fn material_is_steel(material: &str) -> bool {
 }
 
 impl App {
+    /// The elements of the model that group `group` takes, in their order.
+    pub(crate) fn group_elements(&self, group: &Group) -> Vec<u64> {
+        let Some(model) = self.model.clone() else { return Vec::new() };
+        App::inform_elements(&model)
+            .into_iter()
+            .filter(|&(id, layer)| {
+                let value = |key: &str| self.inform_value(&model, id, layer, key).unwrap_or_default();
+                let take = selector(group);
+                take.takes_element(id, &value(crate::app::inform::MODEL), &model.layers[layer].name, &value(crate::app::inform::CLASS))
+                    && (take.names.is_empty() || take.takes_name(model.props.get(&id).and_then(|p| field(p, "Name")).unwrap_or("")))
+                    && (group.property.is_empty() || self.inform_value(&model, id, layer, &group.property).is_some_and(|v| matches(if group.value.is_empty() { "*" } else { &group.value }, &v)))
+            })
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    /// The elements of the package's members found in the models open, sorted.
+    fn package_elements(&self, p: &Package) -> Vec<u64> {
+        let panel = &self.collab.packages;
+        let mut ids: Vec<u64> = p.members.iter().filter_map(|m| panel.resolved.get(m)).filter(|id| !panel.hidden.contains(id)).copied().collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// A view of these elements in amber over the rest see-through.
+    fn package_view(name: &str, mut ids: Vec<u64>) -> RuleView {
+        ids.sort_unstable();
+        ids.dedup();
+        // none: all see-through (a selector of no elements would take them all)
+        let rules = if ids.is_empty() {
+            Vec::new()
+        } else {
+            vec![ViewRule { take: crate::collab::rules::Selector { only: ids, ..Default::default() }, colour: Some(SHOWN), ..ViewRule::default() }]
+        };
+        RuleView { name: name.to_string(), rules, others: Others::SeeThrough }
+    }
+
+    /// Lays the group of the package open over the view again, as it is now (after a change).
+    fn show_group_again(&mut self) {
+        let Some(p) = self.collab.packages.active.and_then(|i| self.work_packages.packages.get(i)) else { return };
+        if !self.collab.packages.group_shown {
+            return;
+        }
+        // a group not set takes nothing yet: all see-through
+        let ids = if p.group.is_all() { Vec::new() } else { self.group_elements(&p.group) };
+        let view = App::package_view(&p.name, ids);
+        self.collab.views.shown = None;
+        self.show_rule_view(Some(view));
+    }
+
     pub(crate) fn refresh_package_index(&mut self) {
         let panel = &mut self.collab.packages;
         let id = self.model.as_ref().map(|model| model.id);
@@ -161,7 +239,7 @@ impl App {
                         name.to_owned()
                     },
                     key,
-                    steel: material_is_steel(value("Material")),
+                    steel: material_is_steel(&crate::app::inform::material_of(model.props.get(&id).map(String::as_str).unwrap_or("")).unwrap_or_default()),
                 },
             );
         }
@@ -303,7 +381,72 @@ impl App {
                 let Some(p) = self.work_packages.packages.get_mut(i) else {
                     return Task::none();
                 };
+                let group_changed = matches!(other, Action::GroupSide(_) | Action::GroupKey(_) | Action::GroupValue(_) | Action::GroupSteel);
                 match other {
+                    Action::GroupSide(side) if p.status != Stage::Final => {
+                        let s = side.selector;
+                        (p.group.models, p.group.layers, p.group.classes, p.group.names) = (s.models, s.layers, s.classes, s.names);
+                    }
+                    Action::GroupKey(key) if p.status != Stage::Final => p.group.property = key.key,
+                    Action::GroupValue(value) if p.status != Stage::Final => p.group.value = value,
+                    Action::GroupSteel if p.status != Stage::Final => {
+                        // the material, whatever the file calls it
+                        p.group.property = MATERIAL.to_string();
+                        p.group.value = STEEL_PATTERN.to_string();
+                    }
+                    Action::GroupShow => {
+                        panel.group_shown = !panel.group_shown;
+                        if !panel.group_shown {
+                            self.collab.views.shown = None;
+                            self.show_rule_view(None);
+                            return Task::none();
+                        }
+                        let task = self.select_tab(0);
+                        self.show_group_again();
+                        return task;
+                    }
+                    Action::GroupAdd if p.status != Stage::Final && !p.group.is_all() => {
+                        let group = p.group.clone();
+                        let ids = self.group_elements(&group);
+                        let panel = &self.collab.packages;
+                        let keys: Vec<Member> = ids.iter().filter_map(|id| panel.items.get(id).map(|item| item.key.clone())).collect();
+                        let Some(p) = self.work_packages.packages.get_mut(i) else { return Task::none() };
+                        let before = p.members.len();
+                        p.members.extend(keys.into_iter().filter(|k| !p.replacements.contains(k)));
+                        let added = p.members.len() - before;
+                        self.collab_note(Tone::Success, format!("{added} {}", l.text("elementen aan het pakket toegevoegd", "elements added to the package")));
+                    }
+                    Action::GroupKeep if !p.group.is_all() => {
+                        let rule = ViewRule { take: selector(&p.group), property: p.group.property.clone(), value: p.group.value.clone(), colour: Some(SHOWN), ..ViewRule::default() };
+                        let view = RuleView { name: p.name.clone(), rules: vec![rule], others: Others::SeeThrough };
+                        match self.collab.rules_mut() {
+                            Some(rules) => {
+                                // one view of a name: kept again, it takes the place of the one before
+                                match rules.views.iter().position(|v| v.name == view.name) {
+                                    Some(k) => rules.views[k] = view,
+                                    None => rules.views.push(view),
+                                }
+                                self.collab_note(Tone::Success, l.text("Bewaard als weergave van de regelset (tab Kleuren).", "Kept as a view of the rule set (Colours tab)."));
+                            }
+                            None => self.collab_note(Tone::Warning, l.text("Kies eerst een regelset.", "Choose a rule set first.")),
+                        }
+                        return Task::none();
+                    }
+                    Action::Quantities => {
+                        let p = p.clone();
+                        let ids = self.package_elements(&p);
+                        if ids.is_empty() {
+                            self.collab_note(Tone::Warning, l.text("Het pakket heeft nog geen elementen in de geladen modellen.", "The package has no elements in the loaded models yet."));
+                            return Task::none();
+                        }
+                        let takeoff = Takeoff {
+                            name: format!("{} · {}", p.name, l.text("hoeveelheden", "quantities")),
+                            take: crate::collab::rules::Selector { only: ids, ..Default::default() },
+                            group_by: vec![TYPE.to_string()],
+                            ..Takeoff::default()
+                        };
+                        return self.show_takeoff(&takeoff);
+                    }
                     Action::Steel(on) => p.steel = on,
                     Action::Confirm(id) if p.status != Stage::Final => {
                         if let Some(item) =
@@ -348,15 +491,15 @@ impl App {
                         p.replacements.clear();
                     }
                     Action::ShowMembers => {
-                        let ids: Vec<_> = p
-                            .members
-                            .iter()
-                            .filter_map(|m| panel.resolved.get(m))
-                            .filter(|id| !panel.hidden.contains(id))
-                            .copied()
-                            .collect();
+                        // the package in amber over the rest see-through, selected and framed
+                        let package = p.clone();
+                        let name = package.name.clone();
+                        let ids = self.package_elements(&package);
                         if !ids.is_empty() {
                             let task = self.select_tab(0);
+                            self.collab.packages.group_shown = false;
+                            self.collab.views.shown = None;
+                            self.show_rule_view(Some(App::package_view(&name, ids.clone())));
                             self.collab_select(ids);
                             self.collab_frame_selection();
                             return task;
@@ -407,11 +550,64 @@ impl App {
                     }
                     _ => {}
                 }
+                if group_changed {
+                    self.show_group_again();
+                }
             }
         }
         self.refresh_package_review();
         self.update_units();
         Task::none()
+    }
+}
+
+impl App {
+    /// The group of a package: which elements by a filter, how many and how many of them are not
+    /// in the package yet; over the view, into the package, kept as a view, and the package's
+    /// quantities to buy it by.
+    fn package_group<'a>(&'a self, look: Look, l: Language, sides: &'a [Side], p: &'a Package, edit: bool) -> Element<'a, Message> {
+        let btn = |label, enabled: bool, action| w::button(look, label, K::Secondary, D::Compact, None, enabled.then(|| msg(action)));
+        let keys = &self.collab.inform.keys;
+        let key_now = keys.iter().find(|k| k.key == p.group.property).cloned();
+        let take = selector(&p.group);
+        let side_now = sides.iter().find(|s| s.selector == take).cloned();
+        let label = |s: &'static str| w::secondary(look, s).width(100);
+        let mut out = column![
+            w::heading(look, l.text("Groep", "Group"), 13.0),
+            w::secondary(look, l.text(
+                "Welke elementen bij het pakket horen, met een filter: bijvoorbeeld al het staal, of de kanaalplaten van één model.",
+                "Which elements belong to the package, by a filter: all the steel, say, or the hollow-core slabs of one model.",
+            )),
+            row![label(l.text("Elementen", "Elements")), container(w::select(look, sides, side_now, |s: Side| msg(Action::GroupSide(s)), D::Compact)).width(Length::Fill)].spacing(4).align_y(Alignment::Center),
+            row![
+                label(l.text("Met eigenschap", "With property")),
+                container(w::select(look, keys, key_now, |k: Key| msg(Action::GroupKey(k)), D::Compact)).width(Length::FillPortion(3)),
+                container(w::text_field(look, l.text("waarde, * voor iets", "value, * for any"), &p.group.value, edit.then_some(|t: String| msg(Action::GroupValue(t))), D::Compact, None)).width(Length::FillPortion(2)),
+            ]
+            .spacing(4)
+            .align_y(Alignment::Center),
+            row![btn(l.text("Al het staal", "All the steel"), edit, Action::GroupSteel)].spacing(4),
+        ]
+        .spacing(4);
+        if p.group.is_all() {
+            return out.push(w::secondary(look, l.text("Kies wat de groep neemt.", "Choose what the group takes."))).into();
+        }
+        let ids = self.group_elements(&p.group);
+        let panel = &self.collab.packages;
+        let new = ids.iter().filter(|id| panel.items.get(id).is_some_and(|item| !p.members.contains(&item.key))).count();
+        let shown = panel.group_shown;
+        out = out
+            .push(w::secondary(look, format!("{} {} · {new} {}", ids.len(), l.text("elementen", "elements"), l.text("nog niet in het pakket", "not in the package yet"))))
+            .push(
+                row![
+                    w::button(look, if shown { l.text("Filter uit", "Filter off") } else { l.text("Filter tonen", "Show filter") }, if shown { K::Primary } else { K::Secondary }, D::Compact, None, Some(msg(Action::GroupShow))),
+                    btn(l.text("Aan pakket toevoegen", "Add to package"), edit && new > 0, Action::GroupAdd),
+                    btn(l.text("Als weergave bewaren", "Keep as view"), true, Action::GroupKeep),
+                ]
+                .spacing(4)
+                .wrap(),
+            );
+        out.push(btn(l.text("Hoeveelheden van het pakket", "Quantities of the package"), !p.members.is_empty(), Action::Quantities)).into()
     }
 }
 
@@ -431,7 +627,7 @@ fn input_label(stage: InputStatus, l: Language) -> &'static str {
 }
 
 impl App {
-    pub(super) fn package_panel(&self, look: Look, l: Language) -> Element<'_, Message> {
+    pub(super) fn package_panel<'a>(&'a self, look: Look, l: Language, sides: &'a [Side]) -> Element<'a, Message> {
         let panel = &self.collab.packages;
         let register = &self.work_packages;
         let btn = |label, enabled: bool, action| {
@@ -567,6 +763,7 @@ impl App {
                 .spacing(4)
                 .wrap(),
             )
+            .push(self.package_group(look, l, sides, p, edit))
             .push(w::switch(
                 look,
                 l.text(
@@ -785,9 +982,56 @@ mod tests {
             (1, "S355J2"),
             (2, if second_steel { "Staal" } else { "Beton" }),
         ] {
-            model.props.insert(id,serde_json::json!({"GlobalId":format!("guid-{id}"),"Material":material,"Name":format!("Part {id}")}).to_string());
+            // the second by a property of the file's own name
+            let props = if id == 1 { serde_json::json!({"GlobalId":format!("guid-{id}"),"Material":material,"Name":format!("Part {id}")}) } else { serde_json::json!({"GlobalId":format!("guid-{id}"),"Pset_Pieters.Materiaal":material,"Name":format!("Part {id}")}) };
+            model.props.insert(id, props.to_string());
         }
         Arc::new(model)
+    }
+
+    #[test]
+    fn a_group_of_all_the_steel_lies_over_the_view_goes_into_the_package_and_is_bought_by_type() {
+        let mut app = App::default();
+        app.set_model(delivery(&std::env::temp_dir().join("group-test").join("design.ifc"), false));
+        let _ = app.collab_update(Event::Tab(Tab::Packages));
+        let _ = app.package_action(Action::Name("Staalconstructie".into()));
+        let _ = app.package_action(Action::Create);
+        // all the steel: the part of S355, not the one of concrete
+        let _ = app.package_action(Action::GroupSteel);
+        let group = app.work_packages.packages[0].group.clone();
+        assert_eq!(group.property, MATERIAL);
+        assert_eq!(app.group_elements(&group), [1]);
+        // over the view: the steel in amber, the rest see-through
+        let _ = app.package_action(Action::GroupShow);
+        let view = app.collab.views.view.clone().expect("the filter over the view");
+        assert_eq!(view.others, Others::SeeThrough);
+        assert_eq!(app.view_rules_taking(&view).keys().copied().collect::<Vec<_>>(), [1]);
+        // a value typed narrows it, and the view follows
+        let _ = app.package_action(Action::GroupValue("beton".into()));
+        let view = app.collab.views.view.clone().unwrap();
+        assert_eq!(app.view_rules_taking(&view).keys().copied().collect::<Vec<_>>(), [2]);
+        // one that takes nothing shows nothing in amber
+        let _ = app.package_action(Action::GroupValue("hout".into()));
+        let view = app.collab.views.view.clone().unwrap();
+        assert!(app.view_rules_taking(&view).is_empty());
+        let _ = app.package_action(Action::GroupSteel);
+        // into the package, once
+        let _ = app.package_action(Action::GroupAdd);
+        let _ = app.package_action(Action::GroupAdd);
+        assert_eq!(app.work_packages.packages[0].members.len(), 1);
+        // off again
+        let _ = app.package_action(Action::GroupShow);
+        assert!(app.collab.views.view.is_none());
+        // kept as a view of the rule set, once by its name
+        app.collab.rule_set = 0;
+        let _ = app.package_action(Action::GroupKeep);
+        let _ = app.package_action(Action::GroupKeep);
+        let views = &app.collab.rules().unwrap().views;
+        assert_eq!(views.iter().filter(|v| v.name == "Staalconstructie").count(), 1);
+        // its quantities by type, to buy it by
+        let _ = app.package_action(Action::Quantities);
+        let table = app.schedules.iter().find(|s| s.name.starts_with("Staalconstructie")).expect("the quantities");
+        assert_eq!(table.rows.last().map(|r| r.elements.clone()), Some(vec![1]));
     }
 
     #[test]

@@ -28,6 +28,26 @@ pub const CLASS: &str = "@class";
 /// The type: the file's own, else the name without the number an exporter adds to it
 /// (`Basic Wall:CLT 100:1763035` is of type `Basic Wall:CLT 100`).
 pub const TYPE: &str = "@type";
+/// The material, whatever the file calls it: `Material`, else the first property whose name
+/// says material (`Pset_Pieters.Materiaal`, `Materials`), else the material of its layer.
+pub const MATERIAL: &str = "@material";
+
+/// The material of an element by its properties, as [`MATERIAL`] reads it.
+pub(crate) fn material_of(props: &str) -> Option<String> {
+    if let Some(v) = prop_value(props, "Material").filter(|v| !v.trim().is_empty()) {
+        return Some(v);
+    }
+    if !props.to_ascii_lowercase().contains("materi") {
+        return None;
+    }
+    let map: serde_json::Map<String, serde_json::Value> = serde_json::from_str(props).ok()?;
+    map.iter()
+        .filter(|(k, _)| {
+            let k = k.to_ascii_lowercase();
+            k.contains("material") || k.contains("materiaal") || k.contains("materiau") || k.contains("werkstoff")
+        })
+        .find_map(|(_, v)| v.as_str().map(str::to_string).filter(|v| !v.trim().is_empty()))
+}
 
 /// The colour of the elements without the value coloured by.
 const NONE: [u8; 3] = [0xC8, 0xC8, 0xC8];
@@ -201,6 +221,7 @@ impl App {
                 };
                 (!bare.is_empty()).then(|| bare.to_string())
             }),
+            MATERIAL => material_of(props),
             k if k.starts_with(super::classify::CLASSIFICATION) => self.class_value(id, k),
             _ => prop_value(props, key).filter(|v| !v.trim().is_empty()),
         }
@@ -238,7 +259,7 @@ impl App {
         let key = |key: &str, label: &str| Key { key: key.to_string(), label: label.to_string() };
         // the project's classifications, as properties of every element
         let classified: Vec<Key> = self.collab.rules().map_or_else(Vec::new, |r| r.classifications.iter().map(|c| key(&super::classify::key_of(&c.name), &format!("{}: {}", l.text("Classificatie", "Classification"), c.name))).collect());
-        self.collab.inform.keys = [key("", "—"), key(MODEL, l.text("Model", "Model")), key(LAYER, l.text("Laag", "Layer")), key(CLASS, l.text("Klasse", "Class")), key(TYPE, l.text("Type", "Type"))]
+        self.collab.inform.keys = [key("", "—"), key(MODEL, l.text("Model", "Model")), key(LAYER, l.text("Laag", "Layer")), key(CLASS, l.text("Klasse", "Class")), key(TYPE, l.text("Type", "Type")), key(MATERIAL, l.text("Materiaal", "Material"))]
             .into_iter()
             .chain(classified)
             .chain(found.into_iter().map(|(k, _)| key(&k, &k)))
@@ -405,7 +426,7 @@ impl App {
     }
 
     /// Shows a takeoff's table under the 3D view, in place of an older one of its name.
-    fn show_takeoff(&mut self, takeoff: &Takeoff) -> Task<Message> {
+    pub(crate) fn show_takeoff(&mut self, takeoff: &Takeoff) -> Task<Message> {
         let l = self.collab.language;
         let Some(schedule) = self.takeoff_schedule(takeoff) else {
             self.collab_note(Tone::Warning, l.text("Open eerst een model.", "Open a model first."));

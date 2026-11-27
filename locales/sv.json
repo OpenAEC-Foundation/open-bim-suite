@@ -2148,6 +2148,19 @@
     "Export sheets": "Exportera blad",
     "Several sheets at once: as one PDF to print, or a PDF, DWG, DXF or SVG per sheet.": "Flera blad på en gång: en PDF att skriva ut, eller en PDF, DWG, DXF eller SVG per blad.",
     "One PDF is to print the series; per sheet asks for the folder and names each file after its sheet.": "En PDF är för att skriva ut serien; per blad frågar efter mappen och namnger varje fil efter sitt blad.",
-    "The model's drawings are still being read; in a moment you can.": "Modellens ritningar läses fortfarande; om en stund går det."
+    "The model's drawings are still being read; in a moment you can.": "Modellens ritningar läses fortfarande; om en stund går det.",
+    "Which elements belong to the package, by a filter: all the steel, say, or the hollow-core slabs of one model.": "Vilka element som hör till paketet, via ett filter: till exempel allt stål, eller håldäcken i en modell.",
+    "All the steel": "Allt stål",
+    "Choose what the group takes.": "Välj vad gruppen omfattar.",
+    "not in the package yet": "ännu inte i paketet",
+    "Filter off": "Filter av",
+    "Show filter": "Visa filter",
+    "Add to package": "Lägg till i paketet",
+    "Keep as view": "Spara som vy",
+    "Quantities of the package": "Paketets mängder",
+    "elements added to the package": "element tillagda i paketet",
+    "Kept as a view of the rule set (Colours tab).": "Sparad som vy i regeluppsättningen (fliken Färger).",
+    "The package has no elements in the loaded models yet.": "Paketet har ännu inga element i de inlästa modellerna.",
+    "quantities": "mängder"
   }
 }
