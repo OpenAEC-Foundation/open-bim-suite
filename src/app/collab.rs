@@ -114,7 +114,8 @@ pub fn compare_models(model: &Model, old: u32, new: u32) -> Comparison {
     let (a, b) = (of(old), of(new));
     let props = |id: u64| -> serde_json::Map<String, serde_json::Value> {
         let mut map: serde_json::Map<String, serde_json::Value> = model.props.get(&id).and_then(|p| serde_json::from_str(p).ok()).unwrap_or_default();
-        map.remove("ExpressId");
+        // which file an element came from is not a change of it
+        ["ExpressId", "SourceModel", "Discipline", "Party"].iter().for_each(|key| { map.remove(*key); });
         map
     };
     let mut out = Comparison::default();

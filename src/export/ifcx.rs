@@ -429,6 +429,20 @@ mod tests {
     }
 
     #[test]
+    fn a_federation_saved_as_one_file_keeps_which_model_each_element_came_from() {
+        let a = Arc::new(house());
+        let b = Arc::new(house());
+        let combined = Model::combine(&[a, b]);
+        let document = Document::from_model(&combined);
+        let mut bytes = Vec::new();
+        write(&combined, &document, "federation.ifcx", &mut bytes).unwrap();
+        let back = reopen(bytes);
+        let sources: std::collections::BTreeSet<&str> = back.props.values().filter_map(|p| p.split("\"SourceModel\":\"").nth(1)).filter_map(|rest| rest.split('"').next()).collect();
+        assert_eq!(sources.into_iter().collect::<Vec<_>>(), ["house.rvt"], "{:?}", back.props.values().collect::<Vec<_>>());
+        assert!(back.props.values().filter(|p| p.contains("\"SourceModel\"")).count() >= 4, "every element of both models");
+    }
+
+    #[test]
     fn the_elements_a_view_hides_come_back_from_ifcx() {
         let model = house();
         let mut document = Document::from_model(&model);

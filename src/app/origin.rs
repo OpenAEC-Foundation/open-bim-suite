@@ -37,6 +37,10 @@ pub enum Message {
     Turn(String),
     /// Use the turn typed (Enter).
     Turned,
+    /// The discipline (0) or the party (1) typed for the picked model.
+    Label(usize, String),
+    /// Use the discipline or party typed (Enter).
+    Labelled(usize),
     /// The map of a model (by its id) came, as RGBA rows, or why not.
     Map(u64, Result<Arc<Vec<u8>>, String>),
 }
@@ -62,6 +66,8 @@ pub struct Placed {
     pub zero: DVec3,
     typed: [[Option<String>; 3]; 2],
     typed_turn: Option<String>,
+    /// The discipline and the party as typed, until Enter.
+    typed_label: [Option<String>; 2],
     pub map: Map,
 }
 
@@ -214,6 +220,17 @@ impl App {
         match message {
             Message::Map(..) => {}
             Message::Turn(typed) => entry.placed.typed_turn = Some(typed),
+            Message::Label(which, typed) => entry.placed.typed_label[which.min(1)] = Some(typed),
+            Message::Labelled(which) => {
+                let which = which.min(1);
+                let Some(typed) = entry.placed.typed_label[which].take() else { return };
+                let slot = if which == 0 { &mut entry.discipline } else { &mut entry.party };
+                let typed = typed.trim().to_string();
+                if *slot != typed {
+                    *slot = typed;
+                    self.replace_models();
+                }
+            }
             Message::Turned => {
                 let Some(next) = entry.placed.typed_turn.take().as_deref().and_then(number).map(|degrees| degrees.rem_euclid(360.0)) else { return };
                 if next != entry.placed.turned {
@@ -252,7 +269,7 @@ impl App {
         let turns: Vec<f64> = self.models.iter().map(|entry| entry.placed.turned).collect();
         let scene = match sources.as_slice() {
             [one] if moves[0] == DVec3::ZERO && turns[0] == 0.0 => one.clone(),
-            _ => Arc::new(Model::combine_placed(&sources, &moves, &turns)),
+            _ => Arc::new(Model::combine_labelled(&sources, &moves, &turns, &self.model_labels())),
         };
         self.set_scene(scene);
         self.restore_model_visibility();
@@ -300,7 +317,24 @@ impl App {
                 .spacing(8)
                 .align_y(Center)
         };
+        // who made it: the discipline and the party, told to every element of it
+        let label = |name: &str, which: usize, value: &str| {
+            let typed = entry.placed.typed_label[which].clone().unwrap_or_else(|| value.to_string());
+            row![
+                text(name.to_string()).size(12).color(p.text_secondary).wrapping(Wrapping::WordOrGlyph).width(Length::FillPortion(2)),
+                row![openaec_ui::design::a11y::named(
+                    text_input(name, &typed).on_input(move |typed| AppMessage::Origin(Message::Label(which, typed))).on_submit(AppMessage::Origin(Message::Labelled(which))).size(12).padding([2, 4]),
+                    openaec_ui::design::a11y::Role::Label,
+                    name,
+                )]
+                .width(Length::FillPortion(3)),
+            ]
+            .spacing(8)
+            .align_y(Center)
+        };
         let mut rows = column![
+            label(l.text("Discipline", "Discipline"), 0, &entry.discipline),
+            label(l.text("Partij", "Party"), 1, &entry.party),
             line(l.text("Model verplaatst (m)", "Model moved (m)"), Moves::Model, entry.placed.moved),
             row![
                 text(l.text("Model gedraaid (°)", "Model turned (°)").to_string()).size(12).color(p.text_secondary).wrapping(Wrapping::WordOrGlyph).width(Length::FillPortion(2)),
