@@ -3287,6 +3287,16 @@ impl App {
                 }
             }
             Message::Pressed(fingers) => self.fingers = fingers,
+            Message::Tick if crate::frame_log::spin() => {
+                let (w, h) = self.viewport_size;
+                let (zoom, pan) = (self.sheet_zoom, self.sheet_pan);
+                return self.update(match crate::frame_log::spin_step() {
+                    (true, way) if self.active_doc_sheet.is_some() => Message::NavigateSheet { zoom: zoom * (1.0 + 0.01 * f64::from(way)), pan },
+                    (false, way) if self.active_doc_sheet.is_some() => Message::NavigateSheet { zoom, pan: [pan[0] + 3.0 * f64::from(way), pan[1] + f64::from(way)] },
+                    (true, way) => Message::Navigate(Navigate::Zoom { steps: way * 0.05, x: w / 2.0, y: h / 2.0, width: w, height: h }),
+                    (false, way) => Message::Navigate(Navigate::Pan { dx: way * 3.0, dy: way, height: h }),
+                });
+            }
             Message::Tick => {
                 self.walk_frame(Instant::now());
                 if let Some((from, to, start)) = self.anim {
@@ -3517,6 +3527,7 @@ impl App {
             || self.hover_request.is_some()
             || self.heads_stale()
             || self.walking.any()
+            || crate::frame_log::spin()
         {
             window::frames().map(|_| Message::Tick)
         } else {
@@ -5033,7 +5044,11 @@ impl App {
         let clean = self.collab.picturing();
         #[cfg(not(all(feature = "validator", not(target_arch = "wasm32"))))]
         let clean = false;
+        // the dimensions and texts of the view shown in its tab; on paper it covers the scene
+        let showing = self.model.is_some() && !matches!(self.status, Status::Loading { .. });
+        let marks = self.marks_layer(p, l).filter(|_| showing);
         let settings = RenderSettings {
+            covered: self.drawing_on_paper && marks.is_some(),
             mode: self.mode,
             grid: self.grid && !clean,
             background: srgb3(p.viewport),
@@ -5302,8 +5317,7 @@ impl App {
             .height(Fill)
         });
         let boxed = self.box_select.map(|(from, to)| canvas(crate::viewport::box_select::BoxOverlay { from, to }).width(Fill).height(Fill));
-        // the dimensions and texts of the view shown in its tab
-        let marks = self.marks_layer(p, l).filter(|_| overlay.is_none()).map(|m| m.widget());
+        let marks = marks.filter(|_| overlay.is_none()).map(|m| m.widget());
         let menu = self.context_menu.filter(|_| overlay.is_none()).map(|at| self.context_menu_view(p, l, at));
         // edit mode's points, else the selected element's grips: one slot, so a drag that begins on
         // a grip keeps its overlay

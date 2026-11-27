@@ -240,7 +240,7 @@ impl canvas::Program<Message> for DraftDrawing {
                 position,
                 align_x: align.into(),
                 align_y: vertical,
-                size: iced::Pixels(size),
+                size: crate::kept_canvas::text_size(size),
                 line_height: iced::widget::text::LineHeight::Relative(1.3),
                 color,
                 font: openaec_ui::fonts::MEDIUM,
@@ -374,14 +374,14 @@ impl canvas::Program<Message> for DraftDrawing {
                 _ => (at, alignment::Horizontal::Left),
             };
             if t.angle == 0.0 {
-                t.face.fill(&mut frame, canvas::Text { content: t.text.clone(), position: start, align_x: side.into(), align_y: alignment::Vertical::Top, size: iced::Pixels(size), line_height: iced::widget::text::LineHeight::Relative(1.3), color: colour(t.element), ..canvas::Text::default() });
+                t.face.fill(&mut frame, canvas::Text { content: t.text.clone(), position: start, align_x: side.into(), align_y: alignment::Vertical::Top, size: crate::kept_canvas::text_size(size), line_height: iced::widget::text::LineHeight::Relative(1.3), color: colour(t.element), ..canvas::Text::default() });
             } else {
                 // turned about the foot of its box, under where its lines start
                 let foot = fit.point([[t.at[0], t.at[0] + t.width / 2.0, t.at[0] + t.width][t.align.min(2) as usize], t.at[1]]);
                 frame.with_save(|frame| {
                     frame.translate(iced::Vector::new(foot.x, foot.y));
                     frame.rotate(-t.angle);
-                    t.face.fill(frame, canvas::Text { content: t.text.clone(), position: Point::new(0.0, start.y - foot.y), align_x: side.into(), align_y: alignment::Vertical::Top, size: iced::Pixels(size), line_height: iced::widget::text::LineHeight::Relative(1.3), color: colour(t.element), ..canvas::Text::default() });
+                    t.face.fill(frame, canvas::Text { content: t.text.clone(), position: Point::new(0.0, start.y - foot.y), align_x: side.into(), align_y: alignment::Vertical::Top, size: crate::kept_canvas::text_size(size), line_height: iced::widget::text::LineHeight::Relative(1.3), color: colour(t.element), ..canvas::Text::default() });
                 });
             }
             if picked(t.element) {

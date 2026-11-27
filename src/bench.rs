@@ -222,6 +222,7 @@ pub fn run(file: &Path, frames: u32, throughput: bool) -> Result<(), String> {
 
     if throughput {
         let settings = RenderSettings {
+            covered: false,
             mode: RenderMode::Solid,
             grid: true,
             background: srgb3(p.viewport),
@@ -382,6 +383,7 @@ pub fn run(file: &Path, frames: u32, throughput: bool) -> Result<(), String> {
             _ => camera,
         };
         let settings = RenderSettings {
+            covered: false,
             mode,
             grid: true,
             background: srgb3(p.viewport),
@@ -674,6 +676,7 @@ mod tests {
             visible: vec![true; model.layers.len()],
             camera,
             settings: RenderSettings {
+                covered: false,
                 mode: RenderMode::Solid,
                 grid: false,
                 background: srgb3(p.viewport),
@@ -828,6 +831,7 @@ mod tests {
         camera.fit(&model.bounds, w as f32 / h as f32);
         let p = ThemeKind::Light.palette();
         let settings = RenderSettings {
+            covered: false,
             mode: RenderMode::Solid,
             grid: false,
             background: srgb3(p.viewport),

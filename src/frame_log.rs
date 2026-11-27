@@ -37,6 +37,30 @@ pub fn on() -> bool {
     ON.get_or_init(|| AtomicBool::new(std::env::var_os("O3V_FRAME_LOG").is_some())).load(Ordering::Relaxed)
 }
 
+/// `O3V_FRAME_LOG=spin`: the view moves by itself on every frame, to and fro, so that the log
+/// shows how many frames a second the window reaches with nobody at the pointer.
+pub fn spin() -> bool {
+    static SPIN: OnceLock<bool> = OnceLock::new();
+    *SPIN.get_or_init(|| std::env::var("O3V_FRAME_LOG").is_ok_and(|v| v == "spin" || v == "zoom"))
+}
+
+/// `O3V_PLAIN=1`: a drawing is made again at every step of a zoom, as it was before drawings
+/// were kept while they move, to measure what keeping them gains.
+pub fn plain() -> bool {
+    static PLAIN: OnceLock<bool> = OnceLock::new();
+    *PLAIN.get_or_init(|| std::env::var_os("O3V_PLAIN").is_some())
+}
+
+/// The step of a view that moves by itself, by the frame: a pan of some pixels (`spin`) or a
+/// zoom (`zoom`), a second one way and a second back.
+pub fn spin_step() -> (bool, f32) {
+    static N: AtomicU64 = AtomicU64::new(0);
+    static START: OnceLock<Instant> = OnceLock::new();
+    N.fetch_add(1, Ordering::Relaxed);
+    let way = if START.get_or_init(Instant::now).elapsed().as_secs() % 2 == 0 { 1.0 } else { -1.0 };
+    (std::env::var("O3V_FRAME_LOG").is_ok_and(|v| v == "zoom"), way)
+}
+
 fn log() -> &'static Log {
     static LOG: OnceLock<Log> = OnceLock::new();
     LOG.get_or_init(|| Log { sums: Default::default(), canvases: Mutex::default(), since: Mutex::new((Instant::now(), String::new())) })
