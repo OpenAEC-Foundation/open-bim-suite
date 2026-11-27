@@ -166,7 +166,24 @@ pub fn element_drawings(model: &Model, element: &Element, named: &dyn Fn(&str) -
     }
     let Some(t) = s.system_type.as_ref().filter(|t| !t.lying) else { return Vec::new() };
     if t.framing.is_none() {
-        return elevation(model, element, s, t, named).into_iter().collect();
+        // its own leaf, then every layer of panels or bricks across it, from the interior out
+        let own = Leaf { name: format!("{} {}", element.name, element.id.0), panel: t.panel_material.as_str(), member: Some((t.member_material.as_str(), s.member)), thickness: s.panel, row: s.spacing.y, across: (-s.member.y.max(s.panel) / 2.0, s.member.y.max(s.panel) / 2.0) };
+        let mut drawings: Vec<Drawing2d> = elevation(model, element, s, &own, named).into_iter().collect();
+        let mut layers: Vec<(usize, &bim_library::SystemLayer)> = t.layers.iter().enumerate().filter(|(_, l)| l.panels.material != "air" && l.depth() >= MEMBRANE).collect();
+        layers.sort_by(|a, b| a.1.offset.total_cmp(&b.1.offset));
+        for (n, l) in layers {
+            let half = l.depth() / 2.0;
+            let leaf = Leaf {
+                name: format!("{} {} L{} {}", element.name, element.id.0, n + 1, l.panels.material),
+                panel: l.panels.material.as_str(),
+                member: l.members.as_ref().map(|m| (m.material.as_str(), DVec2::new(m.width, m.depth))),
+                thickness: l.panels.thickness,
+                row: l.grid.row,
+                across: (l.offset - half, l.offset + half),
+            };
+            drawings.extend(elevation(model, element, s, &leaf, named));
+        }
+        return drawings;
     }
     let Some(dir) = (s.end - s.start).try_normalize() else { return Vec::new() };
     let (Ok(parts), Ok(units)) = (model.evaluate(element.id), bim_core::system::joined_units(model, element)) else { return Vec::new() };
@@ -548,6 +565,21 @@ fn laying_plan(model: &Model, element: &Element, s: &bim_core::SystemDef, named:
 
 /// A member narrower than this (metres) is a joint between panels, not a profile.
 const JOINT: f64 = 0.015;
+/// A leaf of a standing system on a grid, to draw in elevation: its own face, or one of the
+/// layers across it (the mineral wool and the brickwork of a cavity wall).
+struct Leaf<'a> {
+    /// The drawing's name.
+    name: String,
+    /// What its panels are made of, and its members with their size in the face and across it.
+    panel: &'a str,
+    member: Option<(&'a str, DVec2)>,
+    /// How thick its panels are, and how high a row of them is.
+    thickness: f64,
+    row: f64,
+    /// From where to where it lies across the system, to the exterior positive.
+    across: (f64, f64),
+}
+
 /// More parts than this are not drawn one by one (a wall of bricks).
 const MOST: usize = 4000;
 
@@ -557,13 +589,11 @@ const MOST: usize = 4000;
 /// panel with its number, its openings crossed, and the lists of the panels and of the members.
 /// A system of more than [`MOST`] parts (brickwork) is drawn as its outline and its openings,
 /// with its courses counted in the title and its bricks in the list.
-fn elevation(model: &Model, element: &Element, s: &bim_core::SystemDef, t: &bim_core::SystemTypeDef, named: &dyn Fn(&str) -> String) -> Option<Drawing2d> {
+fn elevation(model: &Model, element: &Element, s: &bim_core::SystemDef, leaf: &Leaf, named: &dyn Fn(&str) -> String) -> Option<Drawing2d> {
     let dir = (s.end - s.start).try_normalize()?;
     let parts = model.evaluate(element.id).ok()?;
-    // a wall of bricks: its outline, its courses counted and its bricks listed, not drawn
-    let many = parts.len() > MOST;
     let (text, off) = (TEXT * PLAN_SCALE, OFFSET * PLAN_SCALE);
-    let mut d = Drawing2d { polygons: Vec::new(), images: Vec::new(), name: format!("{} {}", element.name, element.id.0), space: Space::Model { scale: PLAN_SCALE }, paper: None, lines: Vec::new(), texts: Vec::new(), dimensions: Vec::new() };
+    let mut d = Drawing2d { polygons: Vec::new(), images: Vec::new(), name: leaf.name.clone(), space: Space::Model { scale: PLAN_SCALE }, paper: None, lines: Vec::new(), texts: Vec::new(), dimensions: Vec::new() };
     let faced = |p: &bim_core::Part| {
         let (mut u, mut v) = ((f64::INFINITY, f64::NEG_INFINITY), (f64::INFINITY, f64::NEG_INFINITY));
         for q in &p.solid.positions {
@@ -572,12 +602,23 @@ fn elevation(model: &Model, element: &Element, s: &bim_core::SystemDef, t: &bim_
         }
         Member { u, v, shape: None }
     };
-    let own = || parts.iter().filter(|p| p.tile == element.tile);
-    let panels: Vec<Member> = own().filter(|p| p.class == "IfcPlate" && p.material.as_deref() == Some(t.panel_material.as_str())).map(faced).collect();
-    let members: Vec<Member> = own().filter(|p| p.class == "IfcMember" && p.material.as_deref() == Some(t.member_material.as_str())).map(faced).collect();
+    // what lies in this leaf: across the system between its faces (to the exterior positive)
+    let left = dir.perp();
+    let within = |p: &&bim_core::Part| {
+        p.tile == element.tile
+            && p.solid.positions.iter().all(|q| {
+                let across = -(DVec2::new(q.x, q.y) - s.start).dot(left);
+                across >= leaf.across.0 - 1e-6 && across <= leaf.across.1 + 1e-6
+            })
+    };
+    let own = || parts.iter().filter(within);
+    let panels: Vec<Member> = own().filter(|p| p.class == "IfcPlate" && p.material.as_deref() == Some(leaf.panel)).map(faced).collect();
+    let members: Vec<Member> = own().filter(|p| p.class == "IfcMember" && leaf.member.is_some_and(|(m, _)| p.material.as_deref() == Some(m))).map(faced).collect();
     if panels.is_empty() && members.is_empty() {
         return None;
     }
+    // a leaf of bricks: its outline, its courses counted and its bricks listed, not drawn
+    let many = panels.len() + members.len() > MOST;
     let mut outline = |pen: Pen, m: &Member| {
         for (a, b) in [([m.u.0, m.v.0], [m.u.1, m.v.0]), ([m.u.1, m.v.0], [m.u.1, m.v.1]), ([m.u.1, m.v.1], [m.u.0, m.v.1]), ([m.u.0, m.v.1], [m.u.0, m.v.0])] {
             d.lines.push(Line2d::new(pen, a, b));
@@ -618,6 +659,7 @@ fn elevation(model: &Model, element: &Element, s: &bim_core::SystemDef, t: &bim_
             d.dimensions.push(Dim2d { first_witness: true, units_per_paper_metre: off / OFFSET, witnesses: [from, to], from, to, value, offset: off * rows, text_height: text, style: crate::document::DimensionStyle::standard() });
         }
     };
+    let joint = leaf.member.map_or(0.0, |(_, size)| size.x);
     // the grid: the middles of the joints between the panels, from edge to edge
     let lines = |at: &dyn Fn(&Member) -> (f64, f64), lo: f64, hi: f64| {
         let mut edges: Vec<f64> = panels.iter().flat_map(|p| [at(p).0, at(p).1]).collect();
@@ -627,7 +669,7 @@ fn elevation(model: &Model, element: &Element, s: &bim_core::SystemDef, t: &bim_
         while k < edges.len() {
             // edges within a joint of one another are one line, at their middle
             let mut j = k;
-            while j + 1 < edges.len() && edges[j + 1] - edges[k] < s.member.x.max(0.02) + 1e-6 {
+            while j + 1 < edges.len() && edges[j + 1] - edges[k] < joint.max(0.02) + 1e-6 {
                 j += 1;
             }
             let middle = (edges[k] + edges[j]) / 2.0;
@@ -660,12 +702,12 @@ fn elevation(model: &Model, element: &Element, s: &bim_core::SystemDef, t: &bim_
     dim(&mut d, [u1, v0], [u0, v0], 1.0);
     dim(&mut d, [u0, v0], [u0, v1], 1.0);
     // its name, the panels numbered, and the members
-    let thick = bim_library::millimetres(s.panel, bim_library::Lang::En);
+    let thick = bim_library::millimetres(leaf.thickness, bim_library::Lang::En);
     // courses too many to dimension one by one are counted: how many, and how high each is
     // (counted by the grid: an opening cuts bricks, which is no course more)
-    let rows = if s.spacing.y > LINEAR_TOLERANCE { ((v1 - v0) / s.spacing.y).round().max(1.0) as usize } else { up.len() - 1 };
-    let courses = if up.len() - 1 > SEAMS { format!(" · {rows} × {}", bim_library::millimetres(s.spacing.y, bim_library::Lang::En)) } else { String::new() };
-    let title = format!("{} · {} {thick} · {} × {} mm{courses} · 1:{}", element.name, named(&t.panel_material), mm(u1 - u0), mm(v1 - v0), PLAN_SCALE as i64);
+    let rows = if leaf.row > LINEAR_TOLERANCE { ((v1 - v0) / leaf.row).round().max(1.0) as usize } else { up.len() - 1 };
+    let courses = if up.len() - 1 > SEAMS { format!(" · {rows} × {}", bim_library::millimetres(leaf.row, bim_library::Lang::En)) } else { String::new() };
+    let title = format!("{} · {} {thick} · {} × {} mm{courses} · 1:{}", element.name, named(leaf.panel), mm(u1 - u0), mm(v1 - v0), PLAN_SCALE as i64);
     let mut y = v0 - (off * 2.5 + text);
     let before = d.texts.len();
     let counted: Vec<(i64, i64)> = panels.iter().map(|p| (mm(p.section().0), mm(p.section().1))).collect();
@@ -676,7 +718,7 @@ fn elevation(model: &Model, element: &Element, s: &bim_core::SystemDef, t: &bim_
         number(&mut d, &panels, &numbers, 0.0, text);
     }
     y -= text * 1.8 * (1.4 + listed as f64 - 1.0) + text * 0.9;
-    let (width, depth) = (mm(s.member.x), mm(s.member.y));
+    let (width, depth, made_of) = leaf.member.map_or((0, 0, ""), |(m, size)| (mm(size.x), mm(size.y), m));
     let mut list: Vec<(i64, usize)> = Vec::new();
     for m in members.iter().filter(drawn) {
         let long = mm(m.section().1);
@@ -687,7 +729,7 @@ fn elevation(model: &Model, element: &Element, s: &bim_core::SystemDef, t: &bim_
     }
     list.sort_by(|a, b| b.0.cmp(&a.0));
     for (long, n) in list {
-        d.texts.push(Text2d { family: None, bold: false, color: None, pen: Pen::Text, at: [0.0, y], height: text, text: format!("{n} × {} {width}×{depth} L={long}", named(&t.member_material)), align: Align::Left, angle: 0.0 });
+        d.texts.push(Text2d { family: None, bold: false, color: None, pen: Pen::Text, at: [0.0, y], height: text, text: format!("{n} × {} {width}×{depth} L={long}", named(made_of)), align: Align::Left, angle: 0.0 });
         y -= text * 1.8;
     }
     // the lintels: as thick as the panels, alike ones counted together, the longest first
@@ -1133,6 +1175,26 @@ mod tests {
         assert!(texts.iter().filter(|t| t.contains(" × 100 × ")).count() >= 2, "{texts:?}");
         let values: Vec<i64> = d.dimensions.iter().map(|x| mm(x.value)).collect();
         assert!(values.iter().any(|v| *v >= 16000) && values.iter().any(|v| (2690..=2710).contains(v)), "{values:?}");
+    }
+
+    #[test]
+    fn a_cavity_wall_gets_an_elevation_of_every_leaf() {
+        // 4.4 m of cavity wall with a window: the elements inside, the wool, the bricks outside
+        let window = Opening { along: 1.5, sill: 0.9375, width: 1.0, height: 1.1875, framing: None };
+        let (m, id) = typed(4.4, vec![window], "system.cavity-wall-120");
+        let all = element_drawings(&m, m.get(id).unwrap(), &|key| key.to_string());
+        let names: Vec<&str> = all.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, [format!("Frame {}", id.0), format!("Frame {} L1 mineral-wool", id.0), format!("Frame {} L3 brick", id.0)]);
+        for (d, what) in all.iter().zip(["sand-lime 100", "mineral-wool 120", "brick 100"]) {
+            let texts: Vec<&str> = d.texts.iter().map(|t| t.text.as_str()).collect();
+            assert!(texts[0].starts_with(&format!("Frame · {what} · ")), "{texts:?}");
+            // the window crossed in every leaf
+            assert_eq!(d.lines.iter().filter(|l| l.pen == Pen::Detail).count(), 6, "{what}");
+        }
+        // a lintel over the window in either leaf of masonry, none in the wool; the bricks counted
+        let lintel = |d: &Drawing2d| d.texts.iter().filter(|t| t.text.contains("concrete")).count();
+        assert_eq!((lintel(&all[0]), lintel(&all[1]), lintel(&all[2])), (1, 0, 1));
+        assert!(all[2].texts[0].text.contains(" · 43 × 62.5 · "), "{}", all[2].texts[0].text);
     }
 
     #[test]
