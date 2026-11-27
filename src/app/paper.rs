@@ -1481,7 +1481,7 @@ impl canvas::Program<Message> for PaperDrawing {
             super::marks::draw_detail_lines(&mut frame, &placed.lines, &placed.pens, placed.crop, ink, &|q| Some(fit.point(self.to_paper(i, q))), (fit.scale / 1000.0) as f32);
             for d in &placed.datums {
                 let (a, b) = (fit.point(self.to_paper(i, d.a)), fit.point(self.to_paper(i, d.b)));
-                super::marks::draw_datum(&mut frame, a, b, &d.name, d.level.is_some(), (fit.scale / 1000.0) as f32, &placed.rules.grid, ink, Color::WHITE);
+                super::marks::draw_datum(&mut frame, a, b, &d.name, d.level.is_some(), (fit.scale / 1000.0) as f32, &placed.rules.grid, ink, Color::WHITE, super::marks::GridMark::default());
             }
             for (k, note) in placed.notes.iter().enumerate() {
                 if crate::drawing2d::crop_segment(note.at, note.at, placed.crop).is_none() { continue; }

@@ -352,6 +352,8 @@ impl App {
             // on paper the view draws its grid lines and levels itself; over the model the
             // viewport does
             datums: if self.drawing_on_paper { self.view_datums(view) } else { Vec::new() },
+            picked_grids: self.picked_grid_names(),
+            locked_grids: self.locked_grid_names(),
             drawing: self.draw_tool.filter(|_| self.annotates && !self.dimension_tool && !self.section_tool && !self.note_tool),
             own_lines: self.document.view_lines(view).len(),
             pens: self.document.detail_pens(view),
@@ -805,6 +807,9 @@ pub(super) struct ViewMarks {
     /// The grid lines and levels the view draws itself, on its drawing: those of a view shown on
     /// paper.
     datums: Vec<crate::drawing2d::Datum2>,
+    /// The names of the grid lines picked and of those locked (the modelled project's): they show so on the drawing.
+    picked_grids: Vec<String>,
+    locked_grids: Vec<String>,
     /// How the view's kind of drawing draws those grid lines and levels.
     grid: bim_library::drawing::Drawn,
     /// The elements selected: what the view cuts of them shows as a whole in the accent colour.
@@ -1426,7 +1431,8 @@ impl canvas::Program<Message> for ViewMarks {
         // the grid lines and levels of the view, as its drawing has them
         for d in &self.datums {
             if let (Some(a), Some(b)) = (self.px(&screen, d.a), self.px(&screen, d.b)) {
-                draw_datum(&mut frame, a, b, &d.name, d.level.is_some(), self.paper(&screen, d.a) / 1000.0, &self.grid, ink, if p.dark { Color::from_rgb(0.16, 0.16, 0.18) } else { Color::WHITE });
+                let mark = GridMark { picked: d.level.is_none() && self.picked_grids.contains(&d.name), locked: d.level.is_none() && self.locked_grids.contains(&d.name) };
+                draw_datum(&mut frame, a, b, &d.name, d.level.is_some(), self.paper(&screen, d.a) / 1000.0, &self.grid, ink, if p.dark { Color::from_rgb(0.16, 0.16, 0.18) } else { Color::WHITE }, mark);
             }
         }
         for (k, d) in self.dimensions.iter().enumerate() {
@@ -1690,7 +1696,7 @@ pub(super) fn draw_detail_lines(frame: &mut Frame, lines: &[[[f64; 2]; 2]], pens
 /// it (its width, its dashes, its colour where it has one, else `ink`); a grid line with its
 /// name in a bubble past both ends, a level with its name past its end.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn draw_datum(frame: &mut Frame, a: Point, b: Point, name: &str, level: bool, px_per_mm: f32, grid: &bim_library::drawing::Drawn, ink: Color, paper: Color) {
+pub(super) fn draw_datum(frame: &mut Frame, a: Point, b: Point, name: &str, level: bool, px_per_mm: f32, grid: &bim_library::drawing::Drawn, ink: Color, paper: Color, mark: GridMark) {
     let length = a.distance(b);
     if length < 1.0 || !px_per_mm.is_finite() || px_per_mm <= 0.0 {
         return;
@@ -1699,7 +1705,15 @@ pub(super) fn draw_datum(frame: &mut Frame, a: Point, b: Point, name: &str, leve
     let at = |d: f32| Point::new(a.x + ux * d, a.y + uy * d);
     let dash: Vec<f32> = grid.dashes.iter().map(|mm| *mm as f32 * px_per_mm).collect();
     let weight = grid.width as f32 * px_per_mm;
-    let ink = grid.colour.map_or(ink, |c| Color::from_rgb8(c[0], c[1], c[2]));
+    let ink = if mark.picked {
+        crate::annotations::PICKED
+    } else if mark.locked {
+        crate::annotations::LOCKED
+    } else {
+        grid.colour.map_or(ink, |c| Color::from_rgb8(c[0], c[1], c[2]))
+    };
+    // picked ones are drawn heavier, as in the 3D view
+    let weight = if mark.picked { weight * 1.8 } else if mark.locked { weight * 1.3 } else { weight };
     let mut stroke = Stroke::default().with_color(ink).with_width(weight);
     stroke.line_dash = canvas::LineDash { segments: &dash, offset: 0 };
     frame.stroke(&Path::line(a, b), stroke);
@@ -1727,7 +1741,19 @@ pub(super) fn draw_datum(frame: &mut Frame, a: Point, b: Point, name: &str, leve
         frame.fill(&circle, paper);
         frame.stroke(&circle, Stroke::default().with_color(ink).with_width(weight));
         label(frame, centre, alignment::Horizontal::Center);
+        if mark.locked {
+            // a padlock at the bubble's outer shoulder, as small as the bubble is
+            crate::annotations::draw_padlock(frame, Point::new(centre.x + bubble * 0.55, centre.y - bubble * 1.15), ink, paper, (bubble / crate::annotations::RADIUS).max(0.8));
+        }
     }
+}
+
+/// What a grid line shows besides its drawing: that it is picked (light blue, heavier) or locked
+/// (amber, with a padlock at the bubbles). A sheet shows neither: it is the drawing as it goes out.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(super) struct GridMark {
+    pub picked: bool,
+    pub locked: bool,
 }
 
 /// The triangle of a level mark, its point down on `at`, as high as its text (`size`), with a short
@@ -2157,5 +2183,22 @@ mod tests {
         let sheet = Arc::<str>::from(app.document.sheets()[0].path.as_str());
         let _ = app.update(Message::PlaceOnSheet(sheet, plan.clone()));
         assert_eq!(app.marks_layer(app.theme.palette(), Language::English).map(|m| m.notes.len()), None, "no tab over the sheet");
+    }
+
+    #[test]
+    fn a_plan_drawn_on_paper_marks_the_grid_lines_picked_and_locked() {
+        let g = |name: &str, a: [f32; 2], b: [f32; 2]| crate::model::GridLine { name: name.into(), a: [a[0], a[1], 0.0], b: [b[0], b[1], 0.0] };
+        let (mut app, _) = plan_shown_with(vec![g("A", [-1.0, 1.0], [9.0, 1.0]), g("B", [-1.0, 4.0], [9.0, 4.0])]);
+        assert!(app.drawing_on_paper);
+        // none to begin with
+        let marks = layer(&app);
+        assert!(marks.picked_grids.is_empty() && marks.locked_grids.is_empty());
+        // the second picked; a grid line of the modelled project locked
+        app.set_picked_grids(vec![1]);
+        let index = app.modeller.model.add_grid(glam::DVec2::new(2.0, -1.0), glam::DVec2::new(2.0, 6.0)).unwrap();
+        app.modeller.model.lock_grid(index, true).unwrap();
+        let marks = layer(&app);
+        assert_eq!(marks.picked_grids, ["B"]);
+        assert_eq!(marks.locked_grids, ["1"]);
     }
 }
