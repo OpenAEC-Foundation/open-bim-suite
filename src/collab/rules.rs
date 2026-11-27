@@ -42,7 +42,7 @@ fn is_builtin(path: &Path) -> bool {
 /// Which elements a clash test takes: those of the models, layers and classes named. An empty
 /// list takes all; a name matches when the model's, layer's or class's name holds it, in any
 /// case, and `*` at an end stands for anything (`IfcWall*`).
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Selector {
     pub models: Vec<String>,
@@ -94,6 +94,10 @@ impl Selector {
 
 /// Whether `name` fits `pattern`: holds it, or with `*` at an end starts or ends with it.
 pub fn matches(pattern: &str, name: &str) -> bool {
+    // choices between bars: any of them
+    if pattern.contains('|') {
+        return pattern.split('|').any(|choice| !choice.trim().is_empty() && matches(choice, name));
+    }
     let (pattern, name) = (pattern.trim().to_lowercase(), name.to_lowercase());
     match (pattern.strip_prefix('*'), pattern.strip_suffix('*')) {
         (Some(rest), _) if rest.ends_with('*') => name.contains(rest.trim_end_matches('*')),
