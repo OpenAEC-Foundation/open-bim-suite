@@ -17,6 +17,9 @@ pub struct Camera {
     pub scene_radius: f32,
     /// Orthographic instead of perspective projection.
     pub ortho: bool,
+    /// A parallel view cuts the model at the eye, so zooming in walks through it; else it cuts
+    /// nothing in front of what is looked at.
+    pub cut_at_eye: bool,
 }
 
 /// The least a wheel step moves the eye, as a share of how far the point under the cursor was
@@ -63,6 +66,7 @@ impl Default for Camera {
             fov_y: 45f32.to_radians(),
             scene_radius: 10.0,
             ortho: false,
+            cut_at_eye: false,
         };
         c.set_preset(ViewPreset::Iso);
         c
@@ -85,14 +89,24 @@ impl Camera {
         if self.ortho {
             // Same framing as the perspective view at the target distance
             let h = self.distance * (self.fov_y * 0.5).tan();
-            let depth = self.distance + self.scene_radius * 4.0 + 1.0;
-            return Mat4::orthographic_rh(-h * aspect, h * aspect, -h, h, -depth, depth);
+            let (near, far) = self.depth_range();
+            return Mat4::orthographic_rh(-h * aspect, h * aspect, -h, h, near, far);
         }
-        // Near plane relative to the distance keeps depth precision for both small parts and
-        // whole buildings.
-        let near = self.near();
-        let far = self.distance + self.scene_radius * 4.0 + 1.0;
+        let (near, far) = self.depth_range();
         Mat4::perspective_rh(self.fov_y, aspect, near, far)
+    }
+
+    /// The depths in front of the eye between which the view draws. A parallel view starts as
+    /// far behind the eye as it reaches ahead (it has no eye to stand in the way), or at the eye
+    /// where it cuts there. The perspective view's near plane, relative to the distance, keeps
+    /// depth precision for both small parts and whole buildings.
+    pub fn depth_range(&self) -> (f32, f32) {
+        let far = self.distance + self.scene_radius * 4.0 + 1.0;
+        match (self.ortho, self.cut_at_eye) {
+            (true, true) => (0.0, far),
+            (true, false) => (-far, far),
+            (false, _) => (self.near(), far),
+        }
     }
 
     /// The near plane of the perspective view: a fixed share of the distance to the target,
@@ -271,6 +285,20 @@ mod tests {
         let mut c = Camera::default();
         c.set_preset(ViewPreset::Top);
         assert!(c.eye().z > c.target.z + c.distance * 0.99);
+    }
+
+    #[test]
+    fn a_parallel_view_cuts_at_the_eye_only_where_set_to() {
+        let mut c = Camera { ortho: true, scene_radius: 50.0, distance: 10.0, ..Camera::default() };
+        // a point 5 m behind the eye, on the line of sight
+        let behind = c.eye() - c.forward() * 5.0;
+        let z = |c: &Camera| c.view_proj(1.0).project_point3(behind).z;
+        assert!((0.0..=1.0).contains(&z(&c)), "{}", z(&c));
+        c.cut_at_eye = true;
+        assert!(z(&c) < 0.0, "{}", z(&c));
+        // the perspective view is as it was
+        c.ortho = false;
+        assert_eq!(c.depth_range(), Camera { cut_at_eye: false, ..c }.depth_range());
     }
 
     #[test]
