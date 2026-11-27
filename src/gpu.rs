@@ -9,7 +9,7 @@
 //!
 //! To try another combination: `--gpu-backend dx12|vulkan|gl` or the variable `WGPU_BACKEND`,
 //! and `--present-mode vsync|no_vsync|fifo|mailbox` or `ICED_PRESENT_MODE` (both read by
-//! iced and wgpu). What the window got is written to `gpu.log` in the settings folder.
+//! iced and wgpu); without either the window draws with `no_vsync`. What the window got is written to `gpu.log` in the settings folder.
 
 use std::io::Write;
 use std::path::Path;
@@ -54,8 +54,13 @@ pub fn configure(backend: Option<String>, present_mode: Option<String>, dir: Opt
     if let Some(b) = backend {
         std::env::set_var("WGPU_BACKEND", b);
     }
-    if let Some(p) = present_mode {
-        std::env::set_var("ICED_PRESENT_MODE", p);
+    // without one asked for, the window does not wait for the monitor: a view that is moved shows
+    // as many frames as the graphics card makes, not the 60 a second of most monitors (a frame is
+    // only made when something changed, so a window at rest costs nothing either way)
+    match present_mode {
+        Some(p) => std::env::set_var("ICED_PRESENT_MODE", p),
+        None if std::env::var_os("ICED_PRESENT_MODE").is_none() => std::env::set_var("ICED_PRESENT_MODE", "no_vsync"),
+        None => {}
     }
     #[cfg(windows)]
     let gpu = dxgi_gpu();

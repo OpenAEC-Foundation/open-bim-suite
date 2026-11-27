@@ -244,7 +244,7 @@ The window draws with wgpu. On Windows it uses DirectX 12 when the graphics card
 
 If the window flickers, stays black or is slow, try another backend or present mode, and mention which one helps in an issue together with `gpu.log`:
 
-- **Once:** `open-3d-viewer.exe --gpu-backend vulkan` (or `dx12`, `gl`) and `--present-mode mailbox` (or `fifo`, `vsync`, `no_vsync`). Mailbox works with DirectX 12 and Vulkan, not with OpenGL.
+- **Once:** `open-3d-viewer.exe --gpu-backend vulkan` (or `dx12`, `gl`) and `--present-mode mailbox` (or `fifo`, `vsync`, `no_vsync`). Mailbox works with DirectX 12 and Vulkan, not with OpenGL. Without a choice the viewer draws with `no_vsync`: it does not wait for the monitor; `vsync` brings that back if the picture tears while it moves.
 - **Always:** set the user variable `WGPU_BACKEND` or `ICED_PRESENT_MODE` to one of these values, for example `setx WGPU_BACKEND vulkan` in a command prompt, and start the viewer again.
 
 ## OpenAEC Linux (SuperCloud)
