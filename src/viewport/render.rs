@@ -1079,11 +1079,10 @@ impl ScenePipeline {
             let projection = camera.projection(w as f32 / h as f32);
             // pixels a metre is at depth 1 (perspective) or anywhere (parallel)
             let per_metre = projection.y_axis.y * h as f32 / 2.0;
-            // the depth range, as `Camera::projection` sets it
-            let (near, far) = if camera.ortho {
-                (0.0, 2.0 * (camera.distance + camera.scene_radius * 4.0 + 1.0))
-            } else {
-                ((camera.distance * 0.002).max(1e-4), camera.distance + camera.scene_radius * 4.0 + 1.0)
+            // the depth range, as `Camera::projection` sets it: a parallel view's from its start
+            let (near, far) = match camera.depth_range() {
+                (near, far) if camera.ortho => (0.0, far - near),
+                (near, far) => (near.max(1e-4), far),
             };
             let on = if self.shadows { 1.0 } else { 0.0 };
             let parallel = if camera.ortho { 1.0 } else { 0.0 };

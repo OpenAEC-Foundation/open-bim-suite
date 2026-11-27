@@ -253,7 +253,7 @@ impl App {
         }
         let now = Instant::now();
         let kept = self.nav.wheel.filter(|w| {
-            w.camera == self.camera && (w.at.0 - x).hypot(w.at.1 - y) <= WHEEL_SLOP && now.saturating_duration_since(w.when) < WHEEL_PAUSE
+            Camera { scene_radius: self.camera.scene_radius, ..w.camera } == self.camera && (w.at.0 - x).hypot(w.at.1 - y) <= WHEEL_SLOP && now.saturating_duration_since(w.when) < WHEEL_PAUSE
         });
         let (point, min) = match kept {
             Some(w) => (w.point, w.min),
@@ -447,6 +447,33 @@ mod tests {
         app.camera.set_preset(ViewPreset::Top);
         app.fit();
         app
+    }
+
+    #[test]
+    fn zooming_far_in_cuts_nothing_of_the_model_away() {
+        // a small thing framed at a corner of the floor (as zooming to a selection does), looked
+        // at nearly level: most of the floor then lies between the eye and it
+        let mut app = floor();
+        let corner = crate::model::Bounds { min: [49.0, 49.0, 1.5], max: [50.0, 50.0, 2.5] };
+        for ortho in [true, false] {
+            app.camera.yaw = std::f32::consts::FRAC_PI_4;
+            app.camera.pitch = 0.3;
+            app.camera.ortho = ortho;
+            app.camera.fit(&corner, 1000.0 / 800.0);
+            for _ in 0..30 {
+                let _ = app.update(Message::Navigate(Navigate::Zoom { steps: 1.0, x: 500.0, y: 400.0, width: 1000.0, height: 800.0 }));
+            }
+            // every corner of the floor ahead of the eye is still inside the depth drawn
+            let clip = app.camera.view_proj(1000.0 / 800.0);
+            let (eye, forward) = (app.camera.eye(), app.camera.forward());
+            for p in [Vec3::new(-50.0, -50.0, 2.0), Vec3::new(50.0, -50.0, 2.0), Vec3::new(-50.0, 50.0, 2.0), Vec3::new(50.0, 50.0, 2.0)] {
+                let ahead = (p - eye).dot(forward);
+                if ortho || ahead > 1.0 {
+                    let z = clip.project_point3(p).z;
+                    assert!((0.0..=1.0).contains(&z), "ortho {ortho}: {p} at depth {z}, {ahead} m ahead");
+                }
+            }
+        }
     }
 
     #[test]
