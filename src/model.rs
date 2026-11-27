@@ -999,6 +999,13 @@ impl Model {
     /// its layers and grids turn, and where its views look from. A turned model's world
     /// coordinates are no longer those of its file; the clip boxes of its views do not turn.
     pub fn combine_placed(models: &[std::sync::Arc<Model>], moves: &[DVec3], turns: &[f64]) -> Self {
+        Self::combine_labelled(models, moves, turns, &[])
+    }
+
+    /// As [`Model::combine_placed`], each element also told the discipline and the party of its
+    /// model (`labels`: discipline and party per model; none: not told), as `Discipline` and
+    /// `Party`, next to `SourceModel`.
+    pub fn combine_labelled(models: &[std::sync::Arc<Model>], moves: &[DVec3], turns: &[f64], labels: &[(String, String)]) -> Self {
         let mut layers = Vec::new();
         let mut props = HashMap::new();
         let mut views = Vec::new();
@@ -1072,7 +1079,7 @@ impl Model {
                 }
                 layers.push(layer);
             }
-            props.extend(model.props.iter().map(|(id, value)| (remap[id], value.clone())));
+            props.extend(model.props.iter().map(|(id, value)| (remap[&id], with_source(value, &source, labels.get(m)))));
             parts.extend(model.structural.iter().map(|part| part.renumbered(first_origin + part.model, |id| remap[&id])));
             let first_view = views.len();
             project.sheets.extend(model.project.sheets.iter().cloned().map(|mut sheet| {
@@ -1379,6 +1386,21 @@ impl Model {
     }
 }
 
+/// The properties of an element with the model it comes from added, as `SourceModel`: in a
+/// federation, what tells who modelled it, kept when the whole is saved as one file. One that
+/// already names a source keeps it. The discipline and the party of the model, when it has them,
+/// go with it.
+fn with_source(json: &str, source: &str, label: Option<&(String, String)>) -> String {
+    let Ok(mut map) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(json) else { return json.to_string() };
+    map.entry("SourceModel").or_insert_with(|| source.into());
+    for (key, value) in [("Discipline", label.map(|l| l.0.as_str())), ("Party", label.map(|l| l.1.as_str()))] {
+        if let Some(value) = value.filter(|v| !v.trim().is_empty()) {
+            map.entry(key).or_insert_with(|| value.into());
+        }
+    }
+    serde_json::Value::Object(map).to_string()
+}
+
 /// Moves xyz triples by `t`, each coordinate rounded once from f64.
 /// Turns points about the vertical through `pivot`, and their normals along.
 fn turn_about(positions: &mut [f32], normals: &mut [f32], sin: f64, cos: f64, pivot: DVec3) {
@@ -1660,6 +1682,27 @@ mod tests {
         assert_ne!(ids[0], ids[1]);
         assert_eq!(m.element_key(ids[0]), ElementKey { model: 0, source: 7 });
         assert_eq!(m.element_key(ids[1]), ElementKey { model: 1, source: 7 });
+    }
+
+    #[test]
+    fn a_combined_element_says_which_model_it_comes_from() {
+        let m = Model::combine(&[square("a", 7, 0.0), square("b", 7, 2.0)]);
+        let ids: Vec<u64> = m.layers.iter().map(|l| l.elements[0].0).collect();
+        let source = |id| m.element_props(id).into_iter().find(|(k, _)| k == "SourceModel").map(|(_, v)| v);
+        assert_eq!(source(ids[0]).as_deref(), Some("a.rvt"));
+        assert_eq!(source(ids[1]).as_deref(), Some("b.rvt"));
+        // its other properties stay
+        assert!(m.element_props(ids[1]).iter().any(|(k, v)| k == "Name" && v == "b"));
+    }
+
+    #[test]
+    fn a_combined_element_carries_the_discipline_and_party_of_its_model() {
+        let labels = [("Structure".to_string(), "Engineer BV".to_string()), (String::new(), String::new())];
+        let m = Model::combine_labelled(&[square("a", 7, 0.0), square("b", 7, 2.0)], &[], &[], &labels);
+        let ids: Vec<u64> = m.layers.iter().map(|l| l.elements[0].0).collect();
+        let get = |id, key: &str| m.element_props(id).into_iter().find(|(k, _)| k == key).map(|(_, v)| v);
+        assert_eq!((get(ids[0], "Discipline").as_deref(), get(ids[0], "Party").as_deref()), (Some("Structure"), Some("Engineer BV")));
+        assert_eq!((get(ids[1], "Discipline"), get(ids[1], "Party")), (None, None), "a model without them adds none");
     }
 
     #[test]

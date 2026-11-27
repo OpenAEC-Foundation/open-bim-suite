@@ -63,7 +63,7 @@ impl App {
                     [one] if moves[0] == glam::DVec3::ZERO && turns[0] == 0.0 => one.clone(),
                     _ => {
                         // the same scene as before: it keeps its id, so nothing is uploaded again
-                        let mut scene = Model::combine_placed(&sources, &moves, &turns);
+                        let mut scene = Model::combine_labelled(&sources, &moves, &turns, &self.model_labels());
                         scene.id = self.model.as_ref().map_or(scene.id, |shown| shown.id);
                         Arc::new(scene)
                     }

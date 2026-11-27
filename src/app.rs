@@ -157,13 +157,16 @@ pub struct ModelEntry {
     layer_visibility: Vec<bool>,
     /// Where it was moved to and where its zero point lies in it.
     pub placed: origin::Placed,
+    /// The discipline and the party that made it (typed; kept in the project).
+    pub discipline: String,
+    pub party: String,
 }
 
 impl ModelEntry {
     fn new(model: Arc<Model>, first_layer: usize) -> Self {
         let layers = first_layer..first_layer + model.layers.len();
         let layer_visibility = model.layers.iter().map(|layer| !layer.hidden).collect();
-        Self { model, visible: true, layers, layer_visibility, placed: origin::Placed::default() }
+        Self { model, visible: true, layers, layer_visibility, placed: origin::Placed::default(), discipline: String::new(), party: String::new() }
     }
 }
 
@@ -1572,7 +1575,9 @@ fn build_film_task(_model: Arc<Model>, _path: PathBuf) -> Task<Message> {
 /// Asks where to save the model, one filter per writer.
 #[cfg(not(target_arch = "wasm32"))]
 fn save_dialog_task(model: &Model) -> Task<Message> {
-    let mut dialog = rfd::AsyncFileDialog::new().set_title("Save as").set_file_name(save_name(model));
+    // several models open: this writes them as one model; the project file keeps them apart
+    let title = if model.format == "Multiple models" { "Save all models as one merged model (Save project keeps them apart)" } else { "Save as" };
+    let mut dialog = rfd::AsyncFileDialog::new().set_title(title).set_file_name(save_name(model));
     if let Some(dir) = crate::managed::dialog_folder(model.path.parent().map(PathBuf::from), crate::managed::work_folder()) {
         dialog = dialog.set_directory(dir);
     }
@@ -2043,12 +2048,17 @@ impl App {
         }
     }
 
+    /// The discipline and the party of each open model, in the order of the models.
+    pub(crate) fn model_labels(&self) -> Vec<(String, String)> {
+        self.models.iter().map(|entry| (entry.discipline.clone(), entry.party.clone())).collect()
+    }
+
     /// Builds the scene of the open models, each at its place, and says what was aligned.
     fn combine_models(&mut self) {
         let sources: Vec<_> = self.models.iter().map(|entry| entry.model.clone()).collect();
         let moves: Vec<glam::DVec3> = self.models.iter().map(|entry| entry.placed.moved).collect();
         let turns: Vec<f64> = self.models.iter().map(|entry| entry.placed.turned).collect();
-        self.set_scene(Arc::new(Model::combine_placed(&sources, &moves, &turns)));
+        self.set_scene(Arc::new(Model::combine_labelled(&sources, &moves, &turns, &self.model_labels())));
         self.restore_model_visibility();
         if !self.aligned.is_empty() {
             let said = std::mem::take(&mut self.aligned).join(" · ");
@@ -6812,7 +6822,10 @@ mod tests {
         app.add_model(named_square("b", 7, 2.0));
         let model = app.model.clone().unwrap();
         let id = model.element_with_key(key).expect("still there");
-        assert_eq!(model.element_props(id), before);
+        // what the element had stays; the model it comes from is told besides
+        let mut after = model.element_props(id);
+        after.retain(|(key, value)| !(key == "SourceModel" && value == "a.rvt"));
+        assert_eq!(after, before);
     }
 
     #[test]
