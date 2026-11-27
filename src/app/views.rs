@@ -669,6 +669,7 @@ fn camera_of(v: &Camera3d, radius: f32) -> Camera {
         fov_y: (v.fov as f32).clamp(1.0, 179.0).to_radians(),
         scene_radius: radius,
         ortho: !v.perspective,
+        cut_at_eye: false,
     }
 }
 
