@@ -445,7 +445,11 @@ pub const PLAN_SCALE: f64 = 50.0;
 fn laying_plan(model: &Model, element: &Element, s: &bim_core::SystemDef, named: &dyn Fn(&str) -> String) -> Option<Drawing2d> {
     let t = s.system_type.as_ref()?;
     if t.panel_material == "air" {
-        return open_plan(model, element, s, t, named);
+        return open_plan(model, element, s, t, named, false);
+    }
+    // a floor of joists (far wider than a joint between slabs): its joists and the boards on them
+    if s.member.x >= 0.03 {
+        return open_plan(model, element, s, t, named, true);
     }
     let dir = (s.end - s.start).try_normalize()?;
     let left = dir.perp();
@@ -704,7 +708,10 @@ fn elevation(model: &Model, element: &Element, s: &bim_core::SystemDef, t: &bim_
 }
 
 /// The laying plan of a lying system with nothing between its members (see [`laying_plan`]).
-fn open_plan(model: &Model, element: &Element, s: &bim_core::SystemDef, t: &bim_core::SystemTypeDef, named: &dyn Fn(&str) -> String) -> Option<Drawing2d> {
+///
+/// `over`: the boards drawn are those of the layer that lies highest (a floor's deck on its
+/// joists), not lowest (a ceiling's lining under its channels).
+fn open_plan(model: &Model, element: &Element, s: &bim_core::SystemDef, t: &bim_core::SystemTypeDef, named: &dyn Fn(&str) -> String, over: bool) -> Option<Drawing2d> {
     let dir = (s.end - s.start).try_normalize()?;
     let left = dir.perp();
     let parts = model.evaluate(element.id).ok()?;
@@ -723,10 +730,13 @@ fn open_plan(model: &Model, element: &Element, s: &bim_core::SystemDef, t: &bim_
     let own = || parts.iter().filter(|p| p.tile == element.tile);
     let members: Vec<([f64; 2], [f64; 2], f64)> = own().filter(|p| p.class == "IfcMember" && p.material.as_deref() == Some(t.member_material.as_str())).map(boxed).collect();
     // the boards that are seen: of the layer that hangs lowest
-    let lining = t.layers.iter().filter(|l| l.panels.thickness >= MEMBRANE).min_by(|a, b| a.offset.total_cmp(&b.offset));
+    let by_height = |a: &&bim_library::SystemLayer, b: &&bim_library::SystemLayer| if over { b.offset.total_cmp(&a.offset) } else { a.offset.total_cmp(&b.offset) };
+    let lining = t.layers.iter().filter(|l| l.panels.thickness >= MEMBRANE && l.panels.material != "air").min_by(by_height);
     let all: Vec<([f64; 2], [f64; 2], f64)> = lining.map(|l| own().filter(|p| p.class == "IfcPlate" && p.material.as_deref() == Some(l.panels.material.as_str())).map(boxed).collect()).unwrap_or_default();
+    // (of several layers of one material: the lowest of a ceiling, the highest of a deck)
     let lowest = all.iter().map(|b| b.2).fold(f64::INFINITY, f64::min);
-    let boards: Vec<&([f64; 2], [f64; 2], f64)> = all.iter().filter(|b| b.2 < lowest + 1e-6).collect();
+    let highest = all.iter().map(|b| b.2).fold(f64::NEG_INFINITY, f64::max);
+    let boards: Vec<&([f64; 2], [f64; 2], f64)> = all.iter().filter(|b| if over { b.2 > highest - 1e-6 } else { b.2 < lowest + 1e-6 }).collect();
     if members.is_empty() && boards.is_empty() {
         return None;
     }
@@ -1123,6 +1133,24 @@ mod tests {
         assert!(texts.iter().filter(|t| t.contains(" × 100 × ")).count() >= 2, "{texts:?}");
         let values: Vec<i64> = d.dimensions.iter().map(|x| mm(x.value)).collect();
         assert!(values.iter().any(|v| *v >= 16000) && values.iter().any(|v| (2690..=2710).contains(v)), "{values:?}");
+    }
+
+    #[test]
+    fn a_floor_of_joists_gets_a_plan_of_its_joists_and_its_deck() {
+        let generic = SystemDef { start: DVec2::new(1.0, 1.0), end: DVec2::new(5.4, 1.0), base: 3.0, height: 4.8, spacing: DVec2::new(1.5, 1.5), member: DVec2::new(0.05, 0.15), panel: 0.02, system_type: None, openings: Vec::new(), breaks: Vec::new(), outline: Vec::new(), division: None, grid: None };
+        let s = generic.laid(Library::starter().system_type("system.timber-floor-220").unwrap()).unwrap();
+        let mut m = Model::new(TileGrid::default());
+        let grid = m.grid;
+        let id = m.add(Element::in_project(&grid, "Floor", None, Shape::System(s))).unwrap();
+        let all = element_drawings(&m, m.get(id).unwrap(), &|key| key.to_string());
+        assert_eq!(all.len(), 1);
+        let d = &all[0];
+        let texts: Vec<&str> = d.texts.iter().map(|t| t.text.as_str()).collect();
+        // the deck boards over the joists; the joists and the deck in the lists, not the wool
+        assert!(texts[0].starts_with("Floor · plywood 18 · "), "{texts:?}");
+        assert!(texts.iter().any(|t| t.starts_with("12 × timber 45×220 L=")), "{texts:?}");
+        assert!(texts.iter().any(|t| t.contains(" × 18 × 600 × 2400")) && !texts.iter().any(|t| t.contains("mineral-wool")), "{texts:?}");
+        assert!(d.lines.iter().filter(|l| l.pen == Pen::Detail).count() >= 12 * 4);
     }
 
     #[test]
