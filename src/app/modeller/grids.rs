@@ -204,6 +204,17 @@ impl App {
         !indices.is_empty() && indices.iter().all(|&i| self.modeller.model.grid_locked(i))
     }
 
+    /// The names of the grid lines picked, for a view drawn on paper.
+    pub(in crate::app) fn picked_grid_names(&self) -> Vec<String> {
+        let Some(model) = self.model.as_ref() else { return Vec::new() };
+        self.grids_picked().into_iter().filter_map(|g| model.project.grids.get(g)).map(|g| g.name.clone()).collect()
+    }
+
+    /// The names of the locked grid lines of the modelled project, for a view drawn on paper.
+    pub(in crate::app) fn locked_grid_names(&self) -> Vec<String> {
+        self.modeller.model.grids().iter().filter(|g| g.locked).map(|g| g.name.clone()).collect()
+    }
+
     /// Which of the grid lines shown are locked ones of the modelled project, for the viewport.
     pub(in crate::app) fn locked_shown_grids(&self) -> Vec<usize> {
         (0..self.modeller.model.grids().len()).filter(|&i| self.modeller.model.grid_locked(i)).filter_map(|i| self.shown_grid(i)).collect()

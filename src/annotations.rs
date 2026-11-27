@@ -81,19 +81,19 @@ pub const PICKED: iced::Color = iced::Color { r: 0.25, g: 0.66, b: 1.0, a: 1.0 }
 pub const LOCKED: iced::Color = iced::Color { r: 0.85, g: 0.52, b: 0.08, a: 1.0 };
 
 /// A small padlock with its body's top left corner at `at`: a shackle over a body, in `ink`.
-fn draw_padlock(frame: &mut Frame, at: Point, ink: Color, fill: Color) {
-    let (w, h) = (9.0, 6.0);
+pub(crate) fn draw_padlock(frame: &mut Frame, at: Point, ink: Color, fill: Color, scale: f32) {
+    let (w, h, rise) = (9.0 * scale, 6.0 * scale, 4.0 * scale);
     // the shackle: three sides of a box over the body
     let shackle = Path::new(|b| {
-        b.move_to(Point::new(at.x + 1.5, at.y));
-        b.line_to(Point::new(at.x + 1.5, at.y - 4.0));
-        b.line_to(Point::new(at.x + w - 1.5, at.y - 4.0));
-        b.line_to(Point::new(at.x + w - 1.5, at.y));
+        b.move_to(Point::new(at.x + 1.5 * scale, at.y));
+        b.line_to(Point::new(at.x + 1.5 * scale, at.y - rise));
+        b.line_to(Point::new(at.x + w - 1.5 * scale, at.y - rise));
+        b.line_to(Point::new(at.x + w - 1.5 * scale, at.y));
     });
-    frame.stroke(&shackle, canvas::Stroke::default().with_color(ink).with_width(1.3));
+    frame.stroke(&shackle, canvas::Stroke::default().with_color(ink).with_width(1.3 * scale.max(0.6)));
     let body = Path::rectangle(at, iced::Size::new(w, h));
     frame.fill(&body, ink);
-    frame.stroke(&body, canvas::Stroke::default().with_color(fill).with_width(0.5));
+    frame.stroke(&body, canvas::Stroke::default().with_color(fill).with_width(0.5 * scale.max(0.6)));
 }
 
 /// The grid (of the model) under screen point `cursor` among the datum lines drawn: inside one of
@@ -314,7 +314,7 @@ impl<Message> canvas::Program<Message> for GridOverlay {
                 });
                 if locked {
                     // the padlock sits at the bubble's outer shoulder
-                    draw_padlock(&mut frame, Point::new(c.x + RADIUS * 0.55, c.y - RADIUS * 1.15), if picked { PICKED } else { LOCKED }, self.fill);
+                    draw_padlock(&mut frame, Point::new(c.x + RADIUS * 0.55, c.y - RADIUS * 1.15), if picked { PICKED } else { LOCKED }, self.fill, 1.0);
                 }
             }
         }
