@@ -363,6 +363,8 @@ pub struct State {
     /// in bytes, the picture small (for the list) and whole. Drawing a list must not unpack its
     /// pictures again every frame.
     pub pictures: HashMap<(String, usize), (iced::widget::image::Handle, iced::widget::image::Handle)>,
+    /// What the clashes looked at look like, by the key of each: the tiles of the list.
+    pub clash_tiles: HashMap<String, iced::widget::image::Handle>,
     /// Where the issues were read from or last saved.
     pub issues_path: Option<PathBuf>,
     pub issues_changed: bool,
@@ -503,6 +505,7 @@ impl Default for State {
         State {
             packages: Default::default(),
             pictures: HashMap::new(),
+            clash_tiles: HashMap::new(),
             tab: Tab::default(),
             issues: Issues::new(),
             issues_path: None,
@@ -823,6 +826,8 @@ pub enum Event {
     Shot(Arc<iced::window::Screenshot>),
     /// The picture of the clashes of an issue made of them.
     ClashShot(Arc<iced::window::Screenshot>),
+    /// The window as it shows the clash of this key, for its tile in the list.
+    ClashTile(String, Arc<iced::window::Screenshot>),
     Title(String),
     Description(String),
     Status(&'static str),
@@ -3129,7 +3134,27 @@ impl App {
                 self.collab_go_to([row.a, row.b]);
                 self.collab_look_at_clash(&row);
                 self.refresh_overlay();
-                return view;
+                // once the view has turned to it: a picture for its tile in the list
+                if self.collab.clash_tiles.contains_key(&row.key) {
+                    return view;
+                }
+                let key = row.key.clone();
+                #[cfg(not(target_arch = "wasm32"))]
+                let wait = Task::perform(async { std::thread::sleep(std::time::Duration::from_millis(700)) }, |_| ());
+                #[cfg(target_arch = "wasm32")]
+                let wait = Task::done(());
+                let tile = wait.then(|_| iced::window::latest().and_then(iced::window::screenshot)).map(move |shot| Message::Collab(Event::ClashTile(key.clone(), Arc::new(shot))));
+                return Task::batch([view, tile]);
+            }
+            Event::ClashTile(key, shot) => {
+                // only of the clash still looked at, the view at rest
+                let current = self.collab.clash.and_then(|k| self.collab.clashes.get(k)).is_some_and(|c| c.key == key);
+                if current && self.anim.is_none() {
+                    if let Some(picture) = self.viewport_png(&shot).and_then(|png| image::load_from_memory(&png).ok()) {
+                        let small = picture.thumbnail(480, 360).to_rgba8();
+                        self.collab.clash_tiles.insert(key, iced::widget::image::Handle::from_rgba(small.width(), small.height(), small.into_raw()));
+                    }
+                }
             }
             Event::IssueFromClash(k) => {
                 let Some(row) = self.collab.clashes.get(k).cloned() else { return Task::none() };
@@ -3393,11 +3418,16 @@ impl App {
                 self.refresh_overlay();
             }
             Event::PickGroup(g) => {
-                let ids: Vec<u64> = self.collab.clashes.iter().filter(|c| c.group == g).flat_map(|c| [c.a, c.b]).collect();
-                self.collab.open_group = if self.collab.open_group == Some(g) { None } else { Some(g) };
+                // a group opened shows its first clash: its two elements picked, the box around
+                // where they clash and the view on it (all the group's elements framed showed
+                // whole walls, behind the box of the clash looked at before)
+                // the group stays what is picked (the keys decide on all of it)
+                let opening = self.collab.open_group != Some(g);
+                self.collab.open_group = opening.then_some(g);
                 self.collab.clash = None;
-                if !ids.is_empty() {
-                    self.collab_go_to(ids);
+                if let Some(row) = self.collab.clashes.iter().find(|c| c.group == g).filter(|_| opening).cloned() {
+                    self.collab_go_to([row.a, row.b]);
+                    self.collab_look_at_clash(&row);
                 }
                 self.refresh_overlay();
             }
@@ -4315,9 +4345,19 @@ impl App {
             let clash = &state.clashes[k];
             let picked = state.clash == Some(k);
             let (what, tone) = says(clash);
-            let line = row![column![w::body(look, clash.a_name.clone()), w::secondary(look, format!("× {}", clash.b_name))].spacing(1).width(Length::Fill), site::chip(look, &what, Some(tone))].spacing(6).align_y(Alignment::Center);
+            let tile = state.clash_tiles.get(&clash.key);
+            let mut line = row![].spacing(6).align_y(Alignment::Center);
+            // what it looks like, small, once it was looked at
+            if let Some(tile) = tile.filter(|_| !picked) {
+                line = line.push(iced::widget::image(tile.clone()).width(56).height(42).content_fit(iced::ContentFit::Cover));
+            }
+            let line = line.push(column![w::body(look, clash.a_name.clone()), w::secondary(look, format!("× {}", clash.b_name))].spacing(1).width(Length::Fill)).push(site::chip(look, &what, Some(tone)));
             let mut out = column![named(button(line).width(Length::Fill).padding([4, 6]).style(move |_, st| p.ribbon_button(picked, st)).on_press(go(Event::PickClash(k))), Node::new(Role::Row, format!("{} {}: {} × {}", l.text("Clash", "Clash"), k + 1, clash.a_name, clash.b_name)).selected(picked).value(clash.decision.key()))].spacing(4);
             if picked {
+                // the clash picked: its picture large
+                if let Some(tile) = tile {
+                    out = out.push(container(iced::widget::image(tile.clone()).width(Length::Fill).content_fit(iced::ContentFit::Contain)).padding(iced::Padding { left: 8.0, ..iced::Padding::ZERO }));
+                }
                 let decide = |label: &'static str, d: Decision| {
                     let active = clash.decision == d;
                     named(button(text(label).size(12)).padding([3, 8]).style(move |_, s| p.ribbon_button(active, s)).on_press(go(Event::Decide(k, if active { Decision::Open } else { d }))), Node::new(Role::ToggleButton, label).selected(active))
@@ -5252,6 +5292,28 @@ pub(crate) mod tests {
         app.collab_show_viewpoint(&saved);
         let restored = app.section.unwrap();
         assert!(app.section_on && restored.min.abs_diff_eq(section.min, 0.0001) && restored.max.abs_diff_eq(section.max, 0.0001));
+    }
+
+    #[test]
+    fn a_group_opened_shows_its_first_clash() {
+        let mut app = App::default();
+        app.set_model(Arc::new(two_blocks()));
+        let _ = app.collab_update(Event::Tab(Tab::Clashes));
+        let _ = app.collab_update(Event::Clashed(app.collab.run, vec![row("t", 1, 2, [1.15, 0.1, 1.15])]));
+        let group = app.collab.clashes[0].group;
+        // the group closed and the view let go
+        let _ = app.collab_update(Event::PickGroup(group));
+        assert_eq!(app.collab.open_group, None);
+        app.collab.clash = None;
+        app.section = None;
+        app.section_on = false;
+        app.sel.clear();
+        // opened again: the two elements of its first clash picked, the box around it
+        let _ = app.collab_update(Event::PickGroup(group));
+        assert_eq!((app.collab.open_group, app.collab.clash), (Some(group), None));
+        assert_eq!(app.sel.len(), 2);
+        let section = app.section.expect("the box around the clash");
+        assert!(app.section_on && section.max.x - section.min.x < 2.0, "{section:?}");
     }
 
     #[test]
