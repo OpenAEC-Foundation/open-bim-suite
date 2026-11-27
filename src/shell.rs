@@ -2106,7 +2106,7 @@ impl Studio {
                     Message::Open(path) | Message::Dropped(path) => Some(path.clone()),
                     _ => None,
                 };
-                if opened.is_some() || matches!(message, Message::OpenDialog | Message::Save | Message::SaveDialog | Message::SaveProjectDialog | Message::SaveIfcDialog(_) | Message::BlenderRender) {
+                if opened.is_some() || matches!(message, Message::NewModel(_) | Message::OpenDialog | Message::Save | Message::SaveDialog | Message::SaveProjectDialog | Message::SaveIfcDialog(_) | Message::BlenderRender) {
                     self.backstage = false;
                 }
                 if let Some(path) = opened {
@@ -4282,6 +4282,16 @@ mod tests {
         let studio = Studio::new(App::default());
         let _ = studio.view();
         let _ = studio.backstage_view(studio.look());
+    }
+
+    #[test]
+    fn new_from_the_file_page_closes_it_on_the_new_model() {
+        let mut studio = Studio::new(App::default());
+        studio.set_product(Product::Modeller);
+        let _ = studio.update(Msg::Backstage(true));
+        let _ = studio.update(Msg::App(Message::NewModel("Level 0")));
+        assert!(!studio.backstage, "the new model is shown, not the file page");
+        assert!(studio.app.model.is_some());
     }
 
     #[test]
