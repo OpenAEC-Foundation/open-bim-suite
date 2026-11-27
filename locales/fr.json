@@ -2148,6 +2148,10 @@
     "Export sheets": "Exporter les feuilles",
     "Several sheets at once: as one PDF to print, or a PDF, DWG, DXF or SVG per sheet.": "Plusieurs feuilles à la fois : un seul PDF à imprimer, ou un PDF, DWG, DXF ou SVG par feuille.",
     "One PDF is to print the series; per sheet asks for the folder and names each file after its sheet.": "Un seul PDF sert à imprimer la série ; par feuille demande le dossier et nomme chaque fichier d'après sa feuille.",
-    "The model's drawings are still being read; in a moment you can.": "Les dessins du modèle sont encore en lecture ; ce sera possible dans un instant."
+    "The model's drawings are still being read; in a moment you can.": "Les dessins du modèle sont encore en lecture ; ce sera possible dans un instant.",
+    "Second moments": "Moments quadratiques",
+    "Layer outside": "Couche extérieure",
+    "Layer inside": "Couche intérieure",
+    "NL-SfB": "NL-SfB"
   }
 }

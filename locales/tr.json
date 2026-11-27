@@ -2148,6 +2148,10 @@
     "Export sheets": "Paftaları dışa aktar",
     "Several sheets at once: as one PDF to print, or a PDF, DWG, DXF or SVG per sheet.": "Birden çok pafta aynı anda: yazdırmak için tek bir PDF ya da pafta başına bir PDF, DWG, DXF veya SVG.",
     "One PDF is to print the series; per sheet asks for the folder and names each file after its sheet.": "Tek PDF seriyi yazdırmak içindir; pafta başına seçeneği klasörü sorar ve her dosyayı paftasının adıyla adlandırır.",
-    "The model's drawings are still being read; in a moment you can.": "Modelin çizimleri hâlâ okunuyor; birazdan yapılabilir."
+    "The model's drawings are still being read; in a moment you can.": "Modelin çizimleri hâlâ okunuyor; birazdan yapılabilir.",
+    "Second moments": "Atalet momentleri",
+    "Layer outside": "Dış katman",
+    "Layer inside": "İç katman",
+    "NL-SfB": "NL-SfB"
   }
 }
