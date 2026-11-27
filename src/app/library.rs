@@ -360,7 +360,7 @@ impl App {
                     body = body.push(item(line.into(), pick.clone()));
                     if view.picked.as_ref() == Some(&pick) {
                         if let Some(t) = lib.linear_type(id) {
-                            body = body.push(detail(profile_detail(p, &t.profile, lib.material(&t.material), None)));
+                            body = body.push(detail(column![profile_detail(p, &t.profile, lib.material(&t.material), None), linear_levels(p, l, lib, t)].spacing(6).into()));
                         }
                     }
                 }
@@ -422,12 +422,64 @@ pub(super) fn material_detail<'a>(p: Palette, l: Language, m: &Material) -> Elem
         Some(hatch) => column![super::libraries::tile_hatch_look(hatch, p, 60.0, super::libraries::HATCH_LOOK_SCALE), small(format!("{} · {}", m.key, hatch.key), p)].spacing(4).into(),
         None => column![material_hatch(p, m), small(m.key.clone(), p)].spacing(4).into(),
     };
-    // what is known of it, each with the level of detail it is filled in from
+    column![look, data_per_level(p, l, m.data(lang(l)))].spacing(6).into()
+}
+
+/// What is known of an item, each with the level of detail it is filled in from.
+fn data_per_level<'a>(p: Palette, l: Language, known: Vec<bim_library::detail::Datum>) -> Element<'a, Message> {
     let mut data = Column::new().spacing(2).push(small(l.text("Gegevens per detailniveau", "Data per level of detail").to_string(), p));
-    for datum in m.data(lang(l)) {
+    for datum in known {
         data = data.push(row![text(datum.from.number().to_string()).size(11).color(p.text_secondary).width(28), text(l.text(datum.nl, datum.en)).size(11).color(p.text_secondary).width(84), text(datum.value).size(11).color(p.text).width(Fill).wrapping(Wrapping::WordOrGlyph)].spacing(4));
     }
-    column![look, data].spacing(6).into()
+    data.into()
+}
+
+/// A linear type at each level of detail, side by side: at 200 the box its profile fits in,
+/// without a fill; above that its profile in its material's colour. Under them what is known
+/// of it, with the level each is filled in from.
+pub(super) fn linear_levels<'a>(p: Palette, l: Language, lib: &Library, t: &bim_library::LinearType) -> Element<'a, Message> {
+    use bim_library::detail::Detail;
+    let colour = lib.material(&t.material).map_or([95, 100, 110], |m| m.colour);
+    let size = t.profile.size();
+    let mut levels = iced::widget::Row::new().spacing(6);
+    for detail in Detail::ALL {
+        let rings = t.at(detail).rings(5e-4).unwrap_or_default();
+        let fill = if detail == Detail::D200 { Color::TRANSPARENT } else { rgb(colour) };
+        let look = canvas_widget(Outline { outer: rings.0, holes: rings.1, size: [size.x, size.y], fill, line: p.text, centred: true }).width(Fill).height(64);
+        let about = format!("{} {}", t.data_at(detail, &lib.materials, lang(l)).len(), l.text("gegevens", "data"));
+        levels = levels.push(column![text(detail.name()).size(11).color(p.text), look, small(about, p)].spacing(2).width(Fill));
+    }
+    column![small(l.text("Detailniveaus", "Levels of detail").to_string(), p), levels, data_per_level(p, l, t.data(&lib.materials, lang(l)))].spacing(3).into()
+}
+
+/// A system type at each level of detail, side by side, as a cut across its face with the
+/// exterior at the top: at 200 one band as deep as it reaches, above that its face and its
+/// layers in their hatches. Under them what is known of it, with the level each is filled in
+/// from.
+pub(super) fn system_levels<'a>(p: Palette, l: Language, lib: &Library, t: &SystemType) -> Element<'a, Message> {
+    use bim_library::detail::Detail;
+    let (interior, exterior) = t.extent();
+    let depth = exterior - interior;
+    let height = (depth * 300.0).clamp(24.0, 110.0) as f32;
+    let mut levels = iced::widget::Row::new().spacing(6);
+    for detail in Detail::ALL {
+        let look = canvas_widget(Section { bands: system_bands(t, lib, detail), depth, line: p.text, plain: detail == Detail::D200 }).width(Fill).height(height);
+        let about = format!("{} {}", t.data_at(detail, &lib.materials, lang(l)).len(), l.text("gegevens", "data"));
+        levels = levels.push(column![text(detail.name()).size(11).color(p.text), look, small(about, p)].spacing(2).width(Fill));
+    }
+    column![small(l.text("Detailniveaus", "Levels of detail").to_string(), p), levels, data_per_level(p, l, t.data(&lib.materials, lang(l)))].spacing(3).into()
+}
+
+/// The bands of a cut across system type `t` at `detail`, each with its hatch and its colour: a
+/// gap between two layers is air.
+fn system_bands(t: &SystemType, lib: &Library, detail: bim_library::detail::Detail) -> Vec<(f64, HatchKind, [u8; 3])> {
+    t.at(detail)
+        .iter()
+        .map(|band| match band.material.map(|key| lib.material(key)) {
+            Some(material) => (band.thickness, material.map_or(HatchKind::Generic, |m| m.hatch), material.map_or([175, 182, 195], |m| m.colour)),
+            None => (band.thickness, HatchKind::Air, [175, 182, 195]),
+        })
+        .collect()
 }
 
 /// A material's hatch (NEN 47) on a band, as a section through it shows it.
@@ -589,7 +641,7 @@ pub(super) fn system_detail<'a>(p: Palette, l: Language, lib: &Library, t: &Syst
     if !t.layers.is_empty() {
         drawn = drawn.push(system_cut(p, lib, t));
     }
-    drawn.push(list).into()
+    drawn.push(list).push(system_levels(p, l, lib, t)).into()
 }
 
 /// A look at a material on a tile: the hatch of a cut through it over a strip of its colour in the
@@ -674,28 +726,7 @@ fn elevation(t: &SystemType, lib: &Library, line: Color) -> Elevation {
 /// A section through a system type's layers, the exterior at the top: each face as thick as its
 /// deepest part, in its panels' hatch, and air where faces leave a gap.
 fn system_section(t: &SystemType, lib: &Library, line: Color) -> Section {
-    let mut faces: Vec<(f64, f64, &str)> = t
-        .faces()
-        .map(|(offset, _, members, panels)| {
-            let half = members.map_or(0.0, |m| m.depth).max(panels.thickness) / 2.0;
-            (offset + half, offset - half, panels.material.as_str())
-        })
-        .collect();
-    faces.sort_by(|a, b| b.0.total_cmp(&a.0));
-    let colour = |key: &str| lib.material(key).map_or([175, 182, 195], |m| m.colour);
-    let hatch = |key: &str| lib.material(key).map_or(HatchKind::Generic, |m| m.hatch);
-    let mut bands = Vec::new();
-    let mut at = faces.first().map_or(0.0, |f| f.0);
-    for (top, bottom, material) in faces {
-        if at - top > 1e-6 {
-            bands.push((at - top, HatchKind::Air, [175, 182, 195]));
-        }
-        let top = top.min(at);
-        if top - bottom > 1e-6 {
-            bands.push((top - bottom, hatch(material), colour(material)));
-            at = bottom;
-        }
-    }
+    let bands = system_bands(t, lib, bim_library::detail::Detail::D350);
     let depth = bands.iter().map(|b| b.0).sum();
     Section { bands, depth, line, plain: false }
 }

@@ -2145,6 +2145,10 @@
     "Export sheets": "Exportera blad",
     "Several sheets at once: as one PDF to print, or a PDF, DWG, DXF or SVG per sheet.": "Flera blad på en gång: en PDF att skriva ut, eller en PDF, DWG, DXF eller SVG per blad.",
     "One PDF is to print the series; per sheet asks for the folder and names each file after its sheet.": "En PDF är för att skriva ut serien; per blad frågar efter mappen och namnger varje fil efter sitt blad.",
-    "The model's drawings are still being read; in a moment you can.": "Modellens ritningar läses fortfarande; om en stund går det."
+    "The model's drawings are still being read; in a moment you can.": "Modellens ritningar läses fortfarande; om en stund går det.",
+    "Second moments": "Tröghetsmoment",
+    "Layer outside": "Skikt utsida",
+    "Layer inside": "Skikt insida",
+    "NL-SfB": "NL-SfB"
   }
 }

@@ -2145,6 +2145,10 @@
     "Export sheets": "Esporta tavole",
     "Several sheets at once: as one PDF to print, or a PDF, DWG, DXF or SVG per sheet.": "Più tavole insieme: un solo PDF da stampare, o un PDF, DWG, DXF o SVG per tavola.",
     "One PDF is to print the series; per sheet asks for the folder and names each file after its sheet.": "Un solo PDF serve a stampare la serie; per tavola chiede la cartella e nomina ogni file come la sua tavola.",
-    "The model's drawings are still being read; in a moment you can.": "I disegni del modello sono ancora in lettura; tra un momento si potrà."
+    "The model's drawings are still being read; in a moment you can.": "I disegni del modello sono ancora in lettura; tra un momento si potrà.",
+    "Second moments": "Momenti d'inerzia",
+    "Layer outside": "Strato esterno",
+    "Layer inside": "Strato interno",
+    "NL-SfB": "NL-SfB"
   }
 }

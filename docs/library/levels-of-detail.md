@@ -22,6 +22,10 @@ making something up (`Detail::up_to`).
 | **Drawn** | Its outline and no more: plain, black | Its layers, its parts, its joins to what is next to it | Every part, fixing and finish |
 | **A material** | The paper, or a fill | Its hatch | Its hatch, with all that is known of it |
 | **A build-up** | One band, as thick as its layers together | Its layers, each with its hatch | Its layers, each with its hatch and its data |
+| **A linear type** | The box its profile fits in (a circle where it is round), without a fill | Its profile, in its material | Its profile, with its data |
+| **A system type** | One band, as deep as it reaches across its face | Its face and its layers, each as deep as its deepest part, with a gap where two leave one | The same, with each layer's data |
+| **Data of a linear type** | Its name, what it is, its size | And its material, its profile, its NL-SfB code where it has one of its own | And its key, the area and second moments of its profile, its material's grade |
+| **Data of a system type** | Its name, its group, its depth | And its grid, its members, its panels, how many layers it has | And its key, its code, each layer with its material and depth |
 | **Data of a material** | Its name | And its hatch and its grade | And its colour, its key, the values of its strength class and their source |
 
 ## What is made and what is drawn
@@ -29,6 +33,10 @@ making something up (`Detail::up_to`).
 A lower level is made from a higher one where that can be done:
 
 - The outline of a build-up at 200 is made from its layers: their thicknesses together.
+- The box of a linear type at 200 is made from its profile: its width and its depth
+  (`LinearType::at`).
+- The band of a system type at 200 is made from its face and its layers: from the back of its
+  deepest part inside to the front of its deepest part outside (`SystemType::at`).
 - The data at a level is the data of the level above, less what that level adds.
 
 Where it cannot be made (the simple shape of a detailed object, a symbol for a fixture), it is
@@ -56,6 +64,8 @@ not of a material of the library keeps the hatch of its layer.
 - A view template names the level it asks (`ViewTemplate::level`: an outline is 200, one hatch
   and the layers 350, all of it 500), and its editor draws a sample wall at it. A drawing of the
   Modeller does not follow a template yet, so it shows every element as it did.
-- Linear types, system types and objects are the same at every level.
+- Objects are the same at every level.
+- The levels of a linear type and a system type are shown in the Library. A drawing of the
+  Modeller draws a member and a system as it did, at every level.
 - Views per level drawn by hand (3D, plan, section, elevation).
 - How the kernel shows a wall at a level (issue 302, with Quint).
