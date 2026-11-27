@@ -229,6 +229,10 @@ impl Reach {
 /// A clash as the list shows it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClashRow {
+    /// Who it is for, and what was said of it: kept with the decision from run to run, and
+    /// taken over by the issue made of it.
+    pub assigned: String,
+    pub note: String,
     pub rule: String,
     pub a: u64,
     pub b: u64,
@@ -842,6 +846,9 @@ pub enum Event {
     KindOf(&'static str),
     AssignTo(Choice),
     Decide(usize, Decision),
+    /// Who a clash is for, and what is said of it.
+    ClashFor(usize, Choice),
+    ClashNote(usize, String),
     ShowAccepted(bool),
     /// A section box around what is selected.
     SectionAround,
@@ -1147,7 +1154,7 @@ fn run_clashes(model: &Model, models: &[(String, std::ops::Range<usize>)], rules
                     decision: if rule.accept { Decision::Accepted } else { Decision::Open },
                     group: rows.len(),
                     copy: false,
-                    key: String::new(),
+                    key: String::new(), assigned: String::new(), note: String::new(),
                     fresh: false,
                     reach: Reach::Partly,
                 });
@@ -1220,7 +1227,7 @@ fn run_clashes(model: &Model, models: &[(String, std::ops::Range<usize>)], rules
                     decision: if rule.accept { Decision::Accepted } else { Decision::Open },
                     group: rows.len(),
                     copy: false,
-                    key: String::new(),
+                    key: String::new(), assigned: String::new(), note: String::new(),
                     fresh: false,
                     reach: Reach::Partly,
                 });
@@ -1231,8 +1238,13 @@ fn run_clashes(model: &Model, models: &[(String, std::ops::Range<usize>)], rules
         // a test between models leaves the pairs of one model out, when there is more than one
         let apart = rule.between_models && models.len() > 1;
         let skip = |i: usize, j: usize| apart && items[a[i]].model == items[b[j]].model;
-        let found = clash::clashes_but(&sa, if rule.within() { &sa } else { &sb }, rule.within(), rule.test(), &skip, cancel);
+        // a batch at a time, so the run stops when it has as many clashes as it keeps
+        let mut full = false;
+        clash::clashes_in_batches(&sa, if rule.within() { &sa } else { &sb }, rule.within(), rule.test(), &skip, cancel, &mut |found| {
         for c in found {
+            if rows.len() >= MOST_CLASHES {
+                break;
+            }
             let (ia, ib) = (&items[a[c.a]], &items[b[c.b]]);
             // a pair two tests find is one clash: it stays with the first
             // their classes may cross further than the test allows
@@ -1257,15 +1269,15 @@ fn run_clashes(model: &Model, models: &[(String, std::ops::Range<usize>)], rules
                 decision: if rule.accept { Decision::Accepted } else { Decision::Open },
                 group: rows.len(),
                 copy,
-                key: String::new(),
+                key: String::new(), assigned: String::new(), note: String::new(),
                 fresh: false,
                 reach: if copy { Reach::Through } else { Reach::of(c.kind, c.distance, (ia.solid.min, ia.solid.max), (ib.solid.min, ib.solid.max)) },
             });
-            if rows.len() >= MOST_CLASHES {
-                return rows;
-            }
         }
-        if cancel.load(Ordering::Relaxed) {
+        full = rows.len() >= MOST_CLASHES;
+        !full
+        });
+        if full || cancel.load(Ordering::Relaxed) {
             break;
         }
     }
@@ -1770,6 +1782,13 @@ impl App {
             Kind::Hidden => format!("{} {:.0}% {}", l.text("Het eerste element is vanaf", "The first element is out of sight from"), row.distance * 100.0, l.text("van de plekken in zijn ruimte niet te zien: het tweede staat ervoor", "of the places in its room: the second stands before it")),
             Kind::Unframed => format!("{} {}", l.text("Om het kozijn ontbreekt staal:", "Steel is missing around the frame:"), crate::collab::frame::words(row.distance as u8, l == Language::Dutch)),
         };
+        // whom the clash was given to and what was said of it go with the issue
+        if !row.assigned.is_empty() {
+            topic.assigned_to = row.assigned.clone();
+        }
+        if !row.note.trim().is_empty() {
+            topic.description = format!("{}\n\n{}", topic.description, row.note.trim());
+        }
         let reach = self.model.as_ref().and_then(|m| Some(m.element_bounds(row.a)?.radius().max(m.element_bounds(row.b)?.radius()))).unwrap_or(2.0);
         topic.viewpoints.push(self.collab_viewpoint_at(Vec3::from_array(row.at), reach.min(6.0), &[row.a, row.b]));
         topic
@@ -1793,7 +1812,7 @@ impl App {
             .collab
             .clashes
             .iter()
-            .map(|c| crate::collab::rules::ClashMemo { key: if c.key.is_empty() { self.collab_clash_key(c) } else { c.key.clone() }, decision: c.decision.key().into(), rule: c.rule.clone(), a: c.a_name.clone(), b: c.b_name.clone(), at: c.at })
+            .map(|c| crate::collab::rules::ClashMemo { key: if c.key.is_empty() { self.collab_clash_key(c) } else { c.key.clone() }, decision: c.decision.key().into(), rule: c.rule.clone(), a: c.a_name.clone(), b: c.b_name.clone(), at: c.at, assigned: c.assigned.clone(), note: c.note.clone() })
             .collect();
         if let Some(rules) = self.collab.rules_mut() {
             rules.clash_memory = memory;
@@ -1829,7 +1848,10 @@ impl App {
         found.extend(taken);
         for c in rows.iter_mut() {
             match known.get(c.key.as_str()).or_else(|| again.get(c.key.as_str())) {
-                Some(memo) => c.decision = Decision::parse(&memo.decision).unwrap_or_default(),
+                Some(memo) => {
+                    c.decision = Decision::parse(&memo.decision).unwrap_or_default();
+                    (c.assigned, c.note) = (memo.assigned.clone(), memo.note.clone());
+                }
                 None => c.fresh = compared,
             }
         }
@@ -1839,8 +1861,21 @@ impl App {
         self.collab.compared = compared;
         self.collab.resolved = memory.iter().filter(|m| !found.contains(&m.key)).cloned().collect();
         let date = crate::export::ifcx::timestamp();
+        let minute = |stamp: String| stamp.get(..16).unwrap_or(&stamp).replace('T', " ");
+        // the models it ran on, each with when its file was last written
+        let models = self
+            .models
+            .iter()
+            .filter(|e| e.visible)
+            .map(|e| {
+                let written = std::fs::metadata(&e.model.path).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
+                let name = e.model.path.file_name().map_or_else(|| e.model.path.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned());
+                (name, written.map_or(String::new(), |d| minute(crate::export::ifcx::timestamp_of(d.as_secs() as i64))))
+            })
+            .collect();
         let run = crate::collab::rules::ClashRun {
-            date: date.get(..16).unwrap_or(&date).replace('T', " "),
+            models,
+            date: minute(date),
             total: rows.len(),
             new: rows.iter().filter(|c| c.fresh).count(),
             resolved: self.collab.resolved.len(),
@@ -2716,6 +2751,17 @@ impl App {
             Event::Decide(k, decision) => {
                 if let Some(clash) = self.collab.clashes.get_mut(k) {
                     clash.decision = decision;
+                }
+            }
+            Event::ClashFor(k, person) => {
+                if let Some(clash) = self.collab.clashes.get_mut(k) {
+                    // picked again, the same person lets it go
+                    clash.assigned = if clash.assigned == person.1 { String::new() } else { person.1 };
+                }
+            }
+            Event::ClashNote(k, note) => {
+                if let Some(clash) = self.collab.clashes.get_mut(k) {
+                    clash.note = note;
                 }
             }
             Event::ShowAccepted(on) => self.collab.show_accepted = on,
@@ -4246,6 +4292,42 @@ impl App {
             .spacing(4)
             .align_y(Alignment::Center),
         );
+        // the clash picked, seen here without looking for it in the list: what it looks like,
+        // its two elements in the colours the view draws them in, and what is thought of it
+        if let Some((k, clash)) = state.clash.and_then(|k| Some((k, state.clashes.get(k)?))) {
+            let dot = |c: [u8; 3]| {
+                container(Space::new().width(9).height(9)).style(move |_| container::Style {
+                    background: Some(iced::Color::from_rgb8(c[0], c[1], c[2]).into()),
+                    border: iced::Border { radius: 4.5.into(), ..iced::Border::default() },
+                    ..container::Style::default()
+                })
+            };
+            let mut card = column![].spacing(6);
+            if let Some(tile) = state.clash_tiles.get(&clash.key) {
+                card = card.push(iced::widget::image(tile.clone()).width(Length::Fill).height(150).content_fit(iced::ContentFit::Contain));
+            }
+            card = card
+                .push(row![dot([214, 40, 40]), w::body(look, clash.a_name.clone())].spacing(6).align_y(Alignment::Center))
+                .push(row![dot([30, 100, 220]), w::body(look, clash.b_name.clone())].spacing(6).align_y(Alignment::Center));
+            let decide = |label: &'static str, d: Decision| {
+                let active = clash.decision == d;
+                w::button(look, label, if active { K::Primary } else { K::Secondary }, D::Compact, None, Some(go(Event::Decide(k, if active { Decision::Open } else { d }))))
+            };
+            card = card.push(
+                row![
+                    decide(l.text("Akkoord", "Accept"), Decision::Accepted),
+                    decide(l.text("Afwijzen", "Reject"), Decision::Rejected),
+                    w::button(look, l.text("Issue maken", "Make issue"), K::Secondary, D::Compact, None, Some(go(Event::IssueFromClash(k)))),
+                ]
+                .spacing(4)
+                .wrap(),
+            );
+            let whom = state.team.iter().find(|c| c.1 == clash.assigned).cloned();
+            card = card
+                .push(w::property_row(look, l.text("Voor", "For"), w::select(look, &state.team, whom, move |c: Choice| go(Event::ClashFor(k, c)), D::Compact)))
+                .push(w::text_field(look, l.text("Opmerking", "Remark"), &clash.note, Some(move |t: String| go(Event::ClashNote(k, t))), D::Compact, None));
+            list = list.push(container(card).padding(8).width(Length::Fill).style(move |_| site::card_style(look, true)));
+        }
         list = list.push(
             row![
                 w::button(look, l.text("Issues maken", "Make issues"), K::Secondary, D::Compact, None, Some(go(Event::IssuesFromClashes))),
@@ -4270,6 +4352,16 @@ impl App {
             );
         }
         let runs = state.rules().map(|r| r.clash_runs.as_slice()).unwrap_or(&[]);
+        if let Some(run) = runs.last() {
+            let mut about = column![w::secondary(look, format!("{} {}", l.text("Run van", "Run of"), run.date))].spacing(1);
+            for (name, written) in run.models.iter().take(12) {
+                about = about.push(w::secondary(look, if written.is_empty() { name.clone() } else { format!("{name} · {written}") }));
+            }
+            if run.models.len() > 12 {
+                about = about.push(w::secondary(look, format!("+ {}", run.models.len() - 12)));
+            }
+            list = list.push(about);
+        }
         if runs.len() > 1 {
             // the last runs as bars of how many clashes are open, the latest at the right
             let last: Vec<&crate::collab::rules::ClashRun> = runs.iter().rev().take(12).rev().collect();
@@ -4354,10 +4446,6 @@ impl App {
             let line = line.push(column![w::body(look, clash.a_name.clone()), w::secondary(look, format!("× {}", clash.b_name))].spacing(1).width(Length::Fill)).push(site::chip(look, &what, Some(tone)));
             let mut out = column![named(button(line).width(Length::Fill).padding([4, 6]).style(move |_, st| p.ribbon_button(picked, st)).on_press(go(Event::PickClash(k))), Node::new(Role::Row, format!("{} {}: {} × {}", l.text("Clash", "Clash"), k + 1, clash.a_name, clash.b_name)).selected(picked).value(clash.decision.key()))].spacing(4);
             if picked {
-                // the clash picked: its picture large
-                if let Some(tile) = tile {
-                    out = out.push(container(iced::widget::image(tile.clone()).width(Length::Fill).content_fit(iced::ContentFit::Contain)).padding(iced::Padding { left: 8.0, ..iced::Padding::ZERO }));
-                }
                 let decide = |label: &'static str, d: Decision| {
                     let active = clash.decision == d;
                     named(button(text(label).size(12)).padding([3, 8]).style(move |_, s| p.ribbon_button(active, s)).on_press(go(Event::Decide(k, if active { Decision::Open } else { d }))), Node::new(Role::ToggleButton, label).selected(active))
@@ -5170,7 +5258,7 @@ pub(crate) mod tests {
     }
 
     fn row(rule: &str, a: u64, b: u64, at: [f32; 3]) -> ClashRow {
-        ClashRow { rule: rule.into(), a, b, a_name: format!("E{a}"), b_name: format!("E{b}"), kind: Kind::Crossing, at, distance: 0.01, decision: Decision::Open, group: 0, copy: false, key: String::new(), fresh: false, reach: Reach::Partly, severity: Default::default() }
+        ClashRow { rule: rule.into(), a, b, a_name: format!("E{a}"), b_name: format!("E{b}"), kind: Kind::Crossing, at, distance: 0.01, decision: Decision::Open, group: 0, copy: false, key: String::new(), assigned: String::new(), note: String::new(), fresh: false, reach: Reach::Partly, severity: Default::default() }
     }
 
     #[test]
@@ -5292,6 +5380,32 @@ pub(crate) mod tests {
         app.collab_show_viewpoint(&saved);
         let restored = app.section.unwrap();
         assert!(app.section_on && restored.min.abs_diff_eq(section.min, 0.0001) && restored.max.abs_diff_eq(section.max, 0.0001));
+    }
+
+    #[test]
+    fn whom_a_clash_is_for_and_what_is_said_of_it_last_to_the_next_run_and_go_with_its_issue() {
+        let mut app = App::default();
+        app.set_model(Arc::new(two_blocks()));
+        let _ = app.collab_update(Event::Tab(Tab::Clashes));
+        let _ = app.collab_update(Event::Clashed(app.collab.run, vec![row("t", 1, 2, [1.15, 0.1, 1.15])]));
+        let _ = app.collab_update(Event::ClashFor(0, Choice(0, "Jan".into())));
+        let _ = app.collab_update(Event::ClashNote(0, "Sparing verplaatsen".into()));
+        // the run says when it was made
+        let run = app.collab.rules().unwrap().clash_runs.last().cloned().unwrap();
+        assert_eq!(run.date.len(), 16, "{run:?}");
+        // found again by the next run, it is still Jan's, with what was said
+        app.collab_remember();
+        let _ = app.collab_update(Event::Clashed(app.collab.run, vec![row("t", 1, 2, [1.15, 0.1, 1.15])]));
+        let clash = app.collab.clashes[0].clone();
+        assert_eq!((clash.assigned.as_str(), clash.note.as_str()), ("Jan", "Sparing verplaatsen"));
+        // and the issue made of it is his, and says it
+        let _ = app.collab_update(Event::IssueFromClash(0));
+        let topic = app.collab.issues.topics.last().unwrap();
+        assert_eq!(topic.assigned_to, "Jan");
+        assert!(topic.description.ends_with("Sparing verplaatsen"), "{}", topic.description);
+        // picked again, the same person lets it go
+        let _ = app.collab_update(Event::ClashFor(0, Choice(0, "Jan".into())));
+        assert!(app.collab.clashes[0].assigned.is_empty());
     }
 
     #[test]
