@@ -415,7 +415,8 @@ fn faces(s: &SystemDef) -> Vec<Face<'_>> {
         whole: false,
         division: Division::Equal,
         panel: (l.panels.thickness, Some(l.panels.material.as_str())),
-        lintel: None,
+        // a leaf of brickwork among the layers is carried over an opening as the type says
+        lintel: t.and_then(|t| t.lintel).filter(|_| l.members.as_ref().is_some_and(|m| m.framing.is_none()) && l.grid.pattern != Pattern::Stack),
         own: None,
     });
     std::iter::once(own).chain(layers).collect()
@@ -1035,7 +1036,7 @@ impl Line {
         let w = f.width();
         // brickwork is carried over an opening by a lintel: whole courses high, bearing either
         // side; it takes the place of the bricks and joints there, as an opening does
-        let lintels: Vec<Opening> = match f.lintel.filter(|_| f.framing.is_none() && row > LINEAR_TOLERANCE) {
+        let lintels: Vec<Opening> = match f.lintel.filter(|_| f.framing.is_none() && f.member.is_some() && row > LINEAR_TOLERANCE) {
             Some(rule) => openings
                 .iter()
                 .filter_map(|o| {
@@ -1721,6 +1722,40 @@ mod tests {
         // a curtain wall (not framed) is cut where an opening lies
         let curtain = SystemDef { openings: vec![window(1.0, 0.9, 1.0, 1.2)], ..system(3.6, 2.7) };
         assert!(parts(&curtain).is_ok());
+    }
+
+    #[test]
+    fn walls_of_several_leaves_and_a_floor_of_joists_are_made_leaf_by_leaf() {
+        let window = Opening { along: 1.5, sill: 0.9, width: 1.0, height: 1.2, framing: None };
+        let wall = |id: &str, openings: Vec<Opening>| SystemDef { openings, ..system(4.4, 2.5) }.typed_from(&Library::starter(), id).unwrap();
+        let count = |made: &[PartSolid], class: &str, material: &str| made.iter().filter(|p| p.class == class && p.material.as_deref() == Some(material)).count();
+        // a cavity wall: elements inside, wool boards, bricks outside, each leaf where it lies
+        // across the wall; a window is cut through all of them, a lintel over it in either leaf
+        let made = parts(&wall("system.cavity-wall-120", vec![window])).unwrap();
+        assert!(count(&made, "IfcPlate", "sand-lime") > 10 && count(&made, "IfcPlate", "mineral-wool") > 10 && count(&made, "IfcPlate", "brick") > 600);
+        assert_eq!(count(&made, "IfcBeam", "concrete"), 2);
+        // (the wall runs along x: across it is y, the outside to the right of its line)
+        let across = |material: &str| made.iter().filter(|p| p.material.as_deref() == Some(material)).flat_map(|p| p.solid.positions.iter().map(|q| q.y.abs())).fold((f64::INFINITY, 0.0_f64), |(lo, hi), y| (lo.min(y), hi.max(y)));
+        let (wool, brick) = (across("mineral-wool"), across("brick"));
+        assert!((wool.0 - 0.05).abs() < 1e-6 && (wool.1 - 0.17).abs() < 1e-6 && (brick.0 - 0.21).abs() < 1e-6 && (brick.1 - 0.31).abs() < 1e-6, "{wool:?} {brick:?}");
+        for p in &made {
+            let inside = p.solid.positions.iter().all(|q| q.x > 1.5 + 1e-6 && q.x < 2.5 - 1e-6 && q.z > 0.9 + 1e-6 && q.z < 2.1 - 1e-6);
+            assert!(!inside, "a part of {:?} in the window", p.material);
+        }
+        // a timber frame behind brickwork: the window framed in the frame, cut in the bricks
+        // with a lintel over it
+        let made = parts(&wall("system.timber-frame-140-brick", vec![window])).unwrap();
+        assert!(count(&made, "IfcMember", "timber") > 10 && count(&made, "IfcPlate", "brick") > 600);
+        assert_eq!(count(&made, "IfcBeam", "concrete"), 1);
+        // a floor of joists: joists at 400 over 4.4 m, plywood on them, gypsum board under them
+        let generic = SystemDef { start: DVec2::ZERO, end: DVec2::new(4.4, 0.0), base: 3.0, height: 4.8, ..system(4.4, 4.8) };
+        let floor = generic.laid(Library::starter().system_type("system.timber-floor-220").unwrap()).unwrap();
+        let made = parts(&floor).unwrap();
+        let joists = made.iter().filter(|p| p.class == "IfcMember" && p.material.as_deref() == Some("timber")).filter(|p| { let (lo, hi) = p.solid.bounds(); hi.y - lo.y > 4.0 }).count();
+        assert_eq!(joists, 12);
+        assert!(count(&made, "IfcPlate", "plywood") >= 8 && count(&made, "IfcPlate", "gypsum-board") >= 4);
+        let (top, bottom) = made.iter().map(|p| p.solid.bounds()).fold((f64::NEG_INFINITY, f64::INFINITY), |(t, b), (lo, hi)| (t.max(hi.z), b.min(lo.z)));
+        assert!((top - bottom - (0.018 + 0.22 + 0.0125)).abs() < 1e-6, "{top} {bottom}");
     }
 
     #[test]

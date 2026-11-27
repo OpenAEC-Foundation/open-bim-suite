@@ -729,9 +729,22 @@ impl SystemType {
                 Some(board) => format!("{} {}×{} {members}", capital(material(&board.panels.material)), under.len(), mm(board.panels.thickness)),
                 None => capital(members),
             }
+        } else if self.group == SystemGroup::Floor && self.members.width >= 0.03 {
+            // a floor of joists by its joists ("Hout 45×220 h.o.h. 400 …"): a joint between
+            // slabs is far narrower
+            capital(format!("{} {}×{} {spacing} {}", material(&self.members.material), mm(self.members.width), mm(self.members.depth), mm(self.grid.bay)))
         } else {
             format!("{} {} {}×{}", capital(material(&self.panels.material)), mm(self.panels.thickness), mm(self.grid.bay), mm(self.grid.row))
         };
+        // masonry with more outside it (a cavity wall) also by those layers, from the inside
+        // out, but for the cavity ("… minerale wol 120 metselwerk 100")
+        if self.group == SystemGroup::Masonry {
+            let mut outside: Vec<&SystemLayer> = self.layers.iter().filter(|l| l.offset > 0.0 && l.panels.material != "air").collect();
+            outside.sort_by(|a, b| a.offset.total_cmp(&b.offset));
+            for l in outside {
+                name = format!("{name} {} {}", material(&l.panels.material), mm(l.panels.thickness));
+            }
+        }
         // a metal stud partition also by its lining: the boards on one face ("2×12.5")
         if self.group == SystemGroup::MetalStud {
             let face: Vec<&SystemLayer> = self.layers.iter().filter(|l| l.offset > 0.0).collect();
@@ -811,6 +824,43 @@ pub fn starter() -> Vec<SystemType> {
         t.layers.push(SystemLayer { offset: out + cavity / 2.0, grid: Grid::new(0.6, 50.0, Stack), members: Some(battens), panels: Panels::new("air", cavity) });
         t.layers.push(SystemLayer { offset: out + cavity + board / 2.0, grid: Grid::new(4.8, 0.13, RunningBond), members: None, panels: Panels::new("timber-cladding", board) });
         t
+    };
+    // that frame behind a leaf of brickwork: over its membrane a cavity of 40 and a half-brick
+    // leaf in stretcher bond, carried over an opening by a lintel
+    let brick_clad = |id: &str, depth: f64| {
+        let mut t = timber_frame(id, depth, 0.6);
+        let (membrane, cavity, leaf) = (0.0005, 0.04, 0.1);
+        let out = depth / 2.0 + membrane;
+        t.layers.push(boards(out + cavity / 2.0, "air", cavity, 50.0, 50.0));
+        t.layers.push(SystemLayer { offset: out + cavity + leaf / 2.0, grid: Grid::new(0.22, 0.0625, RunningBond), members: Some(Members::new(0.01, 0.09, "mortar")), panels: Panels::new("brick", leaf) });
+        t.lintel = Some(Lintel::BRICKWORK);
+        t
+    };
+    // a cavity wall, from the inside out: a leaf of sand-lime elements 100 thick, glued; mineral
+    // wool boards of `insulation`; a cavity of 40; a half-brick leaf in stretcher bond. Both
+    // leaves are carried over an opening by a lintel.
+    let cavity_wall = |insulation: f64| {
+        let (inner, cavity, leaf) = (0.1, 0.04, 0.1);
+        SystemType {
+            layers: vec![
+                boards(inner / 2.0 + insulation / 2.0, "mineral-wool", insulation, 0.6, 1.2),
+                boards(inner / 2.0 + insulation + cavity / 2.0, "air", cavity, 50.0, 50.0),
+                SystemLayer { offset: inner / 2.0 + insulation + cavity + leaf / 2.0, grid: Grid::new(0.22, 0.0625, RunningBond), members: Some(Members::new(0.01, 0.09, "mortar")), panels: Panels::new("brick", leaf) },
+            ],
+            lintel: Some(Lintel::BRICKWORK),
+            ..upright(&format!("system.cavity-wall-{}", (insulation * 1000.0).round()), Masonry, Grid::new(0.9, 0.6465, RunningBond), Members::new(0.003, inner, "glue"), Panels::new("sand-lime", inner))
+        }
+    };
+    // a timber joist floor: joists 45 wide and `depth` deep at 400 with a trimmer across their
+    // ends every 4.8 m, mineral wool between them, plywood 18 on them and a gypsum board
+    // ceiling 12.5 under them
+    let joist_floor = |depth: f64| {
+        let (deck, ceiling) = (0.018, 0.0125);
+        SystemType {
+            lying: Some(3.0),
+            layers: vec![boards(depth / 2.0 + deck / 2.0, "plywood", deck, 0.6, 2.4), boards(-(depth / 2.0 + ceiling / 2.0), "gypsum-board", ceiling, 1.2, 2.4)],
+            ..upright(&format!("system.timber-floor-{}", (depth * 1000.0).round()), Floor, Grid::new(0.4, 4.8, Stack), Members::new(0.045, depth, "timber"), Panels::new("mineral-wool", depth))
+        }
     };
     // a load-bearing steel frame, from the outside in: a breather membrane; PIR boards of 50 over
     // the frame, against the cold bridge of its studs; the frame, C studs 50 wide and `depth` deep
@@ -911,6 +961,12 @@ pub fn starter() -> Vec<SystemType> {
         timber_frame("system.timber-frame-235-610", 0.235, 0.61),
         clad("system.timber-frame-140-clad", 0.14),
         clad("system.timber-frame-184-clad", 0.184),
+        brick_clad("system.timber-frame-140-brick", 0.14),
+        brick_clad("system.timber-frame-184-brick", 0.184),
+        cavity_wall(0.12),
+        cavity_wall(0.15),
+        joist_floor(0.22),
+        joist_floor(0.27),
         internal,
         steel_frame(0.1),
         steel_frame(0.15),
@@ -976,7 +1032,7 @@ mod tests {
     #[test]
     fn the_starter_types_check_and_have_names_of_their_own() {
         let types = starter();
-        assert_eq!(types.len(), 48);
+        assert_eq!(types.len(), 54);
         for t in &types {
             t.check(&materials()).unwrap_or_else(|e| panic!("{}: {e}", t.id));
             // a floor or a ceiling lies, the others stand
