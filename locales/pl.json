@@ -2161,6 +2161,10 @@
     "elements added to the package": "elementów dodano do pakietu",
     "Kept as a view of the rule set (Colours tab).": "Zachowano jako widok zestawu reguł (karta Kolory).",
     "The package has no elements in the loaded models yet.": "Pakiet nie ma jeszcze elementów w wczytanych modelach.",
-    "quantities": "ilości"
+    "quantities": "ilości",
+    "Second moments": "Momenty bezwładności",
+    "Layer outside": "Warstwa zewnętrzna",
+    "Layer inside": "Warstwa wewnętrzna",
+    "NL-SfB": "NL-SfB"
   }
 }

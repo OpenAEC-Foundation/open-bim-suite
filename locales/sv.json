@@ -2161,6 +2161,10 @@
     "elements added to the package": "element tillagda i paketet",
     "Kept as a view of the rule set (Colours tab).": "Sparad som vy i regeluppsättningen (fliken Färger).",
     "The package has no elements in the loaded models yet.": "Paketet har ännu inga element i de inlästa modellerna.",
-    "quantities": "mängder"
+    "quantities": "mängder",
+    "Second moments": "Tröghetsmoment",
+    "Layer outside": "Skikt utsida",
+    "Layer inside": "Skikt insida",
+    "NL-SfB": "NL-SfB"
   }
 }

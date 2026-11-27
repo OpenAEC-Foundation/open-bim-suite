@@ -949,7 +949,7 @@ impl App {
             }
             Item::Linear(shelf, id) => {
                 let library = self.shelf(*shelf);
-                library.linear_type(id).map(|t| (library.linear_name(id, lang).unwrap_or_default(), profile_detail(p, &t.profile, library.material(&t.material), Some(t.profile.ifc().0)), Some((copy_label, Message::Profile(ProfileMessage::Copy(*shelf, id.clone()))))))
+                library.linear_type(id).map(|t| (library.linear_name(id, lang).unwrap_or_default(), column![profile_detail(p, &t.profile, library.material(&t.material), Some(t.profile.ifc().0)), super::library::linear_levels(p, l, library, t)].spacing(6).into(), Some((copy_label, Message::Profile(ProfileMessage::Copy(*shelf, id.clone()))))))
             }
             Item::System(shelf, id) => {
                 let library = self.shelf(*shelf);
@@ -1862,6 +1862,36 @@ mod tests {
         let (shelf, graded) = [Shelf::General, Shelf::Netherlands].into_iter().find_map(|shelf| app.shelf(shelf).materials.iter().find(|m| m.class().is_some()).map(|m| (shelf, m))).expect("a material with a strength class");
         let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 900.0), app.look_pane(palette, l, &Item::Material(shelf, graded.key.clone())));
         assert!(pane.find("Data per level of detail").is_ok() && pane.find("Strength class").is_ok() && pane.find("Source").is_ok() && pane.find("Grade").is_ok());
+    }
+
+    #[test]
+    fn a_linear_type_and_a_system_type_show_their_levels_of_detail() {
+        let app = App::default();
+        let l = Language::English;
+        let palette = app.theme.palette();
+        // a linear type: the three levels side by side, and its data with the level of each
+        let beam = general().linear_types.first().expect("a linear type");
+        {
+            let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 1200.0), app.look_pane(palette, l, &Item::Linear(Shelf::General, beam.id.clone())));
+            assert!(pane.find("Levels of detail").is_ok() && pane.find("LOD 200").is_ok() && pane.find("LOD 350").is_ok() && pane.find("LOD 500").is_ok());
+            assert!(pane.find("3 data").is_ok() && pane.find("Data per level of detail").is_ok());
+            for known in ["Kind", "Size", "Material", "Profile", "Key"] {
+                assert!(pane.find(known).is_ok(), "{known}");
+            }
+            assert!(pane.find(beam.id.as_str()).is_ok());
+        }
+        // a system type with layers: the same, as a cut across its face
+        let layered = general().system_types.iter().find(|t| t.layers.len() >= 3).expect("a system with layers");
+        {
+            let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 2400.0), app.look_pane(palette, l, &Item::System(Shelf::General, layered.id.clone())));
+            assert!(pane.find("Levels of detail").is_ok() && pane.find("LOD 200").is_ok() && pane.find("LOD 500").is_ok() && pane.find("3 data").is_ok() && pane.find("7 data").is_ok());
+            for known in ["Group", "Depth", "Panels", "Layers", "Key"] {
+                assert!(pane.find(known).is_ok(), "{known}");
+            }
+        }
+        // in Dutch the data are named in Dutch
+        let mut pane = crate::app::test_ui_of(iced::Size::new(340.0, 1200.0), app.look_pane(palette, Language::Dutch, &Item::Linear(Shelf::General, beam.id.clone())));
+        assert!(pane.find("Detailniveaus").is_ok() && pane.find("3 gegevens").is_ok() && pane.find("Maat").is_ok() && pane.find("Sleutel").is_ok());
     }
 
     #[test]

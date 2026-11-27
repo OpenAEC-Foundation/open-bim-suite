@@ -2161,6 +2161,10 @@
     "elements added to the package": "éléments ajoutés au lot",
     "Kept as a view of the rule set (Colours tab).": "Gardé comme vue du jeu de règles (onglet Couleurs).",
     "The package has no elements in the loaded models yet.": "Le lot n'a pas encore d'éléments dans les modèles chargés.",
-    "quantities": "quantités"
+    "quantities": "quantités",
+    "Second moments": "Moments quadratiques",
+    "Layer outside": "Couche extérieure",
+    "Layer inside": "Couche intérieure",
+    "NL-SfB": "NL-SfB"
   }
 }

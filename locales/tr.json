@@ -2161,6 +2161,10 @@
     "elements added to the package": "eleman pakete eklendi",
     "Kept as a view of the rule set (Colours tab).": "Kural setinin görünümü olarak saklandı (Renkler sekmesi).",
     "The package has no elements in the loaded models yet.": "Paketin yüklü modellerde henüz elemanı yok.",
-    "quantities": "miktarlar"
+    "quantities": "miktarlar",
+    "Second moments": "Atalet momentleri",
+    "Layer outside": "Dış katman",
+    "Layer inside": "İç katman",
+    "NL-SfB": "NL-SfB"
   }
 }
