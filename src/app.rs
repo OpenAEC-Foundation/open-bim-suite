@@ -380,6 +380,8 @@ pub struct App {
     pub grid_heads_hidden: bool,
     pub grid_dims: bool,
     pub levels_3d: bool,
+    /// A parallel view cuts the model at the eye when zoomed in (`Camera::cut_at_eye`).
+    pub front_cut: bool,
     /// Which heads are seen (per grid, its two ends), and for what view they were worked out.
     pub(crate) heads_seen: (Option<(Camera, u64, (f32, f32), usize, usize)>, Vec<[bool; 2]>),
     /// As seen: each dimension between the grids, and each level's two marks.
@@ -852,6 +854,8 @@ pub enum Message {
     ToggleGridHeadsHidden,
     ToggleGridDims,
     ToggleLevels3d,
+    /// A parallel view cuts the model at the eye, or not.
+    ToggleFrontCut,
     /// Open or close the bar's Export button.
     ExportMenu(bool),
     /// Export the drawing of the view or sheet shown in this format.
@@ -1277,6 +1281,7 @@ impl Default for App {
             grid_heads_hidden: true,
             grid_dims: false,
             levels_3d: false,
+            front_cut: false,
             heads_seen: (None, Vec::new()),
             marks_seen: (Vec::new(), Vec::new()),
             views_3d_key: Vec::new(),
@@ -1703,6 +1708,19 @@ impl App {
         camera
     }
 
+    /// Keeps the depth drawn reaching the whole model from wherever the view looks. The near and
+    /// far planes hang on the radius of what was framed last (a selection, a view, a clash) about
+    /// the point looked at: zoomed in on that, the rest of the model was cut away.
+    fn keep_reach(&mut self) {
+        self.camera.cut_at_eye = self.front_cut;
+        if let Some(b) = self.framing_bounds() {
+            let reach = b.radius() + self.camera.target.distance(Vec3::from_array(b.center()));
+            if reach.is_finite() {
+                self.camera.scene_radius = self.camera.scene_radius.max(reach);
+            }
+        }
+    }
+
     /// What fitting the view frames (world space): the model, without a few small things that
     /// stand far from the rest of it at rest (`ExplodeIndex::framed`). They stay in the model;
     /// zooming to them shows them.
@@ -1924,6 +1942,7 @@ impl App {
         app.measure.units = self.measure.units.clone();
         // how the 3D view draws is set for the app, not for a project
         (app.ambient, app.grid_heads_hidden, app.grid_dims, app.levels_3d) = (self.ambient, self.grid_heads_hidden, self.grid_dims, self.levels_3d);
+        app.front_cut = self.front_cut;
         app.point_size = self.point_size;
         app.cloud_depth = self.cloud_depth;
         app.cloud_color = self.cloud_color;
@@ -2234,6 +2253,7 @@ impl App {
         self.step_typing = self.typing_of(&message);
         self.look_at_setup();
         let task = self.handle(message);
+        self.keep_reach();
         if let Some(before) = before.filter(|b| *b != self.view_state()) {
             self.history.record(before);
             self.note_step(false);
@@ -3098,6 +3118,7 @@ impl App {
             Message::ToggleGridHeadsHidden => self.grid_heads_hidden = !self.grid_heads_hidden,
             Message::ToggleGridDims => self.grid_dims = !self.grid_dims,
             Message::ToggleLevels3d => self.levels_3d = !self.levels_3d,
+            Message::ToggleFrontCut => self.front_cut = !self.front_cut,
             Message::ExportMenu(open) => self.export_menu = open,
             Message::ExportDrawing(format) => {
                 self.export_menu = false;
@@ -3287,6 +3308,16 @@ impl App {
                 }
             }
             Message::Pressed(fingers) => self.fingers = fingers,
+            Message::Tick if crate::frame_log::spin() => {
+                let (w, h) = self.viewport_size;
+                let (zoom, pan) = (self.sheet_zoom, self.sheet_pan);
+                return self.update(match crate::frame_log::spin_step() {
+                    (true, way) if self.active_doc_sheet.is_some() => Message::NavigateSheet { zoom: zoom * (1.0 + 0.01 * f64::from(way)), pan },
+                    (false, way) if self.active_doc_sheet.is_some() => Message::NavigateSheet { zoom, pan: [pan[0] + 3.0 * f64::from(way), pan[1] + f64::from(way)] },
+                    (true, way) => Message::Navigate(Navigate::Zoom { steps: way * 0.05, x: w / 2.0, y: h / 2.0, width: w, height: h }),
+                    (false, way) => Message::Navigate(Navigate::Pan { dx: way * 3.0, dy: way, height: h }),
+                });
+            }
             Message::Tick => {
                 self.walk_frame(Instant::now());
                 if let Some((from, to, start)) = self.anim {
@@ -3517,6 +3548,7 @@ impl App {
             || self.hover_request.is_some()
             || self.heads_stale()
             || self.walking.any()
+            || crate::frame_log::spin()
         {
             window::frames().map(|_| Message::Tick)
         } else {
@@ -5033,7 +5065,11 @@ impl App {
         let clean = self.collab.picturing();
         #[cfg(not(all(feature = "validator", not(target_arch = "wasm32"))))]
         let clean = false;
+        // the dimensions and texts of the view shown in its tab; on paper it covers the scene
+        let showing = self.model.is_some() && !matches!(self.status, Status::Loading { .. });
+        let marks = self.marks_layer(p, l).filter(|_| showing);
         let settings = RenderSettings {
+            covered: self.drawing_on_paper && marks.is_some(),
             mode: self.mode,
             grid: self.grid && !clean,
             background: srgb3(p.viewport),
@@ -5132,8 +5168,13 @@ impl App {
                 .align_right(Fill)
                 .align_top(Fill)
         });
-        // a view's tab keeps its box without the handles: its crop is set on the sheet
-        let section = self.active_section().filter(|_| overlay.is_none() && self.shown_view().is_none() && !clean).map(|section| {
+        // a view's tab keeps its box without the handles: its crop is set on the sheet; so does
+        // the box that shows a clash, where they stand in front of what is looked at
+        #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
+        let clash_box = self.collab.clash.is_some() || self.collab.open_group.is_some();
+        #[cfg(not(all(feature = "validator", not(target_arch = "wasm32"))))]
+        let clash_box = false;
+        let section = self.active_section().filter(|_| overlay.is_none() && self.shown_view().is_none() && !clean && !clash_box).map(|section| {
             canvas(SectionOverlay { section, view_proj: self.camera.view_proj(self.aspect()) }).width(Fill).height(Fill)
         });
         let plane = self.plane.zip(self.world_bounds()).filter(|_| overlay.is_none() && !self.plane_picking).map(|(plane, world)| {
@@ -5302,8 +5343,7 @@ impl App {
             .height(Fill)
         });
         let boxed = self.box_select.map(|(from, to)| canvas(crate::viewport::box_select::BoxOverlay { from, to }).width(Fill).height(Fill));
-        // the dimensions and texts of the view shown in its tab
-        let marks = self.marks_layer(p, l).filter(|_| overlay.is_none()).map(|m| m.widget());
+        let marks = marks.filter(|_| overlay.is_none()).map(|m| m.widget());
         let menu = self.context_menu.filter(|_| overlay.is_none()).map(|at| self.context_menu_view(p, l, at));
         // edit mode's points, else the selected element's grips: one slot, so a drag that begins on
         // a grip keeps its overlay

@@ -75,7 +75,23 @@ pub fn clashes(first: &[Solid], second: &[Solid], within: bool, test: Test, canc
 
 /// As [`clashes`], leaving out the pairs `skip` names (by their places in `first` and `second`)
 /// before they are tested: elements of one model, say, in a test between models.
-pub fn clashes_but(first: &[Solid], second: &[Solid], within: bool, test: Test, skip: &dyn Fn(usize, usize) -> bool, cancel: &AtomicBool) -> Vec<Clash> {
+pub fn clashes_but(first: &[Solid], second: &[Solid], within: bool, test: Test, skip: &(dyn Fn(usize, usize) -> bool + Sync), cancel: &AtomicBool) -> Vec<Clash> {
+    let mut out = Vec::new();
+    clashes_in_batches(first, second, within, test, skip, cancel, &mut |found| {
+        out.extend(found);
+        true
+    });
+    out
+}
+
+/// How many elements of the first set each thread takes at a time.
+const BATCH: usize = 64;
+
+/// As [`clashes_but`], handing the clashes over a batch of the first set at a time, in the order
+/// of that set; `take` answers whether to go on, so a run that keeps only so many clashes stops
+/// when it has them. The elements of a batch are tested on all the processor's cores at once:
+/// what is handed over and its order are the same as on one.
+pub fn clashes_in_batches(first: &[Solid], second: &[Solid], within: bool, test: Test, skip: &(dyn Fn(usize, usize) -> bool + Sync), cancel: &AtomicBool, take: &mut dyn FnMut(Vec<Clash>) -> bool) {
     let reach = match test {
         Test::Hard { .. } => 0.0,
         Test::Clearance { distance } => distance.max(0.0),
@@ -84,11 +100,10 @@ pub fn clashes_but(first: &[Solid], second: &[Solid], within: bool, test: Test, 
     let mut order: Vec<usize> = (0..second.len()).collect();
     order.sort_by(|&i, &j| second[i].min.x.total_cmp(&second[j].min.x));
     let widest = second.iter().map(|s| s.max.x - s.min.x).fold(0.0f32, f32::max);
-    let mut out = Vec::new();
-    for (i, a) in first.iter().enumerate() {
-        if cancel.load(Ordering::Relaxed) {
-            break;
-        }
+    let order = &order;
+    let of = move |i: usize| -> Vec<Clash> {
+        let a = &first[i];
+        let mut out = Vec::new();
         // those that can start before `a` ends and end after it starts
         let from = order.partition_point(|&j| second[j].min.x < a.min.x - reach - widest);
         for &j in order[from..].iter().take_while(|&&j| second[j].min.x <= a.max.x + reach) {
@@ -106,8 +121,30 @@ pub fn clashes_but(first: &[Solid], second: &[Solid], within: bool, test: Test, 
             };
             out.extend(found.map(|(kind, at, distance)| Clash { a: i, b: j, kind, at, distance }));
         }
+        out
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(32);
+    #[cfg(target_arch = "wasm32")]
+    let threads = 1;
+    let mut start = 0;
+    while start < first.len() && !cancel.load(Ordering::Relaxed) {
+        let end = (start + BATCH * threads).min(first.len());
+        let found: Vec<Clash> = if threads > 1 && end - start > BATCH {
+            let of = &of;
+            // each thread a run of the batch; their answers in the order of the runs
+            std::thread::scope(|scope| {
+                let runs: Vec<_> = (start..end).step_by(BATCH).map(|from| scope.spawn(move || (from..(from + BATCH).min(end)).flat_map(of).collect::<Vec<Clash>>())).collect();
+                runs.into_iter().flat_map(|run| run.join().unwrap_or_default()).collect()
+            })
+        } else {
+            (start..end).flat_map(&of).collect()
+        };
+        if !take(found) {
+            return;
+        }
+        start = end;
     }
-    out
 }
 
 /// Whether the straight line from `p` to `q` goes through the surface of a solid: something
@@ -394,6 +431,31 @@ mod tests {
 
     fn run(a: Solid, b: Solid, test: Test) -> Vec<Clash> {
         clashes(&[a], &[b], false, test, &AtomicBool::new(false))
+    }
+
+    #[test]
+    fn many_elements_clash_as_one_by_one_and_a_run_stops_when_it_has_enough() {
+        // 5000 posts in a row, each through the next: more than the cores take in one go
+        // (every other one a little aside and higher, so their faces cross instead of lying in one plane)
+        let posts: Vec<Solid> = (0..5000)
+            .map(|k| {
+                let (x, off) = (k as f32 * 0.5, (k % 2) as f32 * 0.1);
+                block([x, off, off], [x + 0.7, off + 0.3, off + 3.0])
+            })
+            .collect();
+        let hard = Test::Hard { tolerance: 0.002 };
+        let found = clashes(&posts, &posts, true, hard, &AtomicBool::new(false));
+        // each with the one after it, in the order of the row
+        assert_eq!(found.len(), 4999);
+        assert!(found.iter().enumerate().all(|(k, c)| (c.a, c.b) == (k, k + 1)), "{:?}", &found[..3]);
+        // asked to stop at a hundred: no more than the batch that reached it is tested
+        let (mut kept, mut batches) = (0, 0);
+        clashes_in_batches(&posts, &posts, true, hard, &|_, _| false, &AtomicBool::new(false), &mut |found| {
+            kept += found.len();
+            batches += 1;
+            kept < 100
+        });
+        assert!(kept >= 100 && kept < 4999 && batches >= 1, "{kept} in {batches}");
     }
 
     #[test]

@@ -632,11 +632,14 @@ fn paper_canvas<'a>(mut drawing: PaperDrawing, p: Palette, fit: Option<Language>
                 None => iced::widget::Space::new().into(),
             }
         };
-        if images.is_empty() {
-            return crate::clip::clip(iced::widget::stack![canvas_widget(drawing).width(Fill).height(Fill), fit_button()]);
-        }
         let paper = drawing.sheet.paper;
         let (zoom, pan) = (drawing.zoom, drawing.pan);
+        let drawing = std::rc::Rc::new(drawing);
+        let under = crate::kept_canvas::moved(PaperUnder(drawing.clone()), None);
+        let drawing = PaperTop(drawing);
+        if images.is_empty() {
+            return crate::clip::clip(iced::widget::stack![under, canvas_widget(drawing).width(Fill).height(Fill), fit_button()]);
+        }
         let background = crate::raster::Backdrop(move |frame: &mut Frame, bounds: Rectangle| {
             let fit = Fit::of(paper, bounds.size()).navigated(bounds.size(), zoom, pan);
             let at = fit.point([0.0, paper[1]]);
@@ -646,7 +649,7 @@ fn paper_canvas<'a>(mut drawing: PaperDrawing, p: Palette, fit: Option<Language>
             frame.fill_rectangle(at, size, if p.dark { Color::from_rgb(0.16, 0.16, 0.18) } else { Color::WHITE });
             for image in &images { image.draw(frame, |q| Some(fit.point(q))); }
         });
-        crate::clip::clip(iced::widget::stack![canvas_widget(background).width(Fill).height(Fill), canvas_widget(drawing).width(Fill).height(Fill), fit_button()])
+        crate::clip::clip(iced::widget::stack![canvas_widget(background).width(Fill).height(Fill), under, canvas_widget(drawing).width(Fill).height(Fill), fit_button()])
     }
 }
 
@@ -1079,6 +1082,134 @@ struct PaperState {
     over_field: Option<bim_library::house::Field>,
 }
 
+/// The sheet's canvas as its tab shows it: the one drawing for the layer kept under it and for
+/// the canvas over that.
+struct PaperTop(std::rc::Rc<PaperDrawing>);
+
+impl canvas::Program<Message> for PaperTop {
+    type State = PaperState;
+
+    fn update(&self, state: &mut PaperState, event: &iced::Event, bounds: Rectangle, cursor: mouse::Cursor) -> Option<canvas::Action<Message>> {
+        self.0.update(state, event, bounds, cursor)
+    }
+
+    fn draw(&self, state: &PaperState, renderer: &iced::Renderer, theme: &iced::Theme, bounds: Rectangle, cursor: mouse::Cursor) -> Vec<canvas::Geometry> {
+        self.0.draw(state, renderer, theme, bounds, cursor)
+    }
+
+    fn mouse_interaction(&self, state: &PaperState, bounds: Rectangle, cursor: mouse::Cursor) -> mouse::Interaction {
+        self.0.mouse_interaction(state, bounds, cursor)
+    }
+}
+
+/// What of a sheet takes time to draw and changes least: its paper, and its views' filled
+/// regions and cuts, hatched and in their lines. Kept under the sheet's canvas while the sheet
+/// is only moved or zoomed.
+struct PaperUnder(std::rc::Rc<PaperDrawing>);
+
+impl crate::kept_canvas::Drawing for PaperUnder {
+    fn name(&self) -> &'static str {
+        "PaperCuts"
+    }
+
+    fn key(&self, _size: Size) -> u64 {
+        use std::fmt::Write as _;
+        let d = &self.0;
+        let mut rest = format!("{:?}{}{}{:?}{}", d.sheet.paper, d.palette.dark, d.paper_shows(), d.block.bounds, d.block.polygons.is_empty());
+        for (i, view) in d.sheet.views.iter().enumerate() {
+            let placed = d.placed.get(i);
+            let _ = write!(rest, "{:?}{:?}{:?}", view, d.middle(i), placed.map(|p| (&p.fills, p.cut.as_ref().map(Arc::as_ptr), p.crop, &p.rules)));
+        }
+        crate::kept_canvas::key(&[], &rest)
+    }
+
+    fn lie(&self, size: Size) -> Option<[f32; 3]> {
+        let fit = Fit::of(self.0.sheet.paper, size).navigated(size, self.0.zoom, self.0.pan);
+        Some([fit.scale as f32, fit.left as f32, fit.top as f32])
+    }
+
+    fn draw(&self, frame: &mut Frame, size: Size) {
+        self.0.draw_under(frame, Fit::of(self.0.sheet.paper, size).navigated(size, self.0.zoom, self.0.pan));
+    }
+}
+
+impl PaperDrawing {
+    /// The sheet shows its own paper: no picture lies under it that a canvas below draws on its.
+    fn paper_shows(&self) -> bool {
+        self.sheet.background.is_none() && self.placed.iter().all(|v| v.image.is_none())
+    }
+
+    /// See [`PaperUnder`].
+    fn draw_under(&self, frame: &mut Frame, fit: Fit) {
+        let p = self.palette;
+        let rect = |lo: [f64; 2], hi: [f64; 2]| {
+            let a = fit.point([lo[0], hi[1]]);
+            let b = fit.point([hi[0], lo[1]]);
+            (a, Size::new(b.x - a.x, b.y - a.y))
+        };
+        let ink = if p.dark { Color::from_rgb(0.9, 0.9, 0.92) } else { Color::from_rgb(0.08, 0.08, 0.1) };
+        let [w, h] = self.sheet.paper;
+        if self.paper_shows() {
+            let (at, size) = rect([0.0, 0.0], [w, h]);
+            frame.fill_rectangle(Point::new(at.x + 3.0, at.y + 3.0), size, Color { a: 0.12, ..Color::BLACK });
+            frame.fill_rectangle(at, size, if p.dark { Color::from_rgb(0.16, 0.16, 0.18) } else { Color::WHITE });
+        }
+        if self.sheet.background.is_none() && !self.block.polygons.is_empty() {
+            let [a, b] = self.block.bounds;
+            let (at, size) = rect(a, b);
+            frame.fill_rectangle(at, size, Color::WHITE);
+        }
+        for i in 0..self.sheet.views.len() {
+            let Some(placed) = self.placed.get(i) else { continue };
+            for fill in &placed.fills {
+                let path = Path::new(|p| {
+                    let mut points = fill.points.iter().map(|&q| fit.point(self.to_paper(i, q)));
+                    if let Some(first) = points.next() {
+                        p.move_to(first);
+                        for point in points { p.line_to(point); }
+                        p.close();
+                    }
+                });
+                let [r, g, b] = fill.color;
+                frame.fill(&path, Color::from_rgb8(r, g, b));
+            }
+            let Some(cut) = placed.cut.as_ref().filter(|c| crate::drawing::drawn(c).next().is_some()) else { continue };
+            // what is seen below the cut, thin and grey, then the cut itself within the crop,
+            // when there is one
+            let crop = placed.crop;
+            let piece = |a: &[f32; 2], z: &[f32; 2]| {
+                let (a, z) = ([a[0] as f64, a[1] as f64], [z[0] as f64, z[1] as f64]);
+                match crop {
+                    Some((lo, hi)) => clip(a, z, lo, hi),
+                    None => Some((a, z)),
+                }
+            };
+            let per_metre = (fit.scale / self.sheet.views[i].scale) as f32;
+            if placed.rules.hatched {
+                super::hatch::draw_fills(frame, cut, crop, &|q| Some(fit.point(self.to_paper(i, q))), per_metre, None);
+            }
+            let lines_of = |segments: &[[[f32; 2]; 2]]| {
+                Path::new(|b| {
+                    for (a, z) in segments.iter().filter_map(|[a, z]| piece(a, z)) {
+                        b.move_to(fit.point(self.to_paper(i, a)));
+                        b.line_to(fit.point(self.to_paper(i, z)));
+                    }
+                })
+            };
+            // each as the view's kind of drawing draws it at the scale it is placed at
+            let (cut_dash, beyond_dash) = (dashes_on_screen(&placed.rules.cut, fit.scale), dashes_on_screen(&placed.rules.beyond, fit.scale));
+            frame.stroke(&lines_of(&cut.below), stroke_of(&placed.rules.beyond, Color { a: 0.55, ..ink }, fit.scale, &beyond_dash));
+            frame.stroke(&lines_of(&cut.segments), stroke_of(&placed.rules.cut, ink, fit.scale, &cut_dash));
+            // the lines the view's filters give a pen of their own
+            for inked in &cut.inked {
+                let (plain, width) = if inked.cut { (ink, on_screen(fit.scale, placed.rules.cut.width)) } else { (Color { a: 0.55, ..ink }, on_screen(fit.scale, placed.rules.beyond.width)) };
+                let color = inked.ink.color.map_or(plain, |c| Color::from_rgb8(c[0], c[1], c[2]));
+                frame.stroke(&lines_of(&inked.lines), Stroke::default().with_color(color).with_width(inked.ink.wide(width, inked.cut)));
+            }
+        }
+    }
+}
+
 impl canvas::Program<Message> for PaperDrawing {
     type State = PaperState;
 
@@ -1333,20 +1464,11 @@ impl canvas::Program<Message> for PaperDrawing {
         // the paper and its frame (10 mm, 20 mm on the binding side), the title at the lower right
         let [w, h] = self.sheet.paper;
         let (at, size) = rect([0.0, 0.0], [w, h]);
-        if self.sheet.background.is_none() && self.placed.iter().all(|v| v.image.is_none()) {
-            frame.fill_rectangle(Point::new(at.x + 3.0, at.y + 3.0), size, Color { a: 0.12, ..Color::BLACK });
-            frame.fill_rectangle(at, size, paper);
-        }
         let border = if self.pick == Some(SheetPick::Paper) { p.accent } else { faint };
         frame.stroke(&Path::rectangle(at, size), Stroke::default().with_color(border).with_width(1.0));
         let (inner, inner_size) = rect([0.02, 0.01], [w - 0.01, h - 0.01]);
         if !self.block.owns_frame {
             frame.stroke(&Path::rectangle(inner, inner_size), Stroke::default().with_color(ink).with_width(1.4));
-        }
-        if self.sheet.background.is_none() && !self.block.polygons.is_empty() {
-            let [a,b] = self.block.bounds;
-            let (at, size) = rect(a,b);
-            frame.fill_rectangle(at,size,Color::WHITE);
         }
         if let Some(logo) = &self.block.logo {
             logo.draw(&mut frame, |point| Some(fit.point(point)));
@@ -1379,7 +1501,7 @@ impl canvas::Program<Message> for PaperDrawing {
             });
             let size = t.height * fit.scale / if t.family.is_some() {1.0} else {0.72};
             frame.fill_text(canvas::Text {
-                content: t.text.clone(), position: fit.point(t.at), size: iced::Pixels(size as f32),
+                content: t.text.clone(), position: fit.point(t.at), size: crate::kept_canvas::text_size(size as f32),
                 font, align_x: align.into(),
                 align_y: alignment::Vertical::Bottom, color: t.color.map_or(ink, |[r,g,b]| Color::from_rgb8(r,g,b)),
                 ..canvas::Text::default()
@@ -1398,62 +1520,9 @@ impl canvas::Program<Message> for PaperDrawing {
                 frame.stroke(&Path::rectangle(at, size), Stroke::default().with_color(p.accent).with_width(1.5));
             }
             let placed = self.placed.get(i).cloned().unwrap_or_default();
-            for fill in &placed.fills {
-                let path = Path::new(|p| {
-                    let mut points = fill.points.iter().map(|&q| fit.point(self.to_paper(i, q)));
-                    if let Some(first) = points.next() {
-                        p.move_to(first);
-                        for point in points { p.line_to(point); }
-                        p.close();
-                    }
-                });
-                let [r, g, b] = fill.color;
-                frame.fill(&path, Color::from_rgb8(r, g, b));
-            }
             match placed.cut.filter(|c| crate::drawing::drawn(c).next().is_some()) {
-                Some(cut) => {
-                    // what is seen below the cut, thin and grey, then the cut itself
-                    // within the crop, when there is one
+                Some(_) => {
                     let crop = placed.crop;
-                    let piece = |a: &[f32; 2], z: &[f32; 2]| {
-                        let (a, z) = ([a[0] as f64, a[1] as f64], [z[0] as f64, z[1] as f64]);
-                        match crop {
-                            Some((lo, hi)) => clip(a, z, lo, hi),
-                            None => Some((a, z)),
-                        }
-                    };
-                    let per_metre = (fit.scale / self.sheet.views[i].scale) as f32;
-                    if placed.rules.hatched {
-                        super::hatch::draw_fills(&mut frame, &cut, crop, &|q| Some(fit.point(self.to_paper(i, q))), per_metre, None);
-                    }
-                    let below = Path::new(|b| {
-                        for (a, z) in cut.below.iter().filter_map(|[a, z]| piece(a, z)) {
-                            b.move_to(fit.point(self.to_paper(i, a)));
-                            b.line_to(fit.point(self.to_paper(i, z)));
-                        }
-                    });
-                    // each as the view's kind of drawing draws it at the scale it is placed at
-                    let (cut_dash, beyond_dash) = (dashes_on_screen(&placed.rules.cut, fit.scale), dashes_on_screen(&placed.rules.beyond, fit.scale));
-                    frame.stroke(&below, stroke_of(&placed.rules.beyond, Color { a: 0.55, ..ink }, fit.scale, &beyond_dash));
-                    let lines = Path::new(|b| {
-                        for (a, z) in cut.segments.iter().filter_map(|[a, z]| piece(a, z)) {
-                            b.move_to(fit.point(self.to_paper(i, a)));
-                            b.line_to(fit.point(self.to_paper(i, z)));
-                        }
-                    });
-                    frame.stroke(&lines, stroke_of(&placed.rules.cut, ink, fit.scale, &cut_dash));
-                    // the lines the view's filters give a pen of their own
-                    for inked in &cut.inked {
-                        let lines = Path::new(|b| {
-                            for (a, z) in inked.lines.iter().filter_map(|[a, z]| piece(a, z)) {
-                                b.move_to(fit.point(self.to_paper(i, a)));
-                                b.line_to(fit.point(self.to_paper(i, z)));
-                            }
-                        });
-                        let (plain, width) = if inked.cut { (ink, on_screen(fit.scale, placed.rules.cut.width)) } else { (Color { a: 0.55, ..ink }, on_screen(fit.scale, placed.rules.beyond.width)) };
-                        let color = inked.ink.color.map_or(plain, |c| Color::from_rgb8(c[0], c[1], c[2]));
-                        frame.stroke(&lines, Stroke::default().with_color(color).with_width(inked.ink.wide(width, inked.cut)));
-                    }
                     if placed.frame && crop.is_some() {
                         frame.stroke(&Path::rectangle(at, size), Stroke::default().with_color(faint).with_width(0.8));
                     }
@@ -1481,7 +1550,7 @@ impl canvas::Program<Message> for PaperDrawing {
             super::marks::draw_detail_lines(&mut frame, &placed.lines, &placed.pens, placed.crop, ink, &|q| Some(fit.point(self.to_paper(i, q))), (fit.scale / 1000.0) as f32);
             for d in &placed.datums {
                 let (a, b) = (fit.point(self.to_paper(i, d.a)), fit.point(self.to_paper(i, d.b)));
-                super::marks::draw_datum(&mut frame, a, b, &d.name, d.level.is_some(), (fit.scale / 1000.0) as f32, &placed.rules.grid, ink, Color::WHITE);
+                super::marks::draw_datum(&mut frame, a, b, &d.name, d.level.is_some(), (fit.scale / 1000.0) as f32, &placed.rules.grid, ink, Color::WHITE, super::marks::GridMark::default());
             }
             for (k, note) in placed.notes.iter().enumerate() {
                 if crate::drawing2d::crop_segment(note.at, note.at, placed.crop).is_none() { continue; }
@@ -1565,7 +1634,7 @@ impl canvas::Program<Message> for PaperDrawing {
                     content: format!("{typed}|"),
                     position: left,
                     align_y: alignment::Vertical::Bottom,
-                    size: iced::Pixels(height),
+                    size: crate::kept_canvas::text_size(height),
                     color: ink,
                     font: openaec_ui::fonts::BODY,
                     ..canvas::Text::default()

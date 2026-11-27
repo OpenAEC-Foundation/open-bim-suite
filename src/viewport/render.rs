@@ -71,6 +71,9 @@ impl RenderMode {
 /// Colours and switches that come from the UI.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RenderSettings {
+    /// The whole scene lies under something that lets nothing through (a view shown on paper):
+    /// none of it is drawn.
+    pub covered: bool,
     pub mode: RenderMode,
     pub grid: bool,
     /// sRGB 0..1
@@ -1079,11 +1082,10 @@ impl ScenePipeline {
             let projection = camera.projection(w as f32 / h as f32);
             // pixels a metre is at depth 1 (perspective) or anywhere (parallel)
             let per_metre = projection.y_axis.y * h as f32 / 2.0;
-            // the depth range, as `Camera::projection` sets it
-            let (near, far) = if camera.ortho {
-                (0.0, 2.0 * (camera.distance + camera.scene_radius * 4.0 + 1.0))
-            } else {
-                ((camera.distance * 0.002).max(1e-4), camera.distance + camera.scene_radius * 4.0 + 1.0)
+            // the depth range, as `Camera::projection` sets it: a parallel view's from its start
+            let (near, far) = match camera.depth_range() {
+                (near, far) if camera.ortho => (0.0, far - near),
+                (near, far) => (near.max(1e-4), far),
             };
             let on = if self.shadows { 1.0 } else { 0.0 };
             let parallel = if camera.ortho { 1.0 } else { 0.0 };
@@ -1236,6 +1238,9 @@ impl ScenePipeline {
         target: &wgpu::TextureView,
         clip_bounds: &Rectangle<u32>,
     ) {
+        if primitive.settings.covered {
+            return;
+        }
         let Some(targets) = &self.targets else { return };
         let bg = primitive.settings.background;
         let clear = if self.srgb {

@@ -332,7 +332,11 @@ pub fn hidden_in(model: &Model, view: &Value) -> UnitKeySet {
 
 /// Now, as `YYYY-MM-DDTHH:MM:SSZ`.
 pub(crate) fn timestamp() -> String {
-    let seconds = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_or(0, |d| d.as_secs()) as i64;
+    timestamp_of(web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_or(0, |d| d.as_secs()) as i64)
+}
+
+/// The date and time (UTC) of `seconds` since 1970.
+pub(crate) fn timestamp_of(seconds: i64) -> String {
     let (days, rest) = (seconds.div_euclid(86_400), seconds.rem_euclid(86_400));
     // days since 1970-01-01 to a civil date (H. Hinnant's algorithm)
     let z = days + 719_468;

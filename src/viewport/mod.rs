@@ -592,6 +592,7 @@ mod tests {
         let offsets = Arc::default();
         let marks = Arc::default();
         let settings = RenderSettings {
+            covered: false,
             mode: render::RenderMode::Solid,
             grid: false,
             background: [1.0; 3],
