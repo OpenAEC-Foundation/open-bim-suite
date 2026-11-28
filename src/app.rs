@@ -35,6 +35,7 @@ mod layers;
 #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
 pub mod collab;
 pub mod work_packages;
+pub mod fm;
 mod docs;
 mod drawing_kinds;
 mod solid_view;
@@ -202,6 +203,8 @@ pub struct App {
     /// read, and the scene is built once, after the last.
     add_queue: Vec<loaders::Source>,
     work_packages: work_packages::Register,
+    /// Facility management: the installations, their sensors and readings (see `fm`).
+    pub fm: fm::Fm,
     /// The project whose files are loading: its set-up is put back when the last is in.
     project_opening: Option<project_file::Opening>,
     /// Models read from the queue that the scene does not show yet.
@@ -691,6 +694,8 @@ pub enum Message {
     Library(library::LibraryMessage),
     /// Docs: the documents of the project folder.
     Docs(docs::DocsMessage),
+    /// Facility management (see `fm`).
+    Fm(fm::Event),
     /// Library, the product: the source or the country to show.
     Libraries(libraries::LibrariesMessage),
     /// The drawing standard on the Library page: picking and setting its kinds and settings.
@@ -1192,6 +1197,7 @@ impl Default for App {
             adding_model: false,
             add_queue: Vec::new(),
             work_packages: Default::default(),
+            fm: Default::default(),
             project_opening: None,
             scene_stale: false,
             aligned: Vec::new(),
@@ -1994,6 +2000,8 @@ impl App {
 
     pub fn set_model(&mut self, model: Arc<Model>) {
         self.work_packages = Default::default();
+        self.fm.register = Default::default();
+        self.fm.shown = None;
         #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
         { self.collab.packages = Default::default(); }
         // a point marked to orbit about belonged to the model before
@@ -2892,6 +2900,7 @@ impl App {
             Message::ExplorerTab(tab) => self.explorer_tab = tab,
             Message::Library(message) => return self.library_update(message),
             Message::Docs(message) => return self.docs_update(message),
+            Message::Fm(event) => return self.fm_update(event),
             Message::Libraries(message) => return self.libraries_update(message),
             Message::Standard(message) => return self.standard_update(message),
             Message::BuildUp(message) => return self.buildup_update(message),
@@ -4033,6 +4042,10 @@ impl App {
                 }
                 looks = shown;
             }
+        }
+        // facility management: the elements with sensors in the colour of their latest value
+        if let Some(fm) = self.fm_looks(index.len(), |u| index.owner(u)) {
+            looks = fm;
         }
         self.unit_looks = Arc::new(looks);
         self.units = Arc::new(unit_state(&self.explode_offsets, &flags));
