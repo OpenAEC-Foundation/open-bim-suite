@@ -641,6 +641,8 @@ impl App {
             points.extend(middles.into_iter().map(|p| (p, Snap::Middle)));
         }
         if snaps.grid {
+            // the project's origin, where a first grid line or wall usually starts
+            points.push((DVec3::new(0.0, 0.0, self.work_plane().0), Snap::Grid));
             points.extend(self.grid_snap_points().into_iter().map(|p| (p, Snap::Grid)));
             // where a grid line crosses the side or the axis of a wall or the edge of a floor: a
             // column goes against the inside of a wall on its grid line
@@ -732,10 +734,32 @@ impl App {
     /// that is where it is, rounded).
     pub(super) fn snapped_as(&self, p: DVec3, x: f32, y: f32, width: f32, height: f32) -> (DVec3, Option<snaps::Snap>) {
         let (q, kind) = self.snapped_free(p, x, y, width, height);
-        // square only: along x or y from the last point, whatever it landed on
-        match self.modeller.points.last().filter(|_| self.modeller.snaps.square) {
+        // Ortho (unless Polar allows the diagonals too) and Square only hold the point along x or
+        // y from the last one, whatever it landed on: an end or a line it snapped to is taken
+        // across onto that axis, so a wall drawn with Ortho on runs straight every time
+        let snaps = self.modeller.snaps;
+        let held = (snaps.square || (snaps.ortho && !snaps.polar)) && !self.draws_a_rectangle();
+        match self.modeller.points.last().filter(|_| held) {
             Some(from) => (snaps::squared(from.truncate(), q.truncate()).extend(q.z), kind.or(Some(snaps::Snap::Square))),
             None => (q, kind),
+        }
+    }
+
+    /// Whether the tool on lays its element in the rectangle between its two clicks (a slab, a
+    /// lying system, the Wall tool's four walls), whose second click is the far corner: Ortho
+    /// does not hold that one to an axis.
+    fn draws_a_rectangle(&self) -> bool {
+        if self.modeller.grid_tool {
+            return false;
+        }
+        match self.modeller.tool {
+            Some((ModelTool::Slab, _)) => true,
+            Some((ModelTool::Wall, _)) => self.modeller.placement.rectangle,
+            Some((ModelTool::System, _)) => {
+                let s = self.modeller.placement.of(ModelTool::System);
+                s.kind.as_deref().and_then(|id| self.library.system_type(id)).is_some_and(|t| t.lying.is_some())
+            }
+            _ => false,
         }
     }
 
@@ -2108,7 +2132,8 @@ mod tests {
             let grid = app.modeller.model.grid;
             app.modeller.model.iter().filter_map(|e| match e.shape_in_project(&grid) { Shape::Planar(PlanarDef { form: PlanarForm::Wall { start, end, .. }, .. }) => Some((start, end)), _ => None }).collect()
         };
-        // off (as it starts): a wall at any angle
+        // off (as it starts), with Ortho off too: a wall at any angle
+        app.modeller.snaps.toggle(snaps::Snap::Ortho);
         app.set_model_tool(Some((ModelTool::Wall, "Wall")));
         app.modeller.placement.chain = false;
         click(&mut app, 0.0, 0.0);

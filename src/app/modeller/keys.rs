@@ -48,6 +48,8 @@ pub enum ModelKey {
     Delete,
     LevelUp,
     LevelDown,
+    /// ZA: the whole model in view (Zoom All).
+    ZoomAll,
 }
 
 /// The letters that are a command alone (lower case).
@@ -91,6 +93,7 @@ pub const PAIRS: &[(&str, ModelKey)] = &[
     ("fl", ModelKey::Slab),
     ("cw", ModelKey::System),
     ("ob", ModelKey::Object),
+    ("za", ModelKey::ZoomAll),
 ];
 
 /// The letters that start a pair and still run at once: their command alone does no harm before
@@ -234,6 +237,7 @@ mod tests {
             ('m', 'm', ModelKey::Mirror),
             ('c', 's', ModelKey::CreateSimilar),
             ('t', 'x', ModelKey::Text),
+            ('z', 'a', ModelKey::ZoomAll),
         ] {
             assert_eq!(pair(a, b), vec![key], "{a}{b}");
         }
