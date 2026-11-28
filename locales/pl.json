@@ -2165,6 +2165,11 @@
     "Second moments": "Momenty bezwładności",
     "Layer outside": "Warstwa zewnętrzna",
     "Layer inside": "Warstwa wewnętrzna",
-    "NL-SfB": "NL-SfB"
+    "NL-SfB": "NL-SfB",
+    "Don't save": "Nie zapisuj",
+    "Don't save throws them away.": "Nie zapisuj je odrzuca.",
+    "Not saved": "Nie zapisano",
+    "Save…": "Zapisz…",
+    "There are changes that are not saved yet:": "Są zmiany, które nie zostały jeszcze zapisane:"
   }
 }

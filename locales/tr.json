@@ -2165,6 +2165,11 @@
     "Second moments": "Atalet momentleri",
     "Layer outside": "Dış katman",
     "Layer inside": "İç katman",
-    "NL-SfB": "NL-SfB"
+    "NL-SfB": "NL-SfB",
+    "Don't save": "Kaydetme",
+    "Don't save throws them away.": "Kaydetme onları atar.",
+    "Not saved": "Kaydedilmedi",
+    "Save…": "Kaydet…",
+    "There are changes that are not saved yet:": "Henüz kaydedilmemiş değişiklikler var:"
   }
 }

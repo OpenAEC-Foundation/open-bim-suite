@@ -401,6 +401,8 @@ pub enum Dialog {
     Cloud,
     /// A series of sheets exported at once: which, and as what.
     SheetsExport,
+    /// Work not saved would be lost: by closing the window (None) or project tab `i`.
+    Unsaved(Option<usize>),
 }
 
 /// The feedback form: what is written in it, and how sending it goes.
@@ -618,6 +620,11 @@ pub enum Msg {
     /// The window's native id (its `HWND` on Windows).
     NativeWindow(u64),
     CloseWindow,
+    /// Closes the window (None) or project tab `i` without saving what was not saved.
+    CloseAnyway(Option<usize>),
+    /// Saves the project shown from the dialog about work not saved, which closes; the window
+    /// stays, to be closed again once it is saved.
+    SaveAndStay,
     Update,
     /// The Planner's web frame loads its page again.
     PlannerReload,
@@ -1931,6 +1938,26 @@ impl Studio {
     /// Closes project tab `i`: the tab beside it shows; the last one leaves an empty project.
     fn close_project(&mut self, i: usize) {
         let Some(&id) = self.tabs.get(i) else { return };
+        let app = if id == self.project { Some(&self.app) } else { self.parked.iter().find(|(p, _)| *p == id).map(|(_, a)| a) };
+        if app.is_some_and(|a| a.unsaved()) {
+            self.dialog = Some(Dialog::Unsaved(Some(i)));
+            return;
+        }
+        self.close_project_now(i);
+    }
+
+    /// The names of the projects open with work not saved: the one shown first.
+    fn unsaved_projects(&self) -> Vec<String> {
+        std::iter::once(&self.app)
+            .chain(self.parked.iter().map(|(_, a)| a))
+            .filter(|a| a.unsaved())
+            .map(|a| a.model.as_ref().map_or_else(|| "model.ifcx".to_string(), |m| m.file_name()))
+            .collect()
+    }
+
+    /// Closes project tab `i`, whatever it holds.
+    fn close_project_now(&mut self, i: usize) {
+        let Some(&id) = self.tabs.get(i) else { return };
         if self.tabs.len() == 1 {
             self.app = self.app.new_project();
             return;
@@ -2462,7 +2489,24 @@ impl Studio {
                 crate::dpi_drag::install(_raw);
             }
             // the viewer changes no files, so closing needs no questions
-            Msg::CloseWindow => return iced::exit(),
+            Msg::CloseWindow => {
+                // work not saved is asked about first
+                if !self.unsaved_projects().is_empty() {
+                    self.dialog = Some(Dialog::Unsaved(None));
+                    self.backstage = false;
+                    return Task::none();
+                }
+                return iced::exit();
+            }
+            Msg::CloseAnyway(None) => return iced::exit(),
+            Msg::SaveAndStay => {
+                self.dialog = None;
+                return self.update(Msg::App(Message::Save));
+            }
+            Msg::CloseAnyway(Some(i)) => {
+                self.dialog = None;
+                self.close_project_now(i);
+            }
             Msg::Update => {
                 if let Some(available) = &self.update {
                     if let Err(e) = upd::open_installer(available) {
@@ -3576,6 +3620,36 @@ impl Studio {
                     true,
                 )
             }
+            Dialog::Unsaved(tab) => {
+                // the tab closed, or every project with work not saved when the window closes
+                let names = match tab {
+                    Some(i) => {
+                        let id = self.tabs.get(i).copied();
+                        let app = if id == Some(self.project) { Some(&self.app) } else { self.parked.iter().find(|(p, _)| Some(*p) == id).map(|(_, a)| a) };
+                        app.and_then(|a| a.model.as_ref()).map(|m| vec![m.file_name()]).unwrap_or_default()
+                    }
+                    None => self.unsaved_projects(),
+                };
+                // Save writes the project shown; another one is saved from its own tab
+                let shown = match tab {
+                    Some(i) => self.tabs.get(i) == Some(&self.project),
+                    None => self.app.unsaved(),
+                };
+                let body = column![
+                    w::body(look, l.text("Er zijn wijzigingen die nog niet zijn opgeslagen:", "There are changes that are not saved yet:")),
+                    w::body(look, names.join(", ")),
+                    w::secondary(look, l.text("Niet opslaan gooit ze weg.", "Don't save throws them away.")),
+                ]
+                .spacing(6);
+                let mut buttons = vec![
+                    w::button(look, l.text("Annuleren", "Cancel"), K::Quiet, D::Regular, None, Some(Msg::Dialog(None))),
+                    w::button(look, l.text("Niet opslaan", "Don't save"), K::Secondary, D::Regular, None, Some(Msg::CloseAnyway(tab))),
+                ];
+                if shown {
+                    buttons.push(w::button(look, l.text("Opslaan…", "Save…"), K::Primary, D::Regular, None, Some(Msg::SaveAndStay)));
+                }
+                w::dialog(look, l.text("Niet opgeslagen", "Not saved"), close_icon, Some(Msg::Dialog(None)), body.into(), None, buttons, false)
+            }
             Dialog::DesktopOnly(format) => w::dialog(
                 look,
                 l.text("Desktop-app nodig", "Desktop app needed"),
@@ -4285,6 +4359,36 @@ mod tests {
     }
 
     #[test]
+    fn closing_with_work_not_saved_asks_first_and_saving_it_lets_it_close() {
+        let mut studio = Studio::new(App::default());
+        studio.set_product(Product::Modeller);
+        let _ = studio.update(Msg::App(Message::NewModel("Level 0")));
+        // a new model, nothing done: it closes at once
+        assert!(studio.unsaved_projects().is_empty());
+        let _ = studio.update(Msg::CloseWindow);
+        assert!(studio.dialog.is_none());
+        // a grid line drawn: closing asks
+        studio.app.modeller_insert_grid_for_test();
+        assert_eq!(studio.unsaved_projects(), ["model.ifcx"]);
+        let _ = studio.update(Msg::CloseWindow);
+        assert_eq!(studio.dialog, Some(Dialog::Unsaved(None)));
+        let _ = studio.update(Msg::Dialog(None));
+        // closing its tab asks too, and Don't save closes it
+        let _ = studio.update(Msg::CloseProject(0));
+        assert_eq!(studio.dialog, Some(Dialog::Unsaved(Some(0))));
+        let _ = studio.update(Msg::CloseAnyway(Some(0)));
+        assert!(studio.dialog.is_none() && studio.unsaved_projects().is_empty());
+        // saved as IFCX, it closes without asking
+        studio.app.modeller_insert_grid_for_test();
+        studio.app.saved_to_for_test(std::path::Path::new("project.ifcx"));
+        assert!(studio.unsaved_projects().is_empty());
+        // an IFC 4 export is no save of the project
+        studio.app.modeller_insert_grid_for_test();
+        studio.app.saved_to_for_test(std::path::Path::new("export.ifc"));
+        assert_eq!(studio.unsaved_projects().len(), 1);
+    }
+
+    #[test]
     fn new_from_the_file_page_closes_it_on_the_new_model() {
         let mut studio = Studio::new(App::default());
         studio.set_product(Product::Modeller);
@@ -4292,6 +4396,8 @@ mod tests {
         let _ = studio.update(Msg::App(Message::NewModel("Level 0")));
         assert!(!studio.backstage, "the new model is shown, not the file page");
         assert!(studio.app.model.is_some());
+        // its first level has its floor plan to draw in
+        assert_eq!(studio.app.document.plans().len(), 1);
     }
 
     #[test]

@@ -2599,6 +2599,9 @@ impl App {
             Message::SaveProjectPicked(Some(path)) => self.save_project(path),
             Message::Saved(result) => {
                 self.remote_saved(&result);
+                if let Ok((path, _)) = &result {
+                    self.saved_to(path);
+                }
                 // a file saved into the project folder shows in Docs
                 let docs = result.as_ref().map_or_else(|_| Task::none(), |(path, _)| self.docs_saved(path));
                 self.status = match result {
