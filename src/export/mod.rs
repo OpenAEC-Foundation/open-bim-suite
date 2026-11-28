@@ -9,6 +9,7 @@
 pub mod cad;
 pub mod drawing;
 pub(crate) mod ifc;
+mod ifc_modelled;
 pub(crate) mod ifcx;
 pub mod pdf;
 mod pdf_font;
