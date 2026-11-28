@@ -156,6 +156,36 @@ mod tests {
     use glam::DVec3;
 
     #[test]
+    fn with_ortho_on_a_wall_runs_straight_from_its_last_point_whatever_the_click_lands_on() {
+        let mut app = modelling();
+        // a wall to snap to: its end off the line of the next one
+        app.set_model_tool(Some((ModelTool::Wall, "Wall")));
+        click(&mut app, -40.0, -30.0);
+        click(&mut app, 60.0, -30.0);
+        app.set_model_tool(None);
+        app.set_model_tool(Some((ModelTool::Wall, "Wall")));
+        click(&mut app, 0.0, 0.0);
+        let (w, h) = (800.0, 600.0);
+        let at = |app: &App, p: DVec3| {
+            let (x, y) = app.on_screen(p, w, h).unwrap();
+            app.snapped(p, x, y, w, h)
+        };
+        // 15 degrees off: still along x, not only within a few degrees of it
+        assert_eq!(at(&app, DVec3::new(5.0, 1.34, 0.0)), DVec3::new(5.0, 0.0, 0.0));
+        // nearer upright: along y
+        assert_eq!(at(&app, DVec3::new(1.2, 4.0, 0.0)), DVec3::new(0.0, 4.0, 0.0));
+        // the end of the other wall, taken across onto the axis: its x, along x from the start
+        let end = at(&app, DVec3::new(60.02, -29.98, 0.0));
+        assert_eq!(end, DVec3::new(60.0, 0.0, 0.0), "the end's x along the first axis");
+        // Ortho off: any angle; Polar on: the diagonals too, so not held to x or y
+        app.modeller.snaps.toggle(Snap::Ortho);
+        assert_eq!(at(&app, DVec3::new(5.0, 1.34, 0.0)), DVec3::new(5.0, 1.34, 0.0));
+        app.modeller.snaps.toggle(Snap::Ortho);
+        app.modeller.snaps.toggle(Snap::Polar);
+        assert_eq!(at(&app, DVec3::new(5.0, 1.34, 0.0)), DVec3::new(5.0, 1.34, 0.0));
+    }
+
+    #[test]
     fn a_click_lands_on_the_middle_of_a_wall_and_on_its_line_unless_switched_off() {
         let mut app = modelling();
         app.set_model_tool(Some((ModelTool::Wall, "Wall")));
