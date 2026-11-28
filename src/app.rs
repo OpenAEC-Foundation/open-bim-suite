@@ -1876,7 +1876,12 @@ impl App {
             self.explode_on = false;
             self.update_explode();
         }
-        let Some(world) = self.world_bounds() else { return false };
+        let world = match (self.world_bounds(), view.plan) {
+            (Some(world), _) => world,
+            // nothing drawn yet: a plan still looks down at its level, 20 m around the origin
+            (None, Some(plan)) => crate::model::Bounds { min: [-10.0, -10.0, plan.low], max: [10.0, 10.0, plan.high.max(plan.low + 0.01)] },
+            (None, None) => return false,
+        };
         let clip = match (view.plan, view.clip) {
             (Some(plan), crop) => {
                 // within its crop, where it has one
@@ -2607,6 +2612,9 @@ impl App {
             Message::SaveProjectPicked(Some(path)) => self.save_project(path),
             Message::Saved(result) => {
                 self.remote_saved(&result);
+                if let Ok((path, _)) = &result {
+                    self.saved_to(path);
+                }
                 // a file saved into the project folder shows in Docs
                 let docs = result.as_ref().map_or_else(|_| Task::none(), |(path, _)| self.docs_saved(path));
                 self.status = match result {
@@ -5112,7 +5120,19 @@ impl App {
         // the grid lines and levels where the view shown draws them
         let paper_view = self.drawing_on_paper && self.shown_view().is_some();
         let datums = if clean || paper_view { Vec::new() } else { self.datums() };
-        let segments = Arc::new(datums.iter().map(|d| [d.line.a, d.line.b]).collect::<Vec<_>>());
+        // a grid line runs on past its ends to its bubbles; a level as it is
+        let segments = Arc::new(
+            datums
+                .iter()
+                .map(|d| match d.kind {
+                    crate::annotations::DatumKind::Grid(_) => {
+                        let (a, b) = crate::annotations::extended(d.line.a, d.line.b);
+                        [a, b]
+                    }
+                    _ => [d.line.a, d.line.b],
+                })
+                .collect::<Vec<_>>(),
+        );
         let scene = shader(Viewport3D {
             model: self.model.as_ref(),
             visible: &self.visible,
@@ -5166,7 +5186,7 @@ impl App {
         .padding(8)
         .align_bottom(Fill)
         .align_left(Fill);
-        let cube = (self.model.is_some() && overlay.is_none() && !clean).then(|| {
+        let cube = (self.model.is_some() && overlay.is_none() && !clean && !self.fixed_view()).then(|| {
             canvas(CubeOverlay { yaw: self.camera.yaw, pitch: self.camera.pitch, ortho: self.camera.ortho })
                 .width(Fill)
                 .height(Fill)

@@ -2193,6 +2193,12 @@
     "Read CSV": "Lire CSV",
     "Colour by reading": "Colorer selon la mesure",
     "Facility management: installations, sensors and readings over the model": "Gestion technique : installations, capteurs et mesures sur le modèle",
-    "Kind of sensor": "Type de capteur"
+    "Kind of sensor": "Type de capteur",
+    "Zoom all": "Tout afficher",
+    "Don't save": "Ne pas enregistrer",
+    "Don't save throws them away.": "Ne pas enregistrer les abandonne.",
+    "Not saved": "Non enregistré",
+    "Save…": "Enregistrer…",
+    "There are changes that are not saved yet:": "Des modifications ne sont pas encore enregistrées :"
   }
 }

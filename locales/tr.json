@@ -2193,6 +2193,12 @@
     "Read CSV": "CSV oku",
     "Colour by reading": "Okumaya göre renklendir",
     "Facility management: installations, sensors and readings over the model": "Tesis yönetimi: model üzerinde tesisat, sensörler ve okumalar",
-    "Kind of sensor": "Sensör türü"
+    "Kind of sensor": "Sensör türü",
+    "Zoom all": "Tümünü göster",
+    "Don't save": "Kaydetme",
+    "Don't save throws them away.": "Kaydetme onları atar.",
+    "Not saved": "Kaydedilmedi",
+    "Save…": "Kaydet…",
+    "There are changes that are not saved yet:": "Henüz kaydedilmemiş değişiklikler var:"
   }
 }

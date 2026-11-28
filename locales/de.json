@@ -2193,6 +2193,12 @@
     "Read CSV": "CSV einlesen",
     "Colour by reading": "Nach Messwert färben",
     "Facility management: installations, sensors and readings over the model": "Facility Management: Installationen, Sensoren und Messwerte über dem Modell",
-    "Kind of sensor": "Art des Sensors"
+    "Kind of sensor": "Art des Sensors",
+    "Zoom all": "Alles anzeigen",
+    "Don't save": "Nicht speichern",
+    "Don't save throws them away.": "Nicht speichern verwirft sie.",
+    "Not saved": "Nicht gespeichert",
+    "Save…": "Speichern…",
+    "There are changes that are not saved yet:": "Es gibt Änderungen, die noch nicht gespeichert sind:"
   }
 }

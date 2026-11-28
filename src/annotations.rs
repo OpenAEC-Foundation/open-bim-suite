@@ -11,6 +11,27 @@ use iced::{alignment, mouse, Color, Point, Rectangle};
 
 /// Bubble radius (logical pixels).
 pub const RADIUS: f32 = 10.0;
+/// How far a grid line is drawn past each of its ends before its bubble (metres), as the 2D
+/// drawing tools of the suite draw it.
+pub const GRID_EXTENSION: f32 = 1.0;
+
+/// The ends of a grid line from `a` to `b` as it is drawn: [`GRID_EXTENSION`] past each end.
+pub fn extended(a: [f32; 3], b: [f32; 3]) -> ([f32; 3], [f32; 3]) {
+    let (a3, b3) = (Vec3::from_array(a), Vec3::from_array(b));
+    let Some(way) = (b3 - a3).try_normalize() else { return (a, b) };
+    ((a3 - way * GRID_EXTENSION).to_array(), (b3 + way * GRID_EXTENSION).to_array())
+}
+
+/// [`extended`] of a grid line on a drawing (metres, in plan).
+pub fn extended_2d(a: [f64; 2], b: [f64; 2]) -> ([f64; 2], [f64; 2]) {
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let length = dx.hypot(dy);
+    if length < 1e-9 {
+        return (a, b);
+    }
+    let (ux, uy) = (dx / length * GRID_EXTENSION as f64, dy / length * GRID_EXTENSION as f64);
+    ([a[0] - ux, a[1] - uy], [b[0] + ux, b[1] + uy])
+}
 /// How close a click must come to a grid line to pick it (logical pixels).
 pub const PICK: f32 = 5.0;
 /// How far apart on screen two levels must be to both be named: a name above and a height below
@@ -133,10 +154,22 @@ pub fn grid_at(view_proj: &Mat4, size: (f32, f32), datums: &[Datum], cursor: Poi
     best.map(|(_, i)| i)
 }
 
-/// Where the two bubbles of a grid line go on screen: just past both ends, along the line.
+#[cfg(test)]
+#[test]
+fn a_grid_line_runs_a_metre_past_each_end_to_its_bubbles() {
+    let (a, b) = extended([0.0, 0.0, 0.0], [6.0, 0.0, 0.0]);
+    assert_eq!((a, b), ([-1.0, 0.0, 0.0], [7.0, 0.0, 0.0]));
+    assert_eq!(extended_2d([2.0, 1.0], [2.0, -4.0]), ([2.0, 2.0], [2.0, -5.0]));
+    // a line of no length stays as it is
+    assert_eq!(extended([1.0, 1.0, 0.0], [1.0, 1.0, 0.0]), ([1.0, 1.0, 0.0], [1.0, 1.0, 0.0]));
+}
+
+/// Where the two bubbles of a grid line go on screen: just past both ends of the line as drawn
+/// ([`extended`]), along it.
 pub fn bubble_centres(view_proj: &Mat4, size: (f32, f32), grid: &GridLine) -> Option<[Point; 2]> {
-    let a = project(view_proj, size, Vec3::from_array(grid.a))?;
-    let b = project(view_proj, size, Vec3::from_array(grid.b))?;
+    let (ea, eb) = extended(grid.a, grid.b);
+    let a = project(view_proj, size, Vec3::from_array(ea))?;
+    let b = project(view_proj, size, Vec3::from_array(eb))?;
     let (dx, dy) = (b.x - a.x, b.y - a.y);
     let len = (dx * dx + dy * dy).sqrt();
     if len < 1.0 {
@@ -284,9 +317,10 @@ impl<Message> canvas::Program<Message> for GridOverlay {
                 (self.ink, 1.2)
             };
             if picked {
-                // its whole line, over what hides it
-                let a = project(&self.view_proj, size, Vec3::from_array(grid.a));
-                let b = project(&self.view_proj, size, Vec3::from_array(grid.b));
+                // its whole line as drawn, over what hides it
+                let (ea, eb) = extended(grid.a, grid.b);
+                let a = project(&self.view_proj, size, Vec3::from_array(ea));
+                let b = project(&self.view_proj, size, Vec3::from_array(eb));
                 if let (Some(a), Some(b)) = (a, b) {
                     frame.stroke(&Path::line(a, b), canvas::Stroke::default().with_color(ink).with_width(width));
                 }
@@ -409,8 +443,9 @@ mod tests {
         let vp = cam.view_proj(1.0);
         let grid = GridLine { name: "A".into(), a: [-10.0, 0.0, 0.0], b: [10.0, 0.0, 0.0] };
         let [s, e] = bubble_centres(&vp, (800.0, 800.0), &grid).expect("on screen");
-        let a = project(&vp, (800.0, 800.0), Vec3::new(-10.0, 0.0, 0.0)).unwrap();
-        let b = project(&vp, (800.0, 800.0), Vec3::new(10.0, 0.0, 0.0)).unwrap();
+        // the line as drawn runs a metre on past each end
+        let a = project(&vp, (800.0, 800.0), Vec3::new(-10.0 - GRID_EXTENSION, 0.0, 0.0)).unwrap();
+        let b = project(&vp, (800.0, 800.0), Vec3::new(10.0 + GRID_EXTENSION, 0.0, 0.0)).unwrap();
         assert!((s.distance(a) - RADIUS).abs() < 0.01 && (e.distance(b) - RADIUS).abs() < 0.01);
         assert!(s.x < a.x && e.x > b.x, "outside the line: {s:?} {a:?} {b:?} {e:?}");
     }

@@ -39,6 +39,7 @@ impl ModelKey {
             ModelKey::Delete => l.text("Verwijderen", "Delete"),
             ModelKey::LevelUp => l.text("Niveau hoger", "Level up"),
             ModelKey::LevelDown => l.text("Niveau lager", "Level down"),
+            ModelKey::ZoomAll => l.text("Alles in beeld", "Zoom all"),
         }
     }
 }
@@ -150,6 +151,9 @@ impl App {
             }
             ModelKey::LevelUp => self.step_level(true),
             ModelKey::LevelDown => self.step_level(false),
+            ModelKey::ZoomAll => {
+                let _ = self.update(Message::Fit);
+            }
         }
     }
 }

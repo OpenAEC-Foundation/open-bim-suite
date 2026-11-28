@@ -1481,7 +1481,9 @@ impl canvas::Program<Message> for ViewMarks {
         }
         // the grid lines and levels of the view, as its drawing has them
         for d in &self.datums {
-            if let (Some(a), Some(b)) = (self.px(&screen, d.a), self.px(&screen, d.b)) {
+            // a grid line runs on past its ends to its bubbles
+            let (da, db) = if d.level.is_none() { crate::annotations::extended_2d(d.a, d.b) } else { (d.a, d.b) };
+            if let (Some(a), Some(b)) = (self.px(&screen, da), self.px(&screen, db)) {
                 let mark = GridMark { picked: d.level.is_none() && self.picked_grids.contains(&d.name), locked: d.level.is_none() && self.locked_grids.contains(&d.name) };
                 draw_datum(&mut frame, a, b, &d.name, d.level.is_some(), self.paper(&screen, d.a) / 1000.0, &self.grid, ink, if p.dark { Color::from_rgb(0.16, 0.16, 0.18) } else { Color::WHITE }, mark);
             }

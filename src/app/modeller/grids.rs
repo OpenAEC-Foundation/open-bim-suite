@@ -334,6 +334,10 @@ impl App {
                 return false;
             }
             let Some(under) = self.grid_under(from.0, from.1, width, height, None) else { return false };
+            // a grid line not picked is taken as it is grabbed: it alone moves
+            if !self.grids_picked().contains(&under) {
+                self.pick_grid(Some(under));
+            }
             let picked = self.picked_modelled_grids();
             if !self.grids_picked().contains(&under) || picked.is_empty() {
                 return false;
@@ -1009,6 +1013,22 @@ mod tests {
         let g = app.modeller.model.grids();
         assert!((g[0].start.y - 5.0).abs() < 0.05 && g[0].end.y == 8.0, "{:?}", g[0]);
         assert!(g[1].start.y == -1.0 && g[1].end.y == 4.0, "the short one would pass its other end: it stays {:?}", g[1]);
+    }
+
+    #[test]
+    fn a_grid_line_not_picked_is_dragged_at_once_and_alone() {
+        let mut app = three_grid_lines();
+        let (w, h) = app.viewport_size;
+        let at = |app: &crate::app::App, x: f64, y: f64| app.on_screen(glam::DVec3::new(x, y, 0.0), w, h).unwrap();
+        // nothing picked: grabbed by its line, the middle one moves, the others stay
+        app.pick_grid(None);
+        assert!(app.picked_modelled_grids().is_empty());
+        let (from, to) = (at(&app, 5.0, 2.0), at(&app, 6.2, 2.0));
+        drag(&mut app, from, to);
+        let xs: Vec<f64> = app.modeller.model.grids().iter().map(|g| g.start.x).collect();
+        assert!(xs[0] == 2.0 && (xs[1] - 6.2).abs() < 0.011 && xs[2] == 8.0, "{xs:?}");
+        assert_eq!(app.picked_modelled_grids(), [1], "it is picked after");
+        assert!(app.box_select.is_none());
     }
 
     #[test]

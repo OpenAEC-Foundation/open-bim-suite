@@ -354,6 +354,9 @@ pub struct Modeller {
     pub files: std::collections::HashMap<u64, (Arc<Model>, u64)>,
     /// The elements were shown again since the history last looked: they may have changed.
     pub touched: bool,
+    /// The project as it was when it was last saved, opened or made new: what tells whether
+    /// closing it loses work. None: it was never one of those.
+    pub saved: Option<Step>,
 }
 
 /// The modelled project at one step of its history: the elements, the walls taken over from
@@ -403,6 +406,8 @@ impl App {
         if model.project.elements.is_empty() {
             return;
         }
+        // what could not be read: saved again, the file would lose it
+        let mut unread = 0usize;
         for definition in &model.project.elements {
             // a grid line comes under its own key, an element as it is
             if let Some(library) = definition.get(crate::export::ifcx::LIBRARY) {
@@ -415,13 +420,23 @@ impl App {
             } else if let Some(style) = definition.get(crate::export::ifcx::HOUSE) {
                 self.adopt_house(style);
             } else if let Some(rooms) = definition.get(crate::export::ifcx::ROOMS) {
-                self.modeller.rooms = serde_json::from_value(rooms.clone()).unwrap_or_default();
+                match serde_json::from_value(rooms.clone()) {
+                    Ok(rooms) => self.modeller.rooms = rooms,
+                    Err(_) => unread += 1,
+                }
             } else if let Some(grid) = definition.get(crate::export::ifcx::GRID) {
-                if let Ok(grid) = serde_json::from_value::<bim_core::GridDef>(grid.clone()) {
-                    let _ = self.modeller.model.insert_grid(grid);
+                match serde_json::from_value::<bim_core::GridDef>(grid.clone()) {
+                    Ok(grid) => {
+                        if self.modeller.model.insert_grid(grid).is_err() {
+                            unread += 1;
+                        }
+                    }
+                    Err(_) => unread += 1,
                 }
             } else if let Ok(element) = serde_json::from_value::<Element>(definition.clone()) {
                 self.modeller.model.insert(element);
+            } else {
+                unread += 1;
             }
         }
         // a file of the project alone (no meshes of its own) is the modelled project: the model
@@ -434,6 +449,9 @@ impl App {
         // what a file gives is where its history starts
         self.settle_modelled();
         self.fit();
+        if unread > 0 {
+            self.status = super::Status::Error(format!("{unread} parts of the file could not be read and are missing: do not save it over the original"));
+        }
     }
 
     /// An empty model to model in, with a first level at 0 named `level`; the model shown before
@@ -442,7 +460,12 @@ impl App {
         let empty = Arc::new(Model::new(PathBuf::from("model.ifcx"), "IFCX", Vec::new()));
         self.set_model(empty.clone());
         self.modeller = Modeller { shown: Some(empty.id), ..self.modeller.anew() };
-        let _ = self.document.add_level(level, 0.0);
+        // the first level, with its floor plan to draw in, as every level added later gets one
+        if let Ok(index) = self.document.add_level(level, 0.0) {
+            if let Some(path) = self.document.levels().get(index).map(|l| l.path.clone()) {
+                self.level_added(&path);
+            }
+        }
         // the empty project with its first level is where its history starts
         self.settle_modelled();
         self.grid = true;
@@ -618,6 +641,8 @@ impl App {
             points.extend(middles.into_iter().map(|p| (p, Snap::Middle)));
         }
         if snaps.grid {
+            // the project's origin, where a first grid line or wall usually starts
+            points.push((DVec3::new(0.0, 0.0, self.work_plane().0), Snap::Grid));
             points.extend(self.grid_snap_points().into_iter().map(|p| (p, Snap::Grid)));
             // where a grid line crosses the side or the axis of a wall or the edge of a floor: a
             // column goes against the inside of a wall on its grid line
@@ -709,10 +734,32 @@ impl App {
     /// that is where it is, rounded).
     pub(super) fn snapped_as(&self, p: DVec3, x: f32, y: f32, width: f32, height: f32) -> (DVec3, Option<snaps::Snap>) {
         let (q, kind) = self.snapped_free(p, x, y, width, height);
-        // square only: along x or y from the last point, whatever it landed on
-        match self.modeller.points.last().filter(|_| self.modeller.snaps.square) {
+        // Ortho (unless Polar allows the diagonals too) and Square only hold the point along x or
+        // y from the last one, whatever it landed on: an end or a line it snapped to is taken
+        // across onto that axis, so a wall drawn with Ortho on runs straight every time
+        let snaps = self.modeller.snaps;
+        let held = (snaps.square || (snaps.ortho && !snaps.polar)) && !self.draws_a_rectangle();
+        match self.modeller.points.last().filter(|_| held) {
             Some(from) => (snaps::squared(from.truncate(), q.truncate()).extend(q.z), kind.or(Some(snaps::Snap::Square))),
             None => (q, kind),
+        }
+    }
+
+    /// Whether the tool on lays its element in the rectangle between its two clicks (a slab, a
+    /// lying system, the Wall tool's four walls), whose second click is the far corner: Ortho
+    /// does not hold that one to an axis.
+    fn draws_a_rectangle(&self) -> bool {
+        if self.modeller.grid_tool {
+            return false;
+        }
+        match self.modeller.tool {
+            Some((ModelTool::Slab, _)) => true,
+            Some((ModelTool::Wall, _)) => self.modeller.placement.rectangle,
+            Some((ModelTool::System, _)) => {
+                let s = self.modeller.placement.of(ModelTool::System);
+                s.kind.as_deref().and_then(|id| self.library.system_type(id)).is_some_and(|t| t.lying.is_some())
+            }
+            _ => false,
         }
     }
 
@@ -2085,7 +2132,8 @@ mod tests {
             let grid = app.modeller.model.grid;
             app.modeller.model.iter().filter_map(|e| match e.shape_in_project(&grid) { Shape::Planar(PlanarDef { form: PlanarForm::Wall { start, end, .. }, .. }) => Some((start, end)), _ => None }).collect()
         };
-        // off (as it starts): a wall at any angle
+        // off (as it starts), with Ortho off too: a wall at any angle
+        app.modeller.snaps.toggle(snaps::Snap::Ortho);
         app.set_model_tool(Some((ModelTool::Wall, "Wall")));
         app.modeller.placement.chain = false;
         click(&mut app, 0.0, 0.0);
