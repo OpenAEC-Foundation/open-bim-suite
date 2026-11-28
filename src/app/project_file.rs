@@ -30,6 +30,9 @@ pub struct Project {
     pub version: u32,
     #[serde(default, skip_serializing_if = "super::work_packages::Register::is_empty")]
     pub work_packages: super::work_packages::Register,
+    /// The sensors of facility management and their readings.
+    #[serde(default, skip_serializing_if = "super::fm::Register::is_empty")]
+    pub fm: super::fm::Register,
     /// The files, in the order they were opened.
     pub models: Vec<Source>,
     /// How the 3D view looks at them.
@@ -177,6 +180,7 @@ impl App {
         Project {
             version: 1,
             work_packages,
+            fm: self.fm.register.clone(),
             models,
             camera: Some(View { target: c.target.to_array(), distance: c.distance, yaw: c.yaw, pitch: c.pitch, fov_y: c.fov_y, ortho: c.ortho }),
             plane: self.plane.map(|p| (p.normal.to_array(), p.offset)),
@@ -261,6 +265,7 @@ impl App {
         let Some(Opening { project, folder, missing }) = self.project_opening.take() else { return };
         self.work_packages = project.work_packages;
         self.work_packages.map_sources(|path| resolved(&folder, &path.to_string_lossy()));
+        self.fm.register = project.fm;
         #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
         { self.refresh_package_index(); self.update_units(); }
         let mut moved = false;
@@ -324,6 +329,7 @@ mod tests {
         Project {
             version: 1,
             work_packages: Default::default(),
+            fm: Default::default(),
             models: vec![
                 Source { path: "models/architect.ifc".into(), visible: true, moved: [0.0; 3], zero: [0.0; 3], turned: 0.0, discipline: String::new(), party: String::new() },
                 Source { path: "../structure/frame.rvt".into(), visible: false, moved: [12.5, -3.0, 0.25], zero: [1.0, 2.0, 3.0], turned: 12.5, discipline: "Structure".into(), party: "Engineer BV".into() },

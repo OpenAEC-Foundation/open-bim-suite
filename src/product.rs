@@ -41,6 +41,9 @@ pub enum Product {
     /// Open Planner Studio, the planning program of the same house: its web version in a web frame
     /// (a trial, on Windows).
     Planner,
+    /// Facility management: the building's installations as assets, the sensors linked to them
+    /// and what they measure, over the model.
+    Fm,
 }
 
 impl std::fmt::Display for Product {
@@ -50,7 +53,7 @@ impl std::fmt::Display for Product {
 }
 
 impl Product {
-    pub const ALL: [Product; 10] = [Product::Viewer, Product::Ifcx, Product::Validator, Product::Pointcloud, Product::Analysis, Product::Modeller, Product::Docs, Product::Gis, Product::Library, Product::Planner];
+    pub const ALL: [Product; 11] = [Product::Viewer, Product::Ifcx, Product::Validator, Product::Pointcloud, Product::Analysis, Product::Modeller, Product::Docs, Product::Fm, Product::Gis, Product::Library, Product::Planner];
 
     /// Its key on the command line, in the preferences and in a web address (`?product=`).
     pub fn key(self) -> &'static str {
@@ -65,6 +68,7 @@ impl Product {
             Product::Library => "library",
             Product::Ifcx => "ifcx",
             Product::Planner => "planner",
+            Product::Fm => "fm",
         }
     }
 
@@ -82,6 +86,7 @@ impl Product {
             "library" | "libraries" => Some(Product::Library),
             "ifcx" | "ifc" => Some(Product::Ifcx),
             "planner" => Some(Product::Planner),
+            "fm" | "facility" | "facility-management" => Some(Product::Fm),
             _ => None,
         }
     }
@@ -100,6 +105,7 @@ impl Product {
             Product::Library => "Library",
             Product::Ifcx => "IFCX",
             Product::Planner => "Planner",
+            Product::Fm => "FM",
         }
     }
 
@@ -116,6 +122,7 @@ impl Product {
             Product::Library => "Library",
             Product::Ifcx => "IFCX",
             Product::Planner => "Planner",
+            Product::Fm => "Facility Management",
         }
     }
 
@@ -124,7 +131,7 @@ impl Product {
     pub fn stage(self) -> Option<&'static str> {
         match self {
             Product::Modeller => Some("(alpha, not usable)"),
-            Product::Pointcloud | Product::Analysis | Product::Docs | Product::Gis | Product::Planner | Product::Library => Some("(alpha)"),
+            Product::Pointcloud | Product::Analysis | Product::Docs | Product::Gis | Product::Planner | Product::Library | Product::Fm => Some("(alpha)"),
             Product::Viewer | Product::Validator | Product::Ifcx => None,
         }
     }
@@ -142,6 +149,7 @@ impl Product {
             Product::Library => l.text("De bibliotheken: algemeen, per land, van het bedrijf en van het project", "The libraries: general, per country, of the company and of the project"),
             Product::Ifcx => l.text("Het project zoals het in IFCX staat: nodes, tabel, relaties en tekst", "The project as it stands in IFCX: nodes, table, relations and text"),
             Product::Planner => l.text("De planning van het project: de webversie van Open Planner Studio in een webframe", "The planning of the project: the web version of Open Planner Studio in a web frame"),
+            Product::Fm => l.text("Facility management: installaties, sensoren en meetwaarden over het model", "Facility management: installations, sensors and readings over the model"),
         }
     }
 
@@ -158,6 +166,7 @@ impl Product {
             Product::Library => "product.library",
             Product::Ifcx => "product.ifcx",
             Product::Planner => "product.planner",
+            Product::Fm => "product.fm",
         }
     }
 
@@ -175,6 +184,7 @@ impl Product {
             Product::Library => &[RibbonPage::Library],
             Product::Ifcx => &[RibbonPage::Ifcx],
             Product::Planner => &[RibbonPage::Planner],
+            Product::Fm => &[RibbonPage::Fm, RibbonPage::View],
         }
     }
 
@@ -191,6 +201,7 @@ impl Product {
             Product::Library => "Open BIM Library",
             Product::Ifcx => "Open BIM IFCX",
             Product::Planner => "Open BIM Planner",
+            Product::Fm => "Open BIM FM",
         }
     }
 
@@ -207,6 +218,7 @@ impl Product {
             Product::Library => "open-bim-library",
             Product::Ifcx => "open-bim-ifcx",
             Product::Planner => "open-bim-planner",
+            Product::Fm => "open-bim-fm",
         }
     }
 
@@ -229,6 +241,8 @@ impl Product {
             Product::Ifcx => true,
             // a web frame in the window: where the build holds one (Windows, for now)
             Product::Planner => cfg!(all(feature = "planner", windows)),
+            // part of the viewer: it looks at installations and colours them by what they measure
+            Product::Fm => cfg!(feature = "viewer"),
         }
     }
 
@@ -320,6 +334,8 @@ pub enum RibbonPage {
     Library,
     /// Planner: the web frame of Open Planner Studio.
     Planner,
+    /// FM: the assets, the sensors and their readings.
+    Fm,
 }
 
 impl RibbonPage {
@@ -338,6 +354,7 @@ impl RibbonPage {
             RibbonPage::Docs => "Docs",
             RibbonPage::Gis => "GIS",
             RibbonPage::Planner => "Planner",
+            RibbonPage::Fm => "FM",
             RibbonPage::Geo => l.text("Geotechniek", "Geotechnics"),
             RibbonPage::Infra => "Infra",
             RibbonPage::Civil => l.text("Civiel", "Civil"),
@@ -478,8 +495,8 @@ mod tests {
         assert_eq!(Product::parse("modeler"), Some(Product::Modeller));
         assert_eq!(Product::parse("editor"), None);
         // the switch: short names, and the four in alpha are the grey ones
-        assert_eq!(Product::ALL.map(Product::label), ["View", "IFCX", "Validator", "PointCloud", "Struct", "Modeller", "Docs", "GIC", "Library", "Planner"]);
-        assert_eq!(Product::ALL.map(|p| p.stage().is_some()), [false, false, false, true, true, true, true, true, true, true]);
+        assert_eq!(Product::ALL.map(Product::label), ["View", "IFCX", "Validator", "PointCloud", "Struct", "Modeller", "Docs", "FM", "GIC", "Library", "Planner"]);
+        assert_eq!(Product::ALL.map(|p| p.stage().is_some()), [false, false, false, true, true, true, true, true, true, true, true]);
     }
 
     #[test]
@@ -490,7 +507,7 @@ mod tests {
         names.dedup();
         ids.sort();
         ids.dedup();
-        assert_eq!((names.len(), ids.len()), (10, 10));
+        assert_eq!((names.len(), ids.len()), (11, 11));
         // the Studio is what was released as the viewer: same name, same installer id
         assert_eq!((Edition::Studio.name(), Edition::Studio.app_id()), ("Open BIM Suite", "open-3d-viewer"));
         assert_eq!(Edition::Only(Product::Modeller).products(), vec![Product::Modeller]);
