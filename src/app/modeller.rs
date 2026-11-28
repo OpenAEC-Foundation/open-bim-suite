@@ -354,6 +354,9 @@ pub struct Modeller {
     pub files: std::collections::HashMap<u64, (Arc<Model>, u64)>,
     /// The elements were shown again since the history last looked: they may have changed.
     pub touched: bool,
+    /// The project as it was when it was last saved, opened or made new: what tells whether
+    /// closing it loses work. None: it was never one of those.
+    pub saved: Option<Step>,
 }
 
 /// The modelled project at one step of its history: the elements, the walls taken over from
@@ -403,6 +406,8 @@ impl App {
         if model.project.elements.is_empty() {
             return;
         }
+        // what could not be read: saved again, the file would lose it
+        let mut unread = 0usize;
         for definition in &model.project.elements {
             // a grid line comes under its own key, an element as it is
             if let Some(library) = definition.get(crate::export::ifcx::LIBRARY) {
@@ -415,13 +420,23 @@ impl App {
             } else if let Some(style) = definition.get(crate::export::ifcx::HOUSE) {
                 self.adopt_house(style);
             } else if let Some(rooms) = definition.get(crate::export::ifcx::ROOMS) {
-                self.modeller.rooms = serde_json::from_value(rooms.clone()).unwrap_or_default();
+                match serde_json::from_value(rooms.clone()) {
+                    Ok(rooms) => self.modeller.rooms = rooms,
+                    Err(_) => unread += 1,
+                }
             } else if let Some(grid) = definition.get(crate::export::ifcx::GRID) {
-                if let Ok(grid) = serde_json::from_value::<bim_core::GridDef>(grid.clone()) {
-                    let _ = self.modeller.model.insert_grid(grid);
+                match serde_json::from_value::<bim_core::GridDef>(grid.clone()) {
+                    Ok(grid) => {
+                        if self.modeller.model.insert_grid(grid).is_err() {
+                            unread += 1;
+                        }
+                    }
+                    Err(_) => unread += 1,
                 }
             } else if let Ok(element) = serde_json::from_value::<Element>(definition.clone()) {
                 self.modeller.model.insert(element);
+            } else {
+                unread += 1;
             }
         }
         // a file of the project alone (no meshes of its own) is the modelled project: the model
@@ -434,6 +449,9 @@ impl App {
         // what a file gives is where its history starts
         self.settle_modelled();
         self.fit();
+        if unread > 0 {
+            self.status = super::Status::Error(format!("{unread} parts of the file could not be read and are missing: do not save it over the original"));
+        }
     }
 
     /// An empty model to model in, with a first level at 0 named `level`; the model shown before
@@ -442,7 +460,12 @@ impl App {
         let empty = Arc::new(Model::new(PathBuf::from("model.ifcx"), "IFCX", Vec::new()));
         self.set_model(empty.clone());
         self.modeller = Modeller { shown: Some(empty.id), ..self.modeller.anew() };
-        let _ = self.document.add_level(level, 0.0);
+        // the first level, with its floor plan to draw in, as every level added later gets one
+        if let Ok(index) = self.document.add_level(level, 0.0) {
+            if let Some(path) = self.document.levels().get(index).map(|l| l.path.clone()) {
+                self.level_added(&path);
+            }
+        }
         // the empty project with its first level is where its history starts
         self.settle_modelled();
         self.grid = true;

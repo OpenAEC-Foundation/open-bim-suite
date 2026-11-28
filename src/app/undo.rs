@@ -205,6 +205,38 @@ impl App {
         self.modeller.base = self.modelled_step();
         self.modeller.history.clear();
         self.modeller.touched = false;
+        self.modeller.saved = Some(self.modeller.base.clone());
+    }
+
+    /// A grid line drawn, as the Grid tool draws one: a change to save.
+    #[cfg(test)]
+    pub(crate) fn modeller_insert_grid_for_test(&mut self) {
+        let n = self.modeller.model.grids().len();
+        let grid = bim_core::GridDef { name: format!("T{n}"), start: glam::DVec2::new(n as f64, 0.0), end: glam::DVec2::new(n as f64, 5.0), locked: false };
+        let _ = self.modeller.model.insert_grid(grid);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn saved_to_for_test(&mut self, path: &std::path::Path) {
+        self.saved_to(path);
+    }
+
+    /// Whether the modelled project has changes that were not saved: closing it would lose them.
+    /// A project never saved, opened or made new has them when it holds anything modelled.
+    pub fn unsaved(&self) -> bool {
+        match &self.modeller.saved {
+            Some(saved) => *saved != self.modelled_step(),
+            None => !self.modeller.model.is_empty() || !self.modeller.taken.is_empty(),
+        }
+    }
+
+    /// The project was written to `path`: when that keeps the modelled project (its IFCX file or
+    /// a project file), it is saved as it is now.
+    pub(super) fn saved_to(&mut self, path: &std::path::Path) {
+        let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
+        if ext == "ifcx" || crate::app::project_file::Project::peek(path).is_some() {
+            self.modeller.saved = Some(self.modelled_step());
+        }
     }
 
     pub fn can_undo(&self) -> bool {
