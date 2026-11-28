@@ -156,6 +156,32 @@ mod tests {
     use glam::DVec3;
 
     #[test]
+    fn a_floor_plan_looks_straight_down_even_when_empty_and_does_not_turn_and_the_origin_snaps() {
+        let mut app = App::default();
+        app.modeller.in_modeller = true;
+        app.new_model("Level 0");
+        // a floor plan of its level, opened: from above, flat, also with nothing in it yet
+        let level = app.document.levels()[0].path.clone();
+        let plan = app.document.add_plan(&level).expect("a plan");
+        let _ = app.update(crate::app::Message::OpenPlan(plan.into()));
+        app.finish_animation();
+        assert!(app.camera.ortho, "a plan is flat");
+        assert!(app.camera.pitch.to_degrees() > 89.0, "from above: {}", app.camera.pitch.to_degrees());
+        assert!(app.fixed_view());
+        // a drag that would turn it moves it instead
+        let (yaw, pitch, target) = (app.camera.yaw, app.camera.pitch, app.camera.target);
+        app.orbit_drag(40.0, 25.0);
+        assert_eq!((app.camera.yaw, app.camera.pitch), (yaw, pitch));
+        assert_ne!(app.camera.target, target);
+        // the Grid tool lands on the origin from near it
+        app.toggle_grid_tool();
+        let (w, h) = (800.0, 600.0);
+        let near = DVec3::new(0.04, -0.03, 0.0);
+        let (x, y) = app.on_screen(near, w, h).unwrap();
+        assert_eq!(app.snapped_as(near, x, y, w, h), (DVec3::ZERO, Some(Snap::Grid)));
+    }
+
+    #[test]
     fn with_ortho_on_a_wall_runs_straight_from_its_last_point_whatever_the_click_lands_on() {
         let mut app = modelling();
         // a wall to snap to: its end off the line of the next one
@@ -201,9 +227,11 @@ mod tests {
         assert_eq!(at(&app, DVec3::new(0.03, 0.04, 0.0)), DVec3::new(0.0, 0.0, 0.0));
         let on = at(&app, DVec3::new(10.513, 0.04, 0.0));
         assert!((on - DVec3::new(10.513, 0.0, 0.0)).length() < 1e-9, "{on}");
-        // switched off, the click is where it is, in whole centimetres; and not even those
+        // switched off, the click is where it is, in whole centimetres; and not even those (the
+        // grid's off too: the wall's middle is on the origin, which the grid snaps to)
         app.modeller.snaps.toggle(Snap::Middle);
         app.modeller.snaps.toggle(Snap::Line);
+        app.modeller.snaps.toggle(Snap::Grid);
         assert_eq!(at(&app, DVec3::new(0.03, 0.04, 0.0)), DVec3::new(0.03, 0.04, 0.0));
         assert_eq!(at(&app, DVec3::new(10.513, 0.044, 0.0)), DVec3::new(10.51, 0.04, 0.0));
         app.modeller.snaps.toggle(Snap::Round);
@@ -212,7 +240,7 @@ mod tests {
         assert_eq!(at(&app, DVec3::new(20.02, 0.03, 0.0)), DVec3::new(20.0, 0.0, 0.0));
         app.modeller.snaps.toggle(Snap::End);
         assert_eq!(at(&app, DVec3::new(20.02, 0.03, 0.0)), DVec3::new(20.02, 0.03, 0.0));
-        assert!(Snap::ALL.iter().filter(|s| app.modeller.snaps.is(**s)).count() == 2);
+        assert!(Snap::ALL.iter().filter(|s| app.modeller.snaps.is(**s)).count() == 1);
         // the cursor's point carries the mark of its snap: the grid, with all snaps on again
         app.modeller.snaps = Snaps::default();
         app.add_grid_line(glam::DVec2::new(5.0, -3.0), glam::DVec2::new(5.0, 9.0)).unwrap();

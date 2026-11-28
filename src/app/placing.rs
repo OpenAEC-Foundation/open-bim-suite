@@ -139,6 +139,19 @@ pub struct PlacingOverlay {
 /// Half the size of a snap's mark (pixels).
 const MARK: f32 = 6.0;
 
+/// Half the size of the cursor's crosshair (pixels).
+const CROSSHAIR: f32 = 7.0;
+
+/// A small crosshair at `p`: the cursor's point where no object is snapped to.
+fn crosshair(p: Point) -> Path {
+    Path::new(|b| {
+        b.move_to(Point::new(p.x - CROSSHAIR, p.y));
+        b.line_to(Point::new(p.x + CROSSHAIR, p.y));
+        b.move_to(Point::new(p.x, p.y - CROSSHAIR));
+        b.line_to(Point::new(p.x, p.y + CROSSHAIR));
+    })
+}
+
 impl PlacingOverlay {
     /// The mark of a snap at `p`: a square for an end, a triangle for a middle, a cross for the
     /// grid, a diamond for a point on a line; each in its own colour over a dark edge, with its
@@ -175,7 +188,14 @@ impl PlacingOverlay {
                     b.close();
                 }),
             ),
-            Snap::Ortho | Snap::Polar | Snap::Round | Snap::Square => (Color::from_rgb8(240, 140, 0), Path::circle(p, MARK - 1.0)),
+            // held to an axis or rounded: the crosshair, no ring; rounding, as good as always on,
+            // says nothing
+            Snap::Ortho | Snap::Polar | Snap::Square => (Color::from_rgb8(240, 140, 0), crosshair(p)),
+            Snap::Round => {
+                frame.stroke(&crosshair(p), canvas::Stroke::default().with_color(Color::from_rgba8(255, 255, 255, 0.8)).with_width(3.0));
+                frame.stroke(&crosshair(p), canvas::Stroke::default().with_color(Color::from_rgb8(30, 30, 34)).with_width(1.25));
+                return;
+            }
         };
         frame.stroke(&shape, canvas::Stroke::default().with_color(Color::from_rgba8(0, 0, 0, 0.75)).with_width(4.0));
         frame.stroke(&shape, canvas::Stroke::default().with_color(color).with_width(2.0));
@@ -228,7 +248,7 @@ impl<M> canvas::Program<M> for PlacingOverlay {
             frame.fill(&path, canvas::Fill { style: canvas::Style::Solid(fill), rule: canvas::fill::Rule::EvenOdd });
             frame.stroke(&path, edge);
         }
-        // the points clicked, and the cursor's point as a ring
+        // the points clicked, and the cursor's point as a small crosshair
         for (p, _) in self.points.iter().filter_map(|p| self.project(size, *p)) {
             frame.fill(&Path::rectangle(Point::new(p.x - 3.5, p.y - 3.5), Size::new(7.0, 7.0)), self.ink);
         }
@@ -236,7 +256,8 @@ impl<M> canvas::Program<M> for PlacingOverlay {
             match self.mark {
                 Some((kind, name)) => Self::draw_mark(&mut frame, p, kind, name),
                 None => {
-                    frame.stroke(&Path::circle(p, 5.0), canvas::Stroke::default().with_color(self.ink).with_width(1.5));
+                    frame.stroke(&crosshair(p), canvas::Stroke::default().with_color(Color::from_rgba8(255, 255, 255, 0.8)).with_width(3.0));
+                    frame.stroke(&crosshair(p), canvas::Stroke::default().with_color(self.ink).with_width(1.25));
                 }
             }
         }

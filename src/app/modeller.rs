@@ -618,6 +618,8 @@ impl App {
             points.extend(middles.into_iter().map(|p| (p, Snap::Middle)));
         }
         if snaps.grid {
+            // the project's origin, where a first grid line or wall usually starts
+            points.push((DVec3::new(0.0, 0.0, self.work_plane().0), Snap::Grid));
             points.extend(self.grid_snap_points().into_iter().map(|p| (p, Snap::Grid)));
             // where a grid line crosses the side or the axis of a wall or the edge of a floor: a
             // column goes against the inside of a wall on its grid line
@@ -713,10 +715,28 @@ impl App {
         // y from the last one, whatever it landed on: an end or a line it snapped to is taken
         // across onto that axis, so a wall drawn with Ortho on runs straight every time
         let snaps = self.modeller.snaps;
-        let held = snaps.square || (snaps.ortho && !snaps.polar);
+        let held = (snaps.square || (snaps.ortho && !snaps.polar)) && !self.draws_a_rectangle();
         match self.modeller.points.last().filter(|_| held) {
             Some(from) => (snaps::squared(from.truncate(), q.truncate()).extend(q.z), kind.or(Some(snaps::Snap::Square))),
             None => (q, kind),
+        }
+    }
+
+    /// Whether the tool on lays its element in the rectangle between its two clicks (a slab, a
+    /// lying system, the Wall tool's four walls), whose second click is the far corner: Ortho
+    /// does not hold that one to an axis.
+    fn draws_a_rectangle(&self) -> bool {
+        if self.modeller.grid_tool {
+            return false;
+        }
+        match self.modeller.tool {
+            Some((ModelTool::Slab, _)) => true,
+            Some((ModelTool::Wall, _)) => self.modeller.placement.rectangle,
+            Some((ModelTool::System, _)) => {
+                let s = self.modeller.placement.of(ModelTool::System);
+                s.kind.as_deref().and_then(|id| self.library.system_type(id)).is_some_and(|t| t.lying.is_some())
+            }
+            _ => false,
         }
     }
 
