@@ -2165,6 +2165,11 @@
     "Second moments": "Tröghetsmoment",
     "Layer outside": "Skikt utsida",
     "Layer inside": "Skikt insida",
-    "NL-SfB": "NL-SfB"
+    "NL-SfB": "NL-SfB",
+    "Don't save": "Spara inte",
+    "Don't save throws them away.": "Spara inte kastar dem.",
+    "Not saved": "Inte sparat",
+    "Save…": "Spara…",
+    "There are changes that are not saved yet:": "Det finns ändringar som inte har sparats än:"
   }
 }
