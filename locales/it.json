@@ -2166,6 +2166,11 @@
     "Layer outside": "Strato esterno",
     "Layer inside": "Strato interno",
     "NL-SfB": "NL-SfB",
-    "Zoom all": "Mostra tutto"
+    "Zoom all": "Mostra tutto",
+    "Don't save": "Non salvare",
+    "Don't save throws them away.": "Non salvare le scarta.",
+    "Not saved": "Non salvato",
+    "Save…": "Salva…",
+    "There are changes that are not saved yet:": "Ci sono modifiche non ancora salvate:"
   }
 }

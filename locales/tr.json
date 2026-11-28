@@ -2166,6 +2166,11 @@
     "Layer outside": "Dış katman",
     "Layer inside": "İç katman",
     "NL-SfB": "NL-SfB",
-    "Zoom all": "Tümünü göster"
+    "Zoom all": "Tümünü göster",
+    "Don't save": "Kaydetme",
+    "Don't save throws them away.": "Kaydetme onları atar.",
+    "Not saved": "Kaydedilmedi",
+    "Save…": "Kaydet…",
+    "There are changes that are not saved yet:": "Henüz kaydedilmemiş değişiklikler var:"
   }
 }

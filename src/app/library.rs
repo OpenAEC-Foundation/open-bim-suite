@@ -1110,6 +1110,60 @@ mod tests {
     }
 
     #[test]
+    fn a_modelled_building_written_as_ifc4_has_its_openings_its_grid_and_extrusions() {
+        use bim_core::{LinearDef, OpeningKind, PlanarDef, PointDef, ProfileDef, Shape};
+        use glam::{DVec2, DVec3};
+        let mut app = App::default();
+        app.new_model("Level 0");
+        let planar = |form, thickness| Shape::Planar(PlanarDef { form, thickness, openings: Vec::new(), build_up: None });
+        let wall = app.add_element("Wall", None, planar(PlanarForm::Wall { start: DVec2::ZERO, end: DVec2::new(6.0, 0.0), base: 0.0, height: 3.0 }, 0.2)).unwrap();
+        let point = |x: f64, z: f64, size: DVec3, kind| Shape::Point(PointDef { at: DVec3::new(x, 0.0, z), rotation: 0.0, size, opening: Some(kind), mirrored: false, role: Default::default() });
+        let door = app.add_element("Door", None, point(1.5, 0.0, DVec3::new(0.9, 0.04, 2.1), OpeningKind::Door)).unwrap();
+        let window = app.add_element("Window", None, point(4.5, 0.9, DVec3::new(1.2, 0.04, 1.2), OpeningKind::Window)).unwrap();
+        // apart from the wall and each other, so no joint changes their ends
+        let slab = vec![DVec2::new(20.0, 0.0), DVec2::new(25.0, 0.0), DVec2::new(25.0, 4.0), DVec2::new(20.0, 4.0)];
+        app.add_element("Floor", None, planar(PlanarForm::Slab { outline: slab, holes: Vec::new(), top: 0.0, bulges: Vec::new(), role: Default::default(), slope: None }, 0.25)).unwrap();
+        let linear = |start: DVec3, end: DVec3| Shape::Linear(LinearDef { start, end, profile: ProfileDef::Rectangle { width: 0.3, height: 0.3 }, roll: 0.0, role: Default::default() });
+        app.add_element("Column", None, linear(DVec3::new(10.0, 5.0, 0.0), DVec3::new(10.0, 5.0, 3.0))).unwrap();
+        app.add_element("Beam", None, linear(DVec3::new(12.0, 8.0, 3.0), DVec3::new(17.0, 8.0, 3.0))).unwrap();
+        // two grid lines, one each way
+        app.modeller.model.add_grid(DVec2::new(-1.0, -2.0), DVec2::new(-1.0, 10.0)).unwrap();
+        app.modeller.model.add_grid(DVec2::new(-2.0, -1.0), DVec2::new(30.0, -1.0)).unwrap();
+        app.show_modelled();
+        let scene = app.model.clone().unwrap();
+        let bytes = crate::export::to_bytes(&scene, &app.document_now(), "building.ifc").unwrap();
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        let count = |what: &str| text.matches(what).count();
+        // the door and the window each fill an opening that voids the wall
+        assert_eq!((count("=IFCOPENINGELEMENT("), count("=IFCRELVOIDSELEMENT("), count("=IFCRELFILLSELEMENT(")), (2, 2, 2), "{text}");
+        // one of each: found by its class
+        let entity = |class: &str| text.lines().find(|l| l.contains(&format!("={class}("))).and_then(|l| l.split('=').next()).map(str::to_string).unwrap_or_else(|| panic!("{class}"));
+        let (wall_ref, door_ref, window_ref) = (entity("IFCWALL"), entity("IFCDOOR"), entity("IFCWINDOW"));
+        assert_eq!(text.lines().filter(|l| l.contains("=IFCRELVOIDSELEMENT(") && l.contains(&format!(",{wall_ref},"))).count(), 2);
+        for filler in [&door_ref, &window_ref] {
+            assert!(text.lines().any(|l| l.contains("=IFCRELFILLSELEMENT(") && l.ends_with(&format!(",{filler});"))), "{filler} fills an opening");
+        }
+        // the grid: one axis each way
+        assert_eq!((count("=IFCGRID("), count("=IFCGRIDAXIS(")), (1, 2));
+        // wall, slab, column and beam extruded; the door and window, of frames and leaves, stay triangles
+        assert_eq!(count("=IFCEXTRUDEDAREASOLID("), 4 + 2, "four bodies and two openings");
+        assert!(count("'SweptSolid'") >= 6 && count("'Tessellation'") >= 2);
+        let _ = (wall, door, window);
+        // read back by the app's own reader: the walls, slab, column, beam, door and window, and the grid
+        let source = crate::loaders::Source::Bytes { name: "building.ifc".into(), data: std::sync::Arc::new(bytes) };
+        let back = crate::loaders::load_with(&source, &crate::loaders::Progress::default()).expect("read back");
+        let mut names: Vec<String> = back.project.grids.iter().map(|g| g.name.clone()).collect();
+        names.sort();
+        assert_eq!(names.len(), 2, "{names:?}");
+        let mut classes: Vec<String> = back.props.keys().filter_map(|&id| back.element_props(id).into_iter().find(|(k, _)| k == "IfcType").map(|(_, v)| v)).collect();
+        classes.sort();
+        classes.dedup();
+        for class in ["IfcWall", "IfcSlab", "IfcColumn", "IfcBeam", "IfcDoor", "IfcWindow"] {
+            assert!(classes.iter().any(|c| c == class), "{class} in {classes:?}");
+        }
+    }
+
+    #[test]
     fn a_selected_wall_takes_a_build_up_and_keeps_it_in_ifcx() {
         use bim_core::{PlanarDef, Shape};
         use glam::DVec2;

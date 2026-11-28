@@ -2166,6 +2166,11 @@
     "Layer outside": "Schicht außen",
     "Layer inside": "Schicht innen",
     "NL-SfB": "NL-SfB",
-    "Zoom all": "Alles anzeigen"
+    "Zoom all": "Alles anzeigen",
+    "Don't save": "Nicht speichern",
+    "Don't save throws them away.": "Nicht speichern verwirft sie.",
+    "Not saved": "Nicht gespeichert",
+    "Save…": "Speichern…",
+    "There are changes that are not saved yet:": "Es gibt Änderungen, die noch nicht gespeichert sind:"
   }
 }

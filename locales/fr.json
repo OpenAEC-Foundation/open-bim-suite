@@ -2166,6 +2166,11 @@
     "Layer outside": "Couche extérieure",
     "Layer inside": "Couche intérieure",
     "NL-SfB": "NL-SfB",
-    "Zoom all": "Tout afficher"
+    "Zoom all": "Tout afficher",
+    "Don't save": "Ne pas enregistrer",
+    "Don't save throws them away.": "Ne pas enregistrer les abandonne.",
+    "Not saved": "Non enregistré",
+    "Save…": "Enregistrer…",
+    "There are changes that are not saved yet:": "Des modifications ne sont pas encore enregistrées :"
   }
 }
