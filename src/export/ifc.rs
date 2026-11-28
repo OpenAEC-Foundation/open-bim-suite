@@ -28,6 +28,12 @@
 //!   or slab with a build-up has its layers as an IfcMaterialLayerSet (each layer its material,
 //!   its thickness, and `IsVentilated` for a cavity), named after its type, through an
 //!   IfcMaterialLayerSetUsage: a wall's along its axis, centred on it; a slab's from its top down.
+//! - Of a modelled element the writer also knows its definition (`super::ifc_modelled`): a wall,
+//!   a level slab or a member that is one profile extruded, as shown, is an IfcExtrudedAreaSolid
+//!   ('SweptSolid') instead of triangles; each opening of a wall is an IfcOpeningElement that
+//!   voids it (IfcRelVoidsElement), filled by the door or window standing in it
+//!   (IfcRelFillsElement). The grid lines are an IfcGrid of the lowest storey, when they run two
+//!   ways (it has two sets of axes).
 //! - GlobalIds are derived from the file name and the element, so saving again gives the same ids.
 //! - Units: metres. OBJ, STL and PLY carry no unit; such a model larger than 500 units is taken to
 //!   be in millimetres.
@@ -696,6 +702,12 @@ pub fn write_schema(model: &Model, document: &Document, file_name: &str, schema:
     let mut own_ids: HashSet<String> = HashSet::new();
     // the elements written as their assemblies: the assemblies of each, and each one's own entity
     let mut assembled: Vec<(u64, u64, Vec<u64>)> = Vec::new();
+    // what the Modeller's definitions tell: the openings of walls, the extrusions elements are
+    let modelled = if units.millimetres { None } else { super::ifc_modelled::read(model) };
+    let voids = modelled.as_ref().map(|m| m.voids()).unwrap_or_default();
+    // each element of the model shown that was written: its entity, its storey, where it reaches
+    let mut written: HashMap<u64, (u64, usize, (glam::DVec3, glam::DVec3))> = HashMap::new();
+    let scale = 10f64.powi(units.decimals as i32);
     for product in products(model) {
         let Some(body) = body(model, &product, units) else { continue };
         let unit = match product.key {
@@ -737,7 +749,31 @@ pub fn write_schema(model: &Model, document: &Document, file_name: &str, schema:
         let (_, storey_placement, elevation) = storeys[storey];
 
         let mut items = Vec::new();
-        for (colour, set) in body.sets.iter().filter(|_| !whole) {
+        // the extrusion it is, when its definition is one and it is what its triangles show
+        let swept = match (&product.key, &modelled) {
+            (Key::Element(id), Some(m)) if !whole && !body.sets.is_empty() => m.extrusion(*id).filter(|e| {
+                let voided: f64 = voids.iter().filter(|v| v.host == *id).map(|v| v.width * v.height * v.thickness).sum();
+                matches_triangles(e, voided, &body, scale)
+            }),
+            _ => None,
+        };
+        if let Some(e) = &swept {
+            // in the colour most of it has
+            let colour = body.sets.iter().max_by_key(|(_, s)| s.triangles.len()).map(|(c, _)| *c).unwrap_or([200, 200, 200, 255]);
+            let style = match styles.get(&colour) {
+                Some(&s) => s,
+                None => {
+                    let s = surface_style(&mut f, colour)?;
+                    styles.insert(colour, s);
+                    s
+                }
+            };
+            let origin = glam::DVec3::from_array(body.origin.map(|v| v as f64 / scale));
+            let item = extruded_solid(&mut f, e, origin, units.decimals)?;
+            f.add(format!("IFCSTYLEDITEM(#{item},(#{style}),$)"))?;
+            items.push(item);
+        }
+        for (colour, set) in body.sets.iter().filter(|_| !whole && swept.is_none()) {
             let style = match styles.get(colour) {
                 Some(&s) => s,
                 None => {
@@ -809,7 +845,7 @@ pub fn write_schema(model: &Model, document: &Document, file_name: &str, schema:
             representations.push(if annotation {
                 f.add(format!("IFCSHAPEREPRESENTATION(#{},'Annotation','Tessellation',{})", annotation_context.unwrap_or(body_context), refs(&items)))?
             } else {
-                f.add(format!("IFCSHAPEREPRESENTATION(#{body_context},'Body','Tessellation',{})", refs(&items)))?
+                f.add(format!("IFCSHAPEREPRESENTATION(#{body_context},'Body',{},{})", if swept.is_some() { "'SweptSolid'" } else { "'Tessellation'" }, refs(&items)))?
             });
         }
         if !curve_items.is_empty() {
@@ -857,6 +893,9 @@ pub fn write_schema(model: &Model, document: &Document, file_name: &str, schema:
             _ => format!("{head},.{}.)", who.predefined),
         })?;
         property_set(&mut f, &ids, &key, &model.format, &props, element)?;
+        if let Key::Element(id) = product.key {
+            written.insert(id, (element, storey, body_bounds(&body, scale)));
+        }
         if let (true, Key::Element(id)) = (whole, &product.key) {
             assembled.push((*id, element, Vec::new()));
         }
@@ -897,6 +936,74 @@ pub fn write_schema(model: &Model, document: &Document, file_name: &str, schema:
             Some((_, list)) => list.extend(&representations),
             None => by_layer.push((product.layer.clone(), representations)),
         }
+    }
+
+    // the openings of the walls: each voids its wall and is filled by what stands in it
+    for (k, v) in voids.iter().enumerate() {
+        let Some(&(wall, storey, (lo, hi))) = written.get(&v.host) else { continue };
+        // only where the wall is drawn: else the definition and what is shown went apart
+        let middle = v.origin + glam::DVec3::Z * (v.height / 2.0);
+        if middle.cmplt(lo - 0.05).any() || middle.cmpgt(hi + 0.05).any() {
+            continue;
+        }
+        let (_, storey_placement, elevation) = storeys[storey];
+        let q = |x: f64| fixed(units.quantise(x), units.decimals);
+        let point = f.add(format!("IFCCARTESIANPOINT(({},{},{}))", q(v.origin.x), q(v.origin.y), fixed(units.quantise(v.origin.z) - elevation, units.decimals)))?;
+        let up = f.add("IFCDIRECTION((0.,0.,1.))")?;
+        let along = f.add(format!("IFCDIRECTION(({},{},0.))", real(v.along.x), real(v.along.y)))?;
+        let axes = f.add(format!("IFCAXIS2PLACEMENT3D(#{point},#{up},#{along})"))?;
+        let placement = f.add(format!("IFCLOCALPLACEMENT(#{storey_placement},#{axes})"))?;
+        // a box from the middle of its bottom: its width along the wall, through the wall, up
+        let centre = f.add("IFCCARTESIANPOINT((0.,0.))")?;
+        let position = f.add(format!("IFCAXIS2PLACEMENT2D(#{centre},$)"))?;
+        let profile = f.add(format!("IFCRECTANGLEPROFILEDEF(.AREA.,$,#{position},{},{})", q(v.width), q(v.depth)))?;
+        let solid_at = f.add(format!("IFCAXIS2PLACEMENT3D(#{origin},$,$)"))?;
+        let solid = f.add(format!("IFCEXTRUDEDAREASOLID(#{profile},#{solid_at},#{up},{})", q(v.height)))?;
+        let representation = f.add(format!("IFCSHAPEREPRESENTATION(#{body_context},'Body','SweptSolid',(#{solid}))"))?;
+        let shape = f.add(format!("IFCPRODUCTDEFINITIONSHAPE($,$,(#{representation}))"))?;
+        let opening = f.add(format!(
+            "IFCOPENINGELEMENT({},$,'Opening',$,$,#{placement},#{shape},$,.OPENING.)",
+            text(&ids.get(&format!("opening/{}/{k}", v.host)))
+        ))?;
+        f.add(format!("IFCRELVOIDSELEMENT({},$,$,$,#{wall},#{opening})", text(&ids.get(&format!("voids/{}/{k}", v.host)))))?;
+        if let Some(&(filler, _, _)) = v.filler.and_then(|id| written.get(&id)) {
+            f.add(format!("IFCRELFILLSELEMENT({},$,$,$,#{opening},#{filler})", text(&ids.get(&format!("fills/{}/{k}", v.host)))))?;
+        }
+    }
+    // the grid lines, an IfcGrid of the lowest storey: one set of axes each way
+    let numbered = |g: &crate::model::GridLine| (g.b[1] - g.a[1]).abs() > (g.b[0] - g.a[0]).abs();
+    let (u_lines, v_lines): (Vec<&crate::model::GridLine>, Vec<&crate::model::GridLine>) = model.project.grids.iter().partition(|g| numbered(g));
+    if !u_lines.is_empty() && !v_lines.is_empty() {
+        let footprint = f.add(format!("IFCGEOMETRICREPRESENTATIONSUBCONTEXT('FootPrint','Model',*,*,*,*,#{context},$,.MODEL_VIEW.,$)"))?;
+        let (_, storey_placement, elevation) = storeys[0];
+        let q = |x: f32| fixed(units.quantise(x as f64), units.decimals);
+        let axes_of = |lines: &[&crate::model::GridLine], f: &mut Step<_>| -> io::Result<(Vec<u64>, Vec<u64>)> {
+            let (mut axes, mut curves) = (Vec::new(), Vec::new());
+            for g in lines {
+                let a = f.add(format!("IFCCARTESIANPOINT(({},{}))", q(g.a[0]), q(g.a[1])))?;
+                let b = f.add(format!("IFCCARTESIANPOINT(({},{}))", q(g.b[0]), q(g.b[1])))?;
+                let curve = f.add(format!("IFCPOLYLINE((#{a},#{b}))"))?;
+                axes.push(f.add(format!("IFCGRIDAXIS({},#{curve},.T.)", text(&g.name)))?);
+                curves.push(curve);
+            }
+            Ok((axes, curves))
+        };
+        let (u_axes, mut curves) = axes_of(&u_lines, &mut f)?;
+        let (v_axes, more) = axes_of(&v_lines, &mut f)?;
+        curves.extend(more);
+        let point = f.add(format!("IFCCARTESIANPOINT((0.,0.,{}))", fixed(-elevation, units.decimals)))?;
+        let axes = f.add(format!("IFCAXIS2PLACEMENT3D(#{point},$,$)"))?;
+        let placement = f.add(format!("IFCLOCALPLACEMENT(#{storey_placement},#{axes})"))?;
+        let set = f.add(format!("IFCGEOMETRICCURVESET({})", refs(&curves)))?;
+        let representation = f.add(format!("IFCSHAPEREPRESENTATION(#{footprint},'FootPrint','GeometricCurveSet',(#{set}))"))?;
+        let shape = f.add(format!("IFCPRODUCTDEFINITIONSHAPE($,$,(#{representation}))"))?;
+        let grid = f.add(format!(
+            "IFCGRID({},$,'Grid',$,$,#{placement},#{shape},{},{},$,.RECTANGULAR.)",
+            text(&ids.get("grid")),
+            refs(&u_axes),
+            refs(&v_axes)
+        ))?;
+        contained[0].push(grid);
     }
 
     // relations
@@ -1176,6 +1283,74 @@ fn map_conversion(model: &Model) -> Option<MapConversion> {
         height += a.z;
     }
     (east.is_finite() && north.is_finite() && height.is_finite()).then_some(MapConversion { crs, east, north, height, rotation })
+}
+
+/// Where a body reaches (world, metres): its lowest and highest corner.
+fn body_bounds(body: &Body, scale: f64) -> (glam::DVec3, glam::DVec3) {
+    let origin = glam::DVec3::from_array(body.origin.map(|v| v as f64));
+    let mut lo = glam::DVec3::splat(f64::MAX);
+    let mut hi = glam::DVec3::splat(f64::MIN);
+    for (_, set) in &body.sets {
+        for p in &set.points {
+            let w = (origin + glam::DVec3::from_array(p.map(|v| v as f64))) / scale;
+            lo = lo.min(w);
+            hi = hi.max(w);
+        }
+    }
+    (lo, hi)
+}
+
+/// Whether extrusion `e`, with `voided` taken out of it by its openings, is what `body` shows:
+/// the same volume (to half a percent) and reaching as far (to 2 mm) every way. Any joint, cut or
+/// opening it does not know of makes it another body, and the triangles are written instead.
+fn matches_triangles(e: &super::ifc_modelled::Extrusion, voided: f64, body: &Body, scale: f64) -> bool {
+    if body.sets.iter().any(|(_, s)| !s.closed()) {
+        return false;
+    }
+    let volume: f64 = body
+        .sets
+        .iter()
+        .flat_map(|(_, s)| s.triangles.iter().map(move |t| t.map(|i| glam::DVec3::from_array(s.points[i as usize].map(|v| v as f64)))))
+        .map(|[a, b, c]| a.dot(b.cross(c)))
+        .sum::<f64>()
+        / 6.0
+        / scale.powi(3);
+    let expected = e.volume() - voided;
+    let (lo, hi) = body_bounds(body, scale);
+    let (elo, ehi) = e.bounds();
+    expected > 0.0 && (volume - expected).abs() <= expected * 0.005 && lo.abs_diff_eq(elo, 0.002) && hi.abs_diff_eq(ehi, 0.002)
+}
+
+/// Writes extrusion `e` as an IfcExtrudedAreaSolid relative to the element's placement at
+/// `origin` (world): its profile an arbitrary closed one (with voids where it has holes).
+fn extruded_solid(f: &mut Step<impl Write>, e: &super::ifc_modelled::Extrusion, origin: glam::DVec3, decimals: u32) -> io::Result<u64> {
+    let q = |v: f64| fixed((v * 10f64.powi(decimals as i32)).round() as i64, decimals);
+    let mut ring = |points: &[glam::DVec2], f: &mut Step<_>| -> io::Result<u64> {
+        let mut ids = Vec::with_capacity(points.len() + 1);
+        for p in points {
+            ids.push(f.add(format!("IFCCARTESIANPOINT(({},{}))", q(p.x), q(p.y)))?);
+        }
+        // closed: back to its first point
+        ids.push(ids[0]);
+        f.add(format!("IFCPOLYLINE({})", refs(&ids)))
+    };
+    let outer = ring(&e.outer, f)?;
+    let profile = if e.holes.is_empty() {
+        f.add(format!("IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,$,#{outer})"))?
+    } else {
+        let mut inner = Vec::new();
+        for h in &e.holes {
+            inner.push(ring(h, f)?);
+        }
+        f.add(format!("IFCARBITRARYPROFILEDEFWITHVOIDS(.AREA.,$,#{outer},{})", refs(&inner)))?
+    };
+    let at = e.origin - origin;
+    let point = f.add(format!("IFCCARTESIANPOINT(({},{},{}))", q(at.x), q(at.y), q(at.z)))?;
+    let z = f.add(format!("IFCDIRECTION(({},{},{}))", real(e.z.x), real(e.z.y), real(e.z.z)))?;
+    let x = f.add(format!("IFCDIRECTION(({},{},{}))", real(e.x.x), real(e.x.y), real(e.x.z)))?;
+    let position = f.add(format!("IFCAXIS2PLACEMENT3D(#{point},#{z},#{x})"))?;
+    let up = f.add("IFCDIRECTION((0.,0.,1.))")?;
+    f.add(format!("IFCEXTRUDEDAREASOLID(#{profile},#{position},#{up},{})", q(e.depth)))
 }
 
 fn real(v: f64) -> String {

@@ -116,7 +116,7 @@ enum RibbonPart {
 /// From what width of the window the title bar names the products to come.
 const SOON_WIDTH: f32 = 1410.0;
 /// The products to come, named on the switch but not to be chosen yet.
-const SOON: [&str; 2] = ["FM", "Requirements"];
+const SOON: [&str; 1] = ["Requirements"];
 
 /// The side of a small ribbon button that shows its icon only (a narrow window).
 const RIBBON_ICON: f32 = 22.0;
@@ -401,6 +401,8 @@ pub enum Dialog {
     Cloud,
     /// A series of sheets exported at once: which, and as what.
     SheetsExport,
+    /// Work not saved would be lost: by closing the window (None) or project tab `i`.
+    Unsaved(Option<usize>),
 }
 
 /// The feedback form: what is written in it, and how sending it goes.
@@ -618,6 +620,11 @@ pub enum Msg {
     /// The window's native id (its `HWND` on Windows).
     NativeWindow(u64),
     CloseWindow,
+    /// Closes the window (None) or project tab `i` without saving what was not saved.
+    CloseAnyway(Option<usize>),
+    /// Saves the project shown from the dialog about work not saved, which closes; the window
+    /// stays, to be closed again once it is saved.
+    SaveAndStay,
     Update,
     /// The Planner's web frame loads its page again.
     PlannerReload,
@@ -1479,6 +1486,15 @@ impl Studio {
                 .enabled(app.section_on || app.plane.is_some()),
             // Docs: the project folder, and opening and linking the picked document
             Command::new("docs.folder", l.text("Projectmap", "Project folder"), go(Message::Docs(crate::app::DocsMessage::Choose))).icon(small("project.folder"), large("project.folder")),
+            // FM: readings read from a CSV file, and the model coloured by the temperatures (or off)
+            Command::new("fm.import", l.text("CSV inlezen", "Read CSV"), go(Message::Fm(crate::app::fm::Event::Import))).icon(small("file.import"), large("file.import")),
+            Command::new(
+                "fm.colour",
+                l.text("Kleuren op meetwaarde", "Colour by reading"),
+                go(Message::Fm(crate::app::fm::Event::Show(if app.fm.shown.is_some() { None } else { Some(crate::app::fm::SensorKind::Temperature) }))),
+            )
+            .icon(small("theme.light"), large("theme.light"))
+            .toggle(app.fm.shown.is_some()),
             Command::new("planner.reload", l.text("Vernieuwen", "Refresh"), Msg::PlannerReload).icon(small("view.reset-camera"), large("view.reset-camera")),
             Command::new("planner.browser", l.text("In browser openen", "Open in browser"), Msg::PlannerBrowser).icon(small("file.import"), large("file.import")),
             Command::new("gis.map", l.text("Kaart laden", "Load map"), go(Message::Gis(crate::app::GisMessage::Map(crate::app::MapMessage::Fetch(l))))).icon(small("view.top"), large("view.top")).detail(l.text("Legt de kaart die in het tabblad GIS rechts gekozen is onder het project: de achtergrondkaart, de luchtfoto of een eigen WMS-dienst.", "Lays the map chosen in the GIS tab on the right under the project: the background map, the aerial photograph or a WMS service of your own.")),
@@ -1931,6 +1947,26 @@ impl Studio {
     /// Closes project tab `i`: the tab beside it shows; the last one leaves an empty project.
     fn close_project(&mut self, i: usize) {
         let Some(&id) = self.tabs.get(i) else { return };
+        let app = if id == self.project { Some(&self.app) } else { self.parked.iter().find(|(p, _)| *p == id).map(|(_, a)| a) };
+        if app.is_some_and(|a| a.unsaved()) {
+            self.dialog = Some(Dialog::Unsaved(Some(i)));
+            return;
+        }
+        self.close_project_now(i);
+    }
+
+    /// The names of the projects open with work not saved: the one shown first.
+    fn unsaved_projects(&self) -> Vec<String> {
+        std::iter::once(&self.app)
+            .chain(self.parked.iter().map(|(_, a)| a))
+            .filter(|a| a.unsaved())
+            .map(|a| a.model.as_ref().map_or_else(|| "model.ifcx".to_string(), |m| m.file_name()))
+            .collect()
+    }
+
+    /// Closes project tab `i`, whatever it holds.
+    fn close_project_now(&mut self, i: usize) {
+        let Some(&id) = self.tabs.get(i) else { return };
         if self.tabs.len() == 1 {
             self.app = self.app.new_project();
             return;
@@ -1998,6 +2034,7 @@ impl Studio {
         *self.commands_kept.get_mut().unwrap_or_else(|e| e.into_inner()) = None;
         // the Viewer only looks at a view: its bar has no tools to dimension, write or cut
         self.app.set_viewer_mode(self.product() == Product::Viewer);
+        self.app.fm.lang = self.l();
         #[cfg(all(feature = "validator", not(target_arch = "wasm32")))]
         {
             self.app.collab.language = self.l();
@@ -2462,7 +2499,24 @@ impl Studio {
                 crate::dpi_drag::install(_raw);
             }
             // the viewer changes no files, so closing needs no questions
-            Msg::CloseWindow => return iced::exit(),
+            Msg::CloseWindow => {
+                // work not saved is asked about first
+                if !self.unsaved_projects().is_empty() {
+                    self.dialog = Some(Dialog::Unsaved(None));
+                    self.backstage = false;
+                    return Task::none();
+                }
+                return iced::exit();
+            }
+            Msg::CloseAnyway(None) => return iced::exit(),
+            Msg::SaveAndStay => {
+                self.dialog = None;
+                return self.update(Msg::App(Message::Save));
+            }
+            Msg::CloseAnyway(Some(i)) => {
+                self.dialog = None;
+                self.close_project_now(i);
+            }
             Msg::Update => {
                 if let Some(available) = &self.update {
                     if let Err(e) = upd::open_installer(available) {
@@ -2969,6 +3023,11 @@ impl Studio {
             RibbonPage::Infra | RibbonPage::Civil | RibbonPage::Rail => vec![(l.text("Bestand", "File"), vec![large("file.open"), smalls(&["file.add", "file.save-as"])])],
             // the page itself is the program; the ribbon only loads it again or opens it outside
             RibbonPage::Planner => vec![("Planner", vec![large("planner.reload"), large("planner.browser")])],
+            // FM: the models, the readings read in, and the model coloured by them
+            RibbonPage::Fm => vec![
+                (l.text("Bestand", "File"), vec![large("file.open"), smalls(&["file.add", "file.save-as"])]),
+                (l.text("Meetwaarden", "Readings"), vec![large("fm.import"), large("fm.colour")]),
+            ],
             // the ground under the project: what was investigated
             RibbonPage::Geo => vec![
                 (l.text("Bestand", "File"), vec![large("file.open"), smalls(&["file.add", "file.save-as"])]),
@@ -3202,7 +3261,7 @@ impl Studio {
             // each product starts its own way: open a model, make one, or open the project's
             let open = |kind| cm::button(look, &self.command("file.open"), kind, D::Regular);
             let (icon, title, explanation, action): (_, _, _, Element<'_, Msg>) = match self.product() {
-                Product::Viewer | Product::Docs | Product::Gis | Product::Library | Product::Ifcx | Product::Planner => (
+                Product::Viewer | Product::Docs | Product::Gis | Product::Library | Product::Ifcx | Product::Planner | Product::Fm => (
                     "project.folder",
                     l.text("Geen model geopend", "No model open"),
                     formats_hint(l),
@@ -3331,6 +3390,8 @@ impl Studio {
             }
             // Docs: the folders of the project folder
             Product::Docs => (l.text("Projectmap", "Project folder"), Self::pane(self.app.docs_tree_pane(palette(look), l))),
+            // FM: the installations, the sensors and their readings
+            Product::Fm => ("Facility management", Self::pane(self.app.fm_pane(look, palette(look), l))),
             // Library: the sources of library content, and the countries
             Product::Library => (l.text("Bibliotheken", "Libraries"), Self::pane(self.app.libraries_pane(palette(look), l))),
             Product::Viewer | Product::Modeller | Product::Pointcloud | Product::Analysis | Product::Gis | Product::Ifcx | Product::Planner => (l.text("Verkenner", "Explorer"), Self::pane(self.app.explorer_body(palette(look), l))),
@@ -3575,6 +3636,36 @@ impl Studio {
                     vec![w::button(look, l.text("Sluiten", "Close"), K::Primary, D::Regular, None, Some(Msg::Dialog(None)))],
                     true,
                 )
+            }
+            Dialog::Unsaved(tab) => {
+                // the tab closed, or every project with work not saved when the window closes
+                let names = match tab {
+                    Some(i) => {
+                        let id = self.tabs.get(i).copied();
+                        let app = if id == Some(self.project) { Some(&self.app) } else { self.parked.iter().find(|(p, _)| Some(*p) == id).map(|(_, a)| a) };
+                        app.and_then(|a| a.model.as_ref()).map(|m| vec![m.file_name()]).unwrap_or_default()
+                    }
+                    None => self.unsaved_projects(),
+                };
+                // Save writes the project shown; another one is saved from its own tab
+                let shown = match tab {
+                    Some(i) => self.tabs.get(i) == Some(&self.project),
+                    None => self.app.unsaved(),
+                };
+                let body = column![
+                    w::body(look, l.text("Er zijn wijzigingen die nog niet zijn opgeslagen:", "There are changes that are not saved yet:")),
+                    w::body(look, names.join(", ")),
+                    w::secondary(look, l.text("Niet opslaan gooit ze weg.", "Don't save throws them away.")),
+                ]
+                .spacing(6);
+                let mut buttons = vec![
+                    w::button(look, l.text("Annuleren", "Cancel"), K::Quiet, D::Regular, None, Some(Msg::Dialog(None))),
+                    w::button(look, l.text("Niet opslaan", "Don't save"), K::Secondary, D::Regular, None, Some(Msg::CloseAnyway(tab))),
+                ];
+                if shown {
+                    buttons.push(w::button(look, l.text("Opslaan…", "Save…"), K::Primary, D::Regular, None, Some(Msg::SaveAndStay)));
+                }
+                w::dialog(look, l.text("Niet opgeslagen", "Not saved"), close_icon, Some(Msg::Dialog(None)), body.into(), None, buttons, false)
             }
             Dialog::DesktopOnly(format) => w::dialog(
                 look,
@@ -4285,6 +4376,36 @@ mod tests {
     }
 
     #[test]
+    fn closing_with_work_not_saved_asks_first_and_saving_it_lets_it_close() {
+        let mut studio = Studio::new(App::default());
+        studio.set_product(Product::Modeller);
+        let _ = studio.update(Msg::App(Message::NewModel("Level 0")));
+        // a new model, nothing done: it closes at once
+        assert!(studio.unsaved_projects().is_empty());
+        let _ = studio.update(Msg::CloseWindow);
+        assert!(studio.dialog.is_none());
+        // a grid line drawn: closing asks
+        studio.app.modeller_insert_grid_for_test();
+        assert_eq!(studio.unsaved_projects(), ["model.ifcx"]);
+        let _ = studio.update(Msg::CloseWindow);
+        assert_eq!(studio.dialog, Some(Dialog::Unsaved(None)));
+        let _ = studio.update(Msg::Dialog(None));
+        // closing its tab asks too, and Don't save closes it
+        let _ = studio.update(Msg::CloseProject(0));
+        assert_eq!(studio.dialog, Some(Dialog::Unsaved(Some(0))));
+        let _ = studio.update(Msg::CloseAnyway(Some(0)));
+        assert!(studio.dialog.is_none() && studio.unsaved_projects().is_empty());
+        // saved as IFCX, it closes without asking
+        studio.app.modeller_insert_grid_for_test();
+        studio.app.saved_to_for_test(std::path::Path::new("project.ifcx"));
+        assert!(studio.unsaved_projects().is_empty());
+        // an IFC 4 export is no save of the project
+        studio.app.modeller_insert_grid_for_test();
+        studio.app.saved_to_for_test(std::path::Path::new("export.ifc"));
+        assert_eq!(studio.unsaved_projects().len(), 1);
+    }
+
+    #[test]
     fn new_from_the_file_page_closes_it_on_the_new_model() {
         let mut studio = Studio::new(App::default());
         studio.set_product(Product::Modeller);
@@ -4292,6 +4413,8 @@ mod tests {
         let _ = studio.update(Msg::App(Message::NewModel("Level 0")));
         assert!(!studio.backstage, "the new model is shown, not the file page");
         assert!(studio.app.model.is_some());
+        // its first level has its floor plan to draw in
+        assert_eq!(studio.app.document.plans().len(), 1);
     }
 
     #[test]

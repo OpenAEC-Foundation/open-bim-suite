@@ -1549,7 +1549,8 @@ impl canvas::Program<Message> for PaperDrawing {
             }
             super::marks::draw_detail_lines(&mut frame, &placed.lines, &placed.pens, placed.crop, ink, &|q| Some(fit.point(self.to_paper(i, q))), (fit.scale / 1000.0) as f32);
             for d in &placed.datums {
-                let (a, b) = (fit.point(self.to_paper(i, d.a)), fit.point(self.to_paper(i, d.b)));
+                let (da, db) = if d.level.is_none() { crate::annotations::extended_2d(d.a, d.b) } else { (d.a, d.b) };
+                let (a, b) = (fit.point(self.to_paper(i, da)), fit.point(self.to_paper(i, db)));
                 super::marks::draw_datum(&mut frame, a, b, &d.name, d.level.is_some(), (fit.scale / 1000.0) as f32, &placed.rules.grid, ink, Color::WHITE, super::marks::GridMark::default());
             }
             for (k, note) in placed.notes.iter().enumerate() {

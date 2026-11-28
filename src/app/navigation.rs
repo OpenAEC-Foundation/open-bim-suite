@@ -224,7 +224,16 @@ impl App {
         self.nav.held = None;
     }
 
+    /// Whether the view shown looks one way only: a floor plan, a section or an elevation. A drag
+    /// that would turn it moves it instead, and it has no view cube.
+    pub(super) fn fixed_view(&self) -> bool {
+        self.active_plan.as_deref().is_some_and(|p| self.document.plan(p).is_some() || self.document.section(p).is_some())
+    }
+
     pub(super) fn orbit_drag(&mut self, dx: f32, dy: f32) {
+        if self.fixed_view() {
+            return self.pan_drag(dx, dy, self.viewport_size.1.max(1.0));
+        }
         self.anim = None;
         let (dx, dy) = (dx * self.turn_scale(), dy * self.turn_scale());
         match self.nav.pivot {
