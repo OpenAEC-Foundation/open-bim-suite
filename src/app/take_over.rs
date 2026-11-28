@@ -1,4 +1,12 @@
-//! Taking over a wall of an opened file (Revit) as an editable wall, in the Modeller.
+//! Taking over a wall, a beam or a column of an opened file as an editable element, in the
+//! Modeller.
+//!
+//! A beam, a column or a brace (IfcBeam, IfcColumn, IfcMember, or the structural categories of a
+//! file) becomes an editable member made out of its mesh ([`member_from_mesh`]): its axis along
+//! its longest way (upright for a column), its profile the steel profile its type names (HEA
+//! 200, IPE 300, ...) else the rectangle of its section. It is taken over only when the member
+//! made is what the mesh is: the same volume (to 2 %) and reaching as far (to 5 mm) every way;
+//! else it stays the file's.
 //!
 //! A wall the file defines well enough ([`SourceWall`]: straight, with a thickness, a height, and
 //! doors and windows whose extent can be told) has grips when it is selected in the Modeller, as a
@@ -25,8 +33,8 @@ use super::{App, ModelEntry};
 use crate::model::Model;
 use crate::selection::Pickable;
 use bim_core::element::PlanarForm;
-use bim_core::{Element, ElementId, PlanarDef, Shape};
-use glam::DVec2;
+use bim_core::{Element, ElementId, LinearDef, PlanarDef, ProfileDef, Shape};
+use glam::{DVec2, DVec3};
 use std::sync::Arc;
 
 /// A wall's mesh moves its axis only when it is this close to its type's thickness (metres).
@@ -51,14 +59,149 @@ pub(crate) fn across_mesh(model: &Model, id: u64, start: DVec2, end: DVec2) -> O
     range
 }
 
+/// The classes and file categories of members: what a beam, a column or a brace of a file is.
+fn is_member(class: &str) -> Option<bool> {
+    let c = class.trim().to_ascii_lowercase();
+    // Some(true): upright (a column)
+    match c.as_str() {
+        "ifccolumn" | "ifccolumnstandardcase" | "structural columns" | "columns" => Some(true),
+        "ifcbeam" | "ifcbeamstandardcase" | "ifcmember" | "ifcmemberstandardcase" | "structural framing" => Some(false),
+        _ => None,
+    }
+}
+
+/// The steel profile a type or name names: its designation (HEA 200, IPE 300) as the library's
+/// table has it.
+fn named_profile(names: &[String]) -> Option<ProfileDef> {
+    for name in names {
+        let upper = name.to_ascii_uppercase();
+        let words: Vec<&str> = upper.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).collect();
+        for pair in words.windows(2) {
+            if pair[0].chars().all(|c| c.is_ascii_alphabetic()) && pair[1].chars().all(|c| c.is_ascii_digit()) {
+                if let Some(p) = ProfileDef::steel(&format!("{} {}", pair[0], pair[1])) {
+                    return Some(p);
+                }
+            }
+        }
+        // written together: HEA200
+        for word in &words {
+            let split = word.find(|c: char| c.is_ascii_digit());
+            if let Some(i) = split.filter(|&i| i > 0) {
+                if let Some(p) = ProfileDef::steel(&format!("{} {}", &word[..i], &word[i..])) {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The member element `id` of `model` is, made out of its mesh: its axis along its longest way
+/// (upright when `upright`), from end to end of the mesh; its profile `named` where its type names
+/// one, else the rectangle of its section. None when the member made is not what the mesh is:
+/// another volume (by more than 2 %, where the mesh is closed) or reaching farther or less far
+/// (by more than 5 mm) any way.
+pub(crate) fn member_from_mesh(model: &Model, id: u64, upright: bool, named: Option<ProfileDef>) -> Option<LinearDef> {
+    let mut points: Vec<DVec3> = Vec::new();
+    let mut triangles: Vec<[DVec3; 3]> = Vec::new();
+    for (layer, first, count) in model.element_ranges(id) {
+        let layer = &model.layers[layer];
+        let at = |i: u32| layer.positions.get(3 * i as usize..3 * i as usize + 3).map(|p| DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64));
+        for t in layer.indices.get(first as usize..(first + count) as usize)?.chunks_exact(3) {
+            let corners = [at(t[0])?, at(t[1])?, at(t[2])?];
+            points.extend(corners);
+            triangles.push(corners);
+        }
+    }
+    if points.len() < 6 {
+        return None;
+    }
+    // each corner once, however many triangles share it
+    let mut seen = std::collections::HashSet::new();
+    points.retain(|p| seen.insert((*p * 1e5).round().as_i64vec3().to_array()));
+    let mean = points.iter().copied().sum::<DVec3>() / points.len() as f64;
+    // its way: upright, else the way its points spread most (by their covariance, in plan for a
+    // beam that lies near level)
+    let way = if upright {
+        DVec3::Z
+    } else {
+        let mut c = [[0.0f64; 3]; 3];
+        for p in &points {
+            let d = (*p - mean).to_array();
+            for i in 0..3 {
+                for j in 0..3 {
+                    c[i][j] += d[i] * d[j];
+                }
+            }
+        }
+        let mut v = DVec3::new(1.0, 0.7, 0.3);
+        for _ in 0..60 {
+            let next = DVec3::new(c[0][0] * v.x + c[0][1] * v.y + c[0][2] * v.z, c[1][0] * v.x + c[1][1] * v.y + c[1][2] * v.z, c[2][0] * v.x + c[2][1] * v.y + c[2][2] * v.z);
+            v = next.try_normalize()?;
+        }
+        // a way within a hair of an axis or of level lies on it
+        let v = DVec3::new(if v.x.abs() < 1e-5 { 0.0 } else { v.x }, if v.y.abs() < 1e-5 { 0.0 } else { v.y }, if v.z.abs() < 1e-5 { 0.0 } else { v.z }).normalize();
+        // pointing the way its numbers grow, so a beam runs from its lower end
+        if v.x + v.y * 1e-3 + v.z * 1e-6 < 0.0 { -v } else { v }
+    };
+    // its ends, and the middle of its section
+    let along: Vec<f64> = points.iter().map(|p| (*p - mean).dot(way)).collect();
+    let (t0, t1) = along.iter().fold((f64::MAX, f64::MIN), |(lo, hi), &t| (lo.min(t), hi.max(t)));
+    let frame = bim_core::element::linear_axes(&LinearDef { start: mean, end: mean + way, profile: ProfileDef::Rectangle { width: 1.0, height: 1.0 }, roll: 0.0, role: Default::default() }).ok()?.0;
+    let across: Vec<DVec2> = points.iter().map(|p| DVec2::new((*p - mean).dot(frame.x), (*p - mean).dot(frame.y))).collect();
+    let (lo, hi) = across.iter().fold((DVec2::splat(f64::MAX), DVec2::splat(f64::MIN)), |(lo, hi), q| (lo.min(*q), hi.max(*q)));
+    let middle = (lo + hi) / 2.0;
+    let centre = mean + frame.x * middle.x + frame.y * middle.y;
+    let round = |p: DVec3| (p / 1e-4).round() * 1e-4;
+    let (start, end) = (round(centre + way * t0), round(centre + way * t1));
+    let size = hi - lo;
+    let rectangle = ProfileDef::Rectangle { width: (size.x / 1e-4).round() * 1e-4, height: (size.y / 1e-4).round() * 1e-4 };
+    // the mesh's volume, where it is closed, and where it reaches
+    let closed = {
+        let mut edges: std::collections::HashMap<([i64; 3], [i64; 3]), i32> = std::collections::HashMap::new();
+        let key = |p: DVec3| (p * 1e4).round().as_i64vec3().to_array();
+        for t in &triangles {
+            for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                let (a, b) = (key(a), key(b));
+                *edges.entry(if a < b { (a, b) } else { (b, a) }).or_default() += 1;
+            }
+        }
+        !edges.is_empty() && edges.values().all(|&n| n == 2)
+    };
+    let volume = triangles.iter().map(|[a, b, c]| (*a - mean).dot((*b - mean).cross(*c - mean))).sum::<f64>().abs() / 6.0;
+    let (mlo, mhi) = points.iter().fold((DVec3::splat(f64::MAX), DVec3::splat(f64::MIN)), |(lo, hi), p| (lo.min(*p), hi.max(*p)));
+    // the named profile turned either way, else the rectangle: the first the kernel makes as the mesh is
+    let grid = bim_core::TileGrid::default();
+    let candidates = named.into_iter().flat_map(|p| [(p.clone(), 0.0), (p, std::f64::consts::FRAC_PI_2)]).chain(std::iter::once((rectangle, 0.0)));
+    for (profile, roll) in candidates {
+        let member = LinearDef { start, end, profile, roll, role: Default::default() };
+        let mut alone = bim_core::Model::new(grid);
+        let Ok(made) = alone.add(Element::in_project(&grid, "", None, Shape::Linear(member.clone()))) else { continue };
+        let Ok(parts) = alone.evaluate(made) else { continue };
+        let solid_volume: f64 = parts.iter().map(|p| p.solid.volume()).sum();
+        let (mut slo, mut shi) = (DVec3::splat(f64::MAX), DVec3::splat(f64::MIN));
+        for part in &parts {
+            let (a, b) = part.solid.bounds();
+            let origin = grid.origin(part.tile);
+            slo = slo.min(a + origin);
+            shi = shi.max(b + origin);
+        }
+        let same_volume = !closed || (solid_volume - volume).abs() <= volume * 0.02;
+        if same_volume && slo.abs_diff_eq(mlo, 0.005) && shi.abs_diff_eq(mhi, 0.005) {
+            return Some(member);
+        }
+    }
+    None
+}
+
 /// A selected wall of an opened file, as it would be taken over.
 pub(super) struct Source {
     /// Its entry in `App::models`; `None` while the scene is that file alone.
     entry: Option<usize>,
     /// Its id in that file.
     id: u64,
-    /// The editable wall it becomes (scene coordinates).
-    pub wall: PlanarDef,
+    /// The editable element it becomes (scene coordinates): a wall, or a member.
+    pub shape: Shape,
     /// The name of its base level.
     level: Option<String>,
     /// What the new wall is named after: its type, as the file names it, else "Wall".
@@ -88,7 +231,17 @@ impl App {
             }
             (Some(key.model as usize), key.source, entry.model.clone())
         };
-        let w = file.project.walls.get(&id)?;
+        let Some(w) = file.project.walls.get(&id) else {
+            // a beam, a column or a brace: made out of its mesh, when it is what the mesh is
+            let props = scene.element_props(shown);
+            let said = |k: &str| props.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone()).filter(|v| !v.trim().is_empty());
+            let class = said("IfcType").or_else(|| said("category")).or_else(|| scene.layers.get(scene.element_ranges(shown).first()?.0).map(|l| l.name.clone()))?;
+            let upright = is_member(&class)?;
+            let names: Vec<String> = ["type", "ObjectType", "Type", "Name", "family"].iter().filter_map(|k| said(k)).collect();
+            let member = member_from_mesh(scene, shown, upright, named_profile(&names))?;
+            let name = said("type").unwrap_or_else(|| if upright { "Column".into() } else { "Beam".into() });
+            return Some(Source { entry, id, shape: Shape::Linear(member), level: said("level"), name, layers: Vec::new(), exterior_left: false });
+        };
         // the axis moves onto the middle of the wall's mesh when that lies beside it
         let (mut start, mut end) = (w.start, w.end);
         if let Some((lo, hi)) = across_mesh(scene, shown, w.start, w.end) {
@@ -100,9 +253,9 @@ impl App {
                 end += left * middle;
             }
         }
-        let wall = PlanarDef { form: PlanarForm::Wall { start, end, base: w.base, height: w.height }, thickness: w.thickness, openings: w.openings.clone(), build_up: None };
+        let wall = Shape::Planar(PlanarDef { form: PlanarForm::Wall { start, end, base: w.base, height: w.height }, thickness: w.thickness, openings: w.openings.clone(), build_up: None });
         let name = scene.element_props(shown).into_iter().find(|(k, _)| k == "type").map(|(_, v)| v).filter(|v| !v.is_empty()).unwrap_or_else(|| "Wall".into());
-        Some(Source { entry, id, wall, level: w.level.clone(), name, layers: w.layers.clone(), exterior_left: w.exterior_left })
+        Some(Source { entry, id, shape: wall, level: w.level.clone(), name, layers: w.layers.clone(), exterior_left: w.exterior_left })
     }
 
     /// Shows every opened file a wall was taken over from without the walls `taken` names (the
@@ -139,15 +292,19 @@ impl App {
     /// changes and the banner says why.
     pub(super) fn take_over(&mut self, source: Source) -> Option<ElementId> {
         let grid = self.modeller.model.grid;
-        // the file's layers as a wall type of the library; its exterior comes on the right
-        let mut wall = source.wall;
-        if let Some(build_up) = super::modeller::file_types::file_build_up(&mut self.library, &source.name, wall.total_thickness(), &source.layers) {
-            if source.exterior_left {
-                wall = super::modeller::file_types::turned_round(wall);
+        let shape = match source.shape {
+            // the file's layers as a wall type of the library; its exterior comes on the right
+            Shape::Planar(mut wall) => {
+                if let Some(build_up) = super::modeller::file_types::file_build_up(&mut self.library, &source.name, wall.total_thickness(), &source.layers) {
+                    if source.exterior_left {
+                        wall = super::modeller::file_types::turned_round(wall);
+                    }
+                    wall = wall.with_build_up(Some(build_up));
+                }
+                Shape::Planar(wall)
             }
-            wall = wall.with_build_up(Some(build_up));
-        }
-        let shape = Shape::Planar(wall);
+            other => other,
+        };
         // the kernel must make the wall before anything changes
         if let Err(refusal) = bim_core::Model::new(grid).add(Element::in_project(&grid, "", None, shape.clone())) {
             self.modeller.refusal = Some(refusal);
@@ -246,6 +403,63 @@ mod tests {
         let (sx, sy) = app.on_screen(DVec3::new(x, y, 0.0), 1000.0, 800.0).unwrap();
         let _ = app.update(Message::Edit(EditEvent::Drag { x: sx, y: sy, width: 1000.0, height: 800.0 }));
         let _ = app.update(Message::Edit(EditEvent::Release));
+    }
+
+    /// A file with a concrete beam (21) along x, a column (22) and a floor (23).
+    fn frame() -> Arc<Model> {
+        let with = |mut layer: crate::model::Layer, props: &str| {
+            let id = layer.elements[0].0;
+            layer.name = "Structure".into();
+            layer.props = vec![(id, props.into())];
+            layer
+        };
+        let layers = vec![
+            with(boxed(21, [0.0, 5.0, 2.5], [6.0, 5.3, 3.0]), r#"{"IfcType":"IfcBeam","type":"Concrete beam 300x500"}"#),
+            with(boxed(22, [10.0, 0.0, 0.0], [10.4, 0.4, 3.0]), r#"{"IfcType":"IfcColumn","type":"Column 400x400"}"#),
+            with(boxed(23, [0.0, 0.0, -0.2], [6.0, 4.0, 0.0]), r#"{"IfcType":"IfcSlab","type":"Floor 200"}"#),
+        ];
+        let mut model = Model::new(std::path::PathBuf::from("C:/work/frame.ifc"), "IFC", layers);
+        model.project.levels = vec![("Level 0".into(), 0.0)];
+        Arc::new(model)
+    }
+
+    #[test]
+    fn a_beam_and_a_column_of_the_file_are_made_out_of_their_meshes_and_a_floor_is_not() {
+        let model = frame();
+        // the beam: along x through the middle of its section, 0.3 wide and 0.5 high
+        let beam = member_from_mesh(&model, 21, false, None).expect("a beam");
+        assert!(beam.start.abs_diff_eq(DVec3::new(0.0, 5.15, 2.75), 1e-4) && beam.end.abs_diff_eq(DVec3::new(6.0, 5.15, 2.75), 1e-4), "{beam:?}");
+        assert_eq!(beam.profile, ProfileDef::Rectangle { width: 0.3, height: 0.5 });
+        // the column: upright, from its foot to its top
+        let column = member_from_mesh(&model, 22, true, None).expect("a column");
+        assert!(column.start.abs_diff_eq(DVec3::new(10.2, 0.2, 0.0), 1e-4) && column.end.abs_diff_eq(DVec3::new(10.2, 0.2, 3.0), 1e-4), "{column:?}");
+        // a steel profile its type names, as the library's table has it
+        assert!(named_profile(&["HEA 200".into()]).is_some() && named_profile(&["Beam IPE300 S355".into()]).is_some());
+        assert!(named_profile(&["Concrete beam 300x500".into()]).is_none());
+        // a profile that is not what the mesh is: not taken
+        assert!(member_from_mesh(&model, 21, false, named_profile(&["HEA 200".into()])).is_some(), "the rectangle, when the named profile does not fit");
+        // in the Modeller: the beam has grips and a drag takes it over; the floor stays the file's
+        let mut app = App::default();
+        app.set_model(frame());
+        app.viewport_size = (1000.0, 800.0);
+        app.camera.set_preset(crate::viewport::camera::ViewPreset::Top);
+        app.camera.ortho = true;
+        app.camera.target = Vec3::ZERO;
+        app.camera.distance = 40.0 / (app.camera.fov_y * 0.5).tan();
+        app.modeller.in_modeller = true;
+        select(&mut app, 23);
+        assert!(app.grip_overlay(Color::BLACK, Color::WHITE).is_none(), "a floor is no member");
+        select(&mut app, 21);
+        let grips = app.grip_overlay(Color::BLACK, Color::WHITE).expect("the beam's grips");
+        assert_eq!(grips.points.len(), 3);
+        // pressed on a grip: taken over, as the editable beam it is, and the file's mesh of it leaves
+        let _ = app.update(Message::Edit(EditEvent::Press { index: 1, add: false }));
+        let _ = app.update(Message::Edit(EditEvent::Release));
+        let members: Vec<LinearDef> = app.modeller.model.iter().filter_map(|e| match e.shape_in_project(&app.modeller.model.grid) { Shape::Linear(l) => Some(l), _ => None }).collect();
+        assert_eq!(members.len(), 1, "taken over as an editable beam");
+        assert!(members[0].start.abs_diff_eq(DVec3::new(0.0, 5.15, 2.75), 1e-4) && members[0].end.abs_diff_eq(DVec3::new(6.0, 5.15, 2.75), 1e-4), "{:?}", members[0]);
+        assert_eq!(members[0].profile, ProfileDef::Rectangle { width: 0.3, height: 0.5 });
+        assert_eq!(app.modeller.taken.len(), 1);
     }
 
     #[test]

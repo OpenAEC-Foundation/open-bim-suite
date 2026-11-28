@@ -62,7 +62,7 @@ impl App {
         }
         let shape = match self.gripped() {
             Some(id) => self.modeller.model.get(id)?.shape_in_project(&self.modeller.model.grid),
-            None => Shape::Planar(self.source_gripped()?.wall),
+            None => self.source_gripped()?.shape,
         };
         let (mut points, _) = edit_points(&shape);
         points.push((points[0] + points[1]) / 2.0);
@@ -88,7 +88,7 @@ impl App {
         if self.gripped().is_none() {
             // a wall of an opened file: taken over first, then dragged as a modelled wall
             let Some(source) = self.source_gripped() else { return };
-            let (shown, _) = edit_points(&Shape::Planar(source.wall.clone()));
+            let (shown, _) = edit_points(&source.shape);
             let Some(taken) = self.take_over(source) else { return };
             // taken over with its ends changed round, the grip pressed is its other end
             let ends = self.modeller.model.get(taken).map(|e| edit_points(&e.shape_in_project(&self.modeller.model.grid)).0);
